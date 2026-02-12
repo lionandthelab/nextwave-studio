@@ -1,0 +1,37 @@
+# FastAPI & Server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+websockets==14.1
+sse-starlette==2.2.1
+
+# LLM & RAG
+langchain==0.3.14
+langchain-openai==0.3.0
+langchain-community==0.3.14
+openai==1.58.1
+chromadb==0.5.23
+faiss-cpu==1.9.0.post1
+
+# PDF Parsing
+pymupdf==1.25.1
+unstructured==0.16.12
+
+# 3D / CAD Processing
+trimesh==4.5.3
+numpy==2.2.1
+numpy-stl==3.1.2
+
+# Utilities
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+aiofiles==24.1.0
+httpx==0.28.1
+Pillow==11.1.0
+imageio==2.36.1
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.0
+httpx==0.28.1

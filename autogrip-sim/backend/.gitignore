@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+.venv/
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Uploads & Generated Files
+uploads/cad/*
+uploads/manuals/*
+uploads/results/*
+!uploads/cad/.gitkeep
+!uploads/manuals/.gitkeep
+!uploads/results/.gitkeep
+
+# Vector Store
+chroma_db/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker/sim_scripts/__pycache__/

@@ -1,0 +1,90 @@
+version: "3.9"
+
+services:
+  # Main backend application
+  backend:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile
+    container_name: autogrip-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/chroma_db:/app/chroma_db
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - ISAAC_SIM_HEADLESS=true
+      - ISAAC_SIM_ENDPOINT=http://isaac-sim:9090
+      - LOG_LEVEL=INFO
+    env_file:
+      - ./backend/.env
+    depends_on:
+      isaac-sim:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - autogrip-net
+
+  # NVIDIA Isaac Sim container (requires NVIDIA GPU + nvidia-docker)
+  isaac-sim:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.isaac-sim
+    container_name: autogrip-isaac-sim
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+    volumes:
+      - ./backend/uploads/cad:/autogrip-sim/cad_files
+      - ./backend/uploads/results:/autogrip-sim/results
+    ports:
+      - "9090:9090"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s  # Isaac Sim takes time to initialize
+    restart: unless-stopped
+    networks:
+      - autogrip-net
+
+  # Development mode: backend only (no Isaac Sim, uses MockSimulator)
+  backend-dev:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile
+    container_name: autogrip-backend-dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - ISAAC_SIM_HEADLESS=true
+      - USE_MOCK_SIMULATOR=true
+      - LOG_LEVEL=DEBUG
+    env_file:
+      - ./backend/.env
+    restart: unless-stopped
+    networks:
+      - autogrip-net
+    profiles:
+      - dev
+
+networks:
+  autogrip-net:
+    driver: bridge

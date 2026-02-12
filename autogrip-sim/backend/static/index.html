@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoGrip-Sim Engine</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <svg class="logo-icon" width="32" height="32" viewBox="0 0 32 32" fill="none">
+          <path d="M16 2C8.268 2 2 8.268 2 16s6.268 14 14 14 14-6.268 14-14S23.732 2 16 2z" stroke="#58a6ff" stroke-width="1.5" fill="none"/>
+          <path d="M10 20v-6a2 2 0 012-2h0a2 2 0 012 2v6M14 17h-4" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M18 20v-6a2 2 0 012-2h0a2 2 0 012 2v6M22 17h-4" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M12 12V9a4 4 0 018 0v3" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+          <circle cx="16" cy="6" r="1.5" fill="#58a6ff"/>
+        </svg>
+        <h1 class="app-title">AutoGrip-Sim Engine</h1>
+      </div>
+      <div class="header-right">
+        <span class="session-badge" id="sessionBadge">No Active Session</span>
+      </div>
+    </header>
+
+    <!-- Main Grid -->
+    <main class="main-grid">
+      <!-- Left Panel - Settings -->
+      <aside class="panel panel-settings" id="settingsPanel">
+        <div class="panel-header">
+          <h2 class="panel-title">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 0a8.2 8.2 0 00-2.5.4.75.75 0 00-.4 1.1l.6 1a5.6 5.6 0 00-1.3 1.3l-1-.6a.75.75 0 00-1.1.4 8.2 8.2 0 000 5 .75.75 0 001.1.4l1-.6c.4.5.8.9 1.3 1.3l-.6 1a.75.75 0 00.4 1.1 8.2 8.2 0 005 0 .75.75 0 00.4-1.1l-.6-1a5.6 5.6 0 001.3-1.3l1 .6a.75.75 0 001.1-.4 8.2 8.2 0 000-5 .75.75 0 00-1.1-.4l-1 .6A5.6 5.6 0 0010 3l.6-1a.75.75 0 00-.4-1.1A8.2 8.2 0 008 0zM8 11a3 3 0 110-6 3 3 0 010 6z"/>
+            </svg>
+            Configuration
+          </h2>
+        </div>
+        <div class="panel-body">
+          <!-- CAD Upload -->
+          <div class="upload-section">
+            <label class="upload-label">CAD File</label>
+            <div class="upload-zone" id="cadDropZone" data-type="cad">
+              <div class="upload-zone-content" id="cadUploadContent">
+                <svg class="upload-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="1.5">
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span class="upload-text">Drop CAD file here or click to browse</span>
+                <span class="upload-hint">.stl, .obj, .step</span>
+              </div>
+              <div class="upload-info hidden" id="cadFileInfo">
+                <div class="file-badge">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke-linecap="round"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                  </svg>
+                  <span class="file-name" id="cadFileName"></span>
+                  <button class="file-remove" id="cadRemoveBtn" title="Remove file">&times;</button>
+                </div>
+                <div class="file-meta">
+                  <span id="cadFileSize"></span>
+                  <span class="file-type-tag" id="cadFileType"></span>
+                </div>
+                <div class="file-dimensions hidden" id="cadDimensions">
+                  <span class="dim-label">Dimensions:</span>
+                  <span class="dim-values" id="cadDimValues"></span>
+                </div>
+              </div>
+              <div class="upload-progress hidden" id="cadProgress">
+                <div class="progress-bar"><div class="progress-fill" id="cadProgressFill"></div></div>
+                <span class="progress-text">Uploading...</span>
+              </div>
+              <input type="file" id="cadFileInput" accept=".stl,.obj,.step,.stp" hidden>
+            </div>
+          </div>
+
+          <!-- Manual Upload -->
+          <div class="upload-section">
+            <label class="upload-label">Robot Manual <span class="optional-tag">Optional</span></label>
+            <div class="upload-zone" id="manualDropZone" data-type="manual">
+              <div class="upload-zone-content" id="manualUploadContent">
+                <svg class="upload-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="1.5">
+                  <path d="M4 19.5A2.5 2.5 0 016.5 17H20M4 19.5A2.5 2.5 0 006.5 22H20V2H6.5A2.5 2.5 0 004 4.5v15z" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span class="upload-text">Drop robot manual here or click</span>
+                <span class="upload-hint">.pdf only</span>
+              </div>
+              <div class="upload-info hidden" id="manualFileInfo">
+                <div class="file-badge">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke-linecap="round"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                  </svg>
+                  <span class="file-name" id="manualFileName"></span>
+                  <button class="file-remove" id="manualRemoveBtn" title="Remove file">&times;</button>
+                </div>
+                <div class="file-meta">
+                  <span id="manualFileSize"></span>
+                  <span class="file-type-tag">PDF</span>
+                </div>
+                <div class="file-pages hidden" id="manualPages">
+                  <span class="dim-label">Pages:</span>
+                  <span id="manualPageCount"></span>
+                </div>
+              </div>
+              <div class="upload-progress hidden" id="manualProgress">
+                <div class="progress-bar"><div class="progress-fill" id="manualProgressFill"></div></div>
+                <span class="progress-text">Uploading...</span>
+              </div>
+              <input type="file" id="manualFileInput" accept=".pdf" hidden>
+            </div>
+          </div>
+
+          <!-- Robot Model -->
+          <div class="form-group">
+            <label class="form-label" for="robotModel">Robot Model</label>
+            <div class="select-wrapper">
+              <select id="robotModel" class="form-select">
+                <option value="unitree_h1_hand">Unitree H1 Hand</option>
+                <option value="unitree_z1_gripper">Unitree Z1 Gripper</option>
+                <option value="generic_2finger">Generic 2-Finger</option>
+              </select>
+              <svg class="select-arrow" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+                <path d="M2 4l4 4 4-4"/>
+              </svg>
+            </div>
+          </div>
+
+          <!-- Settings Sliders -->
+          <div class="form-group">
+            <label class="form-label">
+              Max Iterations
+              <span class="slider-value" id="maxIterValue">20</span>
+            </label>
+            <input type="range" id="maxIterations" class="form-range" min="5" max="50" value="20">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">
+              Success Threshold
+              <span class="slider-value" id="successThreshValue">3</span>
+            </label>
+            <input type="range" id="successThreshold" class="form-range" min="1" max="5" value="3">
+          </div>
+
+          <!-- Action Buttons -->
+          <div class="action-buttons">
+            <button class="btn btn-start" id="startBtn" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3"/>
+              </svg>
+              Start Generation
+            </button>
+            <button class="btn btn-stop hidden" id="stopBtn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="4" y="4" width="16" height="16" rx="2"/>
+              </svg>
+              Stop
+            </button>
+          </div>
+
+          <!-- Progress -->
+          <div class="progress-section hidden" id="progressSection">
+            <div class="progress-header">
+              <span class="progress-label">Progress</span>
+              <span class="progress-counter" id="progressCounter">0 / 20</span>
+            </div>
+            <div class="progress-bar progress-bar-main">
+              <div class="progress-fill progress-fill-animated" id="mainProgressFill"></div>
+            </div>
+            <div class="progress-status" id="progressStatus">Initializing...</div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Center Panel - Simulation Viewer -->
+      <section class="panel panel-viewer" id="viewerPanel">
+        <div class="panel-header">
+          <h2 class="panel-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+              <circle cx="12" cy="12" r="3" fill="#0d1117"/>
+            </svg>
+            Simulation Viewer
+          </h2>
+          <div class="viewer-badges">
+            <span class="iteration-badge hidden" id="iterationBadge">Iteration 0</span>
+            <span class="status-badge" id="statusBadge">Idle</span>
+          </div>
+        </div>
+        <div class="panel-body viewer-body">
+          <div class="viewer-container" id="viewerContainer">
+            <!-- Placeholder -->
+            <div class="viewer-placeholder" id="viewerPlaceholder">
+              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#30363d" stroke-width="1">
+                <rect x="2" y="3" width="20" height="14" rx="2"/>
+                <line x1="8" y1="21" x2="16" y2="21"/>
+                <line x1="12" y1="17" x2="12" y2="21"/>
+              </svg>
+              <p class="placeholder-text">Upload files and start generation</p>
+              <p class="placeholder-hint">Simulation frames will appear here</p>
+            </div>
+            <!-- CAD Preview Canvas -->
+            <canvas id="cadPreviewCanvas" class="hidden" width="800" height="600"></canvas>
+            <!-- Simulation Frame -->
+            <img id="simulationFrame" class="viewer-frame hidden" alt="Simulation frame">
+            <!-- Result GIF -->
+            <img id="resultGif" class="viewer-frame hidden" alt="Result">
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Panel - Generated Code -->
+      <aside class="panel panel-code" id="codePanel">
+        <div class="panel-header">
+          <h2 class="panel-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="16 18 22 12 16 6"/>
+              <polyline points="8 6 2 12 8 18"/>
+            </svg>
+            Generated Code
+          </h2>
+          <div class="code-actions">
+            <button class="btn-icon" id="copyCodeBtn" title="Copy code" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+              </svg>
+            </button>
+            <button class="btn-icon" id="downloadCodeBtn" title="Download .py" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="panel-body code-body">
+          <div class="code-placeholder" id="codePlaceholder">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#30363d" stroke-width="1">
+              <polyline points="16 18 22 12 16 6"/>
+              <polyline points="8 6 2 12 8 18"/>
+            </svg>
+            <p>Waiting for generation...</p>
+          </div>
+          <div class="code-container hidden" id="codeContainer">
+            <div class="code-iteration-label" id="codeIterLabel">Iteration 1</div>
+            <pre class="code-block"><code id="codeOutput"></code></pre>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Bottom Panel - Logs -->
+      <section class="panel panel-logs" id="logsPanel">
+        <div class="panel-header">
+          <h2 class="panel-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+              <line x1="16" y1="17" x2="8" y2="17"/>
+              <polyline points="10 9 9 9 8 9"/>
+            </svg>
+            Real-time Logs
+          </h2>
+          <div class="log-controls">
+            <div class="log-filters">
+              <button class="filter-btn active" data-filter="all">All</button>
+              <button class="filter-btn" data-filter="info">Info</button>
+              <button class="filter-btn" data-filter="error">Errors</button>
+              <button class="filter-btn" data-filter="success">Success</button>
+            </div>
+            <button class="btn-icon" id="clearLogsBtn" title="Clear logs">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="panel-body log-body">
+          <div class="log-container" id="logContainer">
+            <div class="log-entry log-info">
+              <span class="log-time">--:--:--</span>
+              <span class="log-level">[INFO]</span>
+              <span class="log-message">AutoGrip-Sim Engine ready. Upload a CAD file to begin.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="js/three-viewer.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

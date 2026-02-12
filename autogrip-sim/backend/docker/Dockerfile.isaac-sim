@@ -1,0 +1,36 @@
+# Isaac Sim Container for AutoGrip-Sim Engine
+# Based on NVIDIA Isaac Sim official container
+# Ubuntu 24.04 compatibility: Use containerized Isaac Sim to avoid host OS issues
+
+ARG ISAAC_SIM_VERSION=4.2.0
+FROM nvcr.io/nvidia/isaac-sim:${ISAAC_SIM_VERSION}
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ACCEPT_EULA=Y
+ENV PRIVACY_CONSENT=Y
+
+# Install additional Python packages needed for AutoGrip-Sim
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
+    fastapi==0.115.6 \
+    uvicorn[standard]==0.34.0 \
+    websockets==14.1 \
+    httpx==0.28.1 \
+    trimesh==4.5.3 \
+    numpy-stl==3.1.2
+
+# Create working directory
+WORKDIR /autogrip-sim
+
+# Copy simulation scripts
+COPY sim_scripts/ /autogrip-sim/sim_scripts/
+
+# Expose port for internal communication with main backend
+EXPOSE 9090
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD python3 -c "import requests; requests.get('http://localhost:9090/health')" || exit 1
+
+# Entry point: Run the simulation server
+CMD ["/isaac-sim/python.sh", "/autogrip-sim/sim_scripts/sim_server.py"]
