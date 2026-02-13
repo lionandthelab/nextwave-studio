@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -12,6 +13,16 @@ from pydantic import BaseModel
 from app.config import settings
 from app.models import LoopStatus, SimulationResult
 from app.session_manager import session_manager
+
+_SESSION_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def _validate_session_id(session_id: str) -> None:
+    """Validate that session_id is a valid hex UUID to prevent path traversal."""
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(
+            status_code=400, detail="Invalid session ID format"
+        )
 
 
 class GenerateStartRequest(BaseModel):
@@ -70,143 +81,151 @@ async def run_correction_loop(session_id: str) -> None:
         )
         return
 
-    file_meta = await session_manager.get_file_meta(session.cad_file_id)
-    cad_metadata: dict[str, Any] = (
-        file_meta.get("cad_metadata", {}) if file_meta else {}
-    )
-    manual_path: str | None = None
-    if session.manual_file_id:
-        manual_meta = await session_manager.get_file_meta(session.manual_file_id)
-        if manual_meta:
-            manual_path = manual_meta.get("path")
-
-    for iteration in range(1, max_iter + 1):
-        # Check if the loop has been stopped externally
-        current = await session_manager.get_session(session_id)
-        if current is None or current.status == "stopped":
-            await session_manager.add_log(
-                session_id, "INFO", "Loop stopped by user"
-            )
-            return
-
-        await session_manager.update_session(
-            session_id, current_iteration=iteration
+    try:
+        file_meta = await session_manager.get_file_meta(session.cad_file_id)
+        cad_metadata: dict[str, Any] = (
+            file_meta.get("cad_metadata", {}) if file_meta else {}
         )
-        await session_manager.add_log(
-            session_id, "INFO", f"Iteration {iteration}/{max_iter}"
-        )
+        manual_path: str | None = None
+        if session.manual_file_id:
+            manual_meta = await session_manager.get_file_meta(session.manual_file_id)
+            if manual_meta:
+                manual_path = manual_meta.get("path")
 
-        # Step 1: Generate or refine code
-        try:
-            if generated_code is None:
+        for iteration in range(1, max_iter + 1):
+            # Check if the loop has been stopped externally
+            current = await session_manager.get_session(session_id)
+            if current is None or current.status == "stopped":
                 await session_manager.add_log(
-                    session_id, "INFO", "Generating initial grasping code"
+                    session_id, "INFO", "Loop stopped by user"
                 )
-                generated_code = await generate_code(
-                    cad_metadata=cad_metadata,
-                    robot_model=session.robot_model,
-                    manual_path=manual_path,
-                )
-            else:
-                current = await session_manager.get_session(session_id)
-                last_result = current.results[-1] if current and current.results else None
-                error_log = last_result.error_log if last_result else None
-                await session_manager.add_log(
-                    session_id, "INFO", "Refining code based on error feedback"
-                )
-                generated_code = await refine_code(
-                    current_code=generated_code,
-                    error_log=error_log or "",
-                    cad_metadata=cad_metadata,
-                    robot_model=session.robot_model,
-                )
+                return
 
             await session_manager.update_session(
-                session_id, generated_code=generated_code
+                session_id, current_iteration=iteration
             )
-        except Exception as exc:
-            logger.exception("LLM code generation failed at iteration %d", iteration)
             await session_manager.add_log(
-                session_id, "ERROR", f"Code generation error: {exc}"
+                session_id, "INFO", f"Iteration {iteration}/{max_iter}"
             )
-            await session_manager.update_session(session_id, status="failed")
-            return
 
-        # Step 2: Run simulation
-        try:
-            await session_manager.add_log(
-                session_id, "INFO", "Running simulation in Isaac Sim"
-            )
-            sim_output = await run_simulation(
-                code=generated_code,
-                cad_path=(file_meta or {}).get("path", ""),
-                robot_model=session.robot_model,
-            )
-        except Exception as exc:
-            logger.exception("Simulation crashed at iteration %d", iteration)
-            await session_manager.add_log(
-                session_id, "ERROR", f"Simulation crash: {exc}"
-            )
+            # Step 1: Generate or refine code
+            try:
+                if generated_code is None:
+                    await session_manager.add_log(
+                        session_id, "INFO", "Generating initial grasping code"
+                    )
+                    generated_code = await generate_code(
+                        cad_metadata=cad_metadata,
+                        robot_model=session.robot_model,
+                        manual_path=manual_path,
+                    )
+                else:
+                    current = await session_manager.get_session(session_id)
+                    last_result = current.results[-1] if current and current.results else None
+                    error_log = last_result.error_log if last_result else None
+                    await session_manager.add_log(
+                        session_id, "INFO", "Refining code based on error feedback"
+                    )
+                    generated_code = await refine_code(
+                        current_code=generated_code,
+                        error_log=error_log or "",
+                        cad_metadata=cad_metadata,
+                        robot_model=session.robot_model,
+                    )
+
+                await session_manager.update_session(
+                    session_id, generated_code=generated_code
+                )
+            except Exception as exc:
+                logger.exception("LLM code generation failed at iteration %d", iteration)
+                await session_manager.add_log(
+                    session_id, "ERROR", f"Code generation error: {exc}"
+                )
+                await session_manager.update_session(session_id, status="failed")
+                return
+
+            # Step 2: Run simulation
+            try:
+                await session_manager.add_log(
+                    session_id, "INFO", "Running simulation in Isaac Sim"
+                )
+                sim_output = await run_simulation(
+                    code=generated_code,
+                    cad_path=(file_meta or {}).get("path", ""),
+                    robot_model=session.robot_model,
+                )
+            except Exception as exc:
+                logger.exception("Simulation crashed at iteration %d", iteration)
+                await session_manager.add_log(
+                    session_id, "ERROR", f"Simulation crash: {exc}"
+                )
+                result = SimulationResult(
+                    iteration=iteration,
+                    success=False,
+                    checks={},
+                    error_log=str(exc),
+                )
+                await session_manager.add_result(session_id, result)
+                consecutive_successes = 0
+                continue
+
+            # Step 3: Validate result
+            try:
+                checks, error_log = await validate_result(sim_output)
+            except Exception as exc:
+                logger.exception("Validation failed at iteration %d", iteration)
+                checks = {}
+                error_log = str(exc)
+
+            success = all(checks.values()) if checks else False
             result = SimulationResult(
                 iteration=iteration,
-                success=False,
-                checks={},
-                error_log=str(exc),
+                success=success,
+                checks=checks,
+                error_log=error_log if not success else None,
             )
             await session_manager.add_result(session_id, result)
-            consecutive_successes = 0
-            continue
 
-        # Step 3: Validate result
-        try:
-            checks, error_log = await validate_result(sim_output)
-        except Exception as exc:
-            logger.exception("Validation failed at iteration %d", iteration)
-            checks = {}
-            error_log = str(exc)
+            if success:
+                consecutive_successes += 1
+                await session_manager.add_log(
+                    session_id,
+                    "INFO",
+                    f"Iteration {iteration} PASSED "
+                    f"({consecutive_successes}/{success_threshold} consecutive)",
+                )
+            else:
+                consecutive_successes = 0
+                await session_manager.add_log(
+                    session_id,
+                    "WARNING",
+                    f"Iteration {iteration} FAILED: {error_log}",
+                )
 
-        success = all(checks.values()) if checks else False
-        result = SimulationResult(
-            iteration=iteration,
-            success=success,
-            checks=checks,
-            error_log=error_log if not success else None,
+            # Step 4: Check termination
+            if consecutive_successes >= success_threshold:
+                await session_manager.update_session(session_id, status="success")
+                await session_manager.add_log(
+                    session_id,
+                    "INFO",
+                    f"Success! {success_threshold} consecutive passes reached.",
+                )
+                return
+
+        # Exhausted iterations
+        await session_manager.update_session(session_id, status="failed")
+        await session_manager.add_log(
+            session_id,
+            "WARNING",
+            f"Max iterations ({max_iter}) reached without sustained success.",
         )
-        await session_manager.add_result(session_id, result)
 
-        if success:
-            consecutive_successes += 1
-            await session_manager.add_log(
-                session_id,
-                "INFO",
-                f"Iteration {iteration} PASSED "
-                f"({consecutive_successes}/{success_threshold} consecutive)",
-            )
-        else:
-            consecutive_successes = 0
-            await session_manager.add_log(
-                session_id,
-                "WARNING",
-                f"Iteration {iteration} FAILED: {error_log}",
-            )
-
-        # Step 4: Check termination
-        if consecutive_successes >= success_threshold:
-            await session_manager.update_session(session_id, status="success")
-            await session_manager.add_log(
-                session_id,
-                "INFO",
-                f"Success! {success_threshold} consecutive passes reached.",
-            )
-            return
-
-    # Exhausted iterations
-    await session_manager.update_session(session_id, status="failed")
-    await session_manager.add_log(
-        session_id,
-        "WARNING",
-        f"Max iterations ({max_iter}) reached without sustained success.",
-    )
+    except asyncio.CancelledError:
+        await session_manager.update_session(session_id, status="stopped")
+        await session_manager.add_log(
+            session_id, "INFO", "Loop cancelled externally"
+        )
+        logger.info("Correction loop cancelled for session %s", session_id)
 
 
 # ------------------------------------------------------------------
@@ -268,6 +287,7 @@ async def start_generation(body: GenerateStartRequest) -> LoopStatus:
 @router.post("/stop/{session_id}", response_model=LoopStatus)
 async def stop_generation(session_id: str) -> LoopStatus:
     """Request a running loop to stop."""
+    _validate_session_id(session_id)
     session = await session_manager.get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -290,6 +310,7 @@ async def stop_generation(session_id: str) -> LoopStatus:
 @router.get("/status/{session_id}", response_model=LoopStatus)
 async def get_status(session_id: str) -> LoopStatus:
     """Return the current loop status."""
+    _validate_session_id(session_id)
     status = await session_manager.get_loop_status(session_id)
     if status is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -299,6 +320,7 @@ async def get_status(session_id: str) -> LoopStatus:
 @router.get("/code/{session_id}")
 async def get_code(session_id: str) -> dict[str, str | None]:
     """Return the latest generated code for a session."""
+    _validate_session_id(session_id)
     session = await session_manager.get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")

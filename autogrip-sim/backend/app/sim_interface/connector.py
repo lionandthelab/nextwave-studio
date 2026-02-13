@@ -192,6 +192,8 @@ class MockSimulator:
 
         if code_quality["torque_value"] < 2.0:
             issues.append(("slip", 0.5))
+        if code_quality["torque_value"] > 12.0:
+            issues.append(("overforce", 0.4))
         if code_quality["grasp_width"] > 0.12:
             issues.append(("no_contact", 0.4))
         if code_quality["grasp_width"] < 0.02:
@@ -200,8 +202,12 @@ class MockSimulator:
             issues.append(("collision", 0.4))
         if not code_quality["has_hold_phase"]:
             issues.append(("slip", 0.3))
+        if not code_quality["has_contact_check"]:
+            issues.append(("unstable_grasp", 0.25))
         if code_quality["velocity_limit"] > 2.0:
             issues.append(("timeout", 0.2))
+        if code_quality["velocity_limit"] > 1.5:
+            issues.append(("collision", 0.2))
 
         if not issues:
             # Random failure
@@ -276,8 +282,8 @@ class MockSimulator:
             f"[{0.0:.2f}s] Initializing grasp sequence",
             f"[{0.3:.2f}s] Moving to pre-grasp position",
             f"[{1.0:.2f}s] Approaching object - clearance: {quality['approach_height']:.3f}m",
-            f"[{1.5:.2f}s] Contact detected on left finger (force: {quality['torque_value'] * 2:.1f}N)",
-            f"[{1.6:.2f}s] Contact detected on right finger (force: {quality['torque_value'] * 2:.1f}N)",
+            f"[{1.5:.2f}s] Contact detected on left finger (force: {quality['torque_value'] / 0.03 * 1.05:.1f}N)",
+            f"[{1.6:.2f}s] Contact detected on right finger (force: {quality['torque_value'] / 0.03 * 0.95:.1f}N)",
             f"[{1.8:.2f}s] Gripper closed - width: {quality['grasp_width']:.4f}m",
             f"[{2.0:.2f}s] Applying grasp torque: {quality['torque_value']:.1f}Nm",
             f"[{2.2:.2f}s] Grip stable - beginning lift",
@@ -311,8 +317,8 @@ class MockSimulator:
                 "contact_count": 2,
             },
             "contact_forces": [
-                {"finger": "left", "force_n": quality["torque_value"] * 2.1},
-                {"finger": "right", "force_n": quality["torque_value"] * 1.9},
+                {"finger": "left", "force_n": quality["torque_value"] / 0.03 * 1.05},
+                {"finger": "right", "force_n": quality["torque_value"] / 0.03 * 0.95},
             ],
             "joint_states": {
                 "joint_0": {"position": 0.0, "torque": 0.0},
@@ -385,6 +391,39 @@ class MockSimulator:
             ])
             object_z = self._rng.uniform(0.04, 0.06)
             contact_count = 0
+
+        elif failure_mode == "overforce":
+            fail_time = self._rng.uniform(1.5, 2.5)
+            logs.extend([
+                f"[{1.0:.2f}s] Approaching object",
+                f"[{1.5:.2f}s] Contact detected - closing gripper",
+                f"[{1.8:.2f}s] Gripper closed - width: {quality['grasp_width']:.4f}m",
+                f"[{2.0:.2f}s] Applying torque: {quality['torque_value']:.1f}Nm",
+                f"[{fail_time:.2f}s] WARNING: Joint torque exceeded safe limit (max 50Nm)",
+                f"[{fail_time + 0.1:.2f}s] WARNING: Excessive contact force {quality['torque_value'] / 0.03:.1f}N detected",
+                f"[{fail_time + 0.2:.2f}s] ERROR: Emergency stop - force exceeded safe limit, risk of damage",
+                f"[{fail_time + 0.5:.2f}s] GRASP FAILED: overforce - reduce gripper torque to prevent damage",
+            ])
+            object_z = self._rng.uniform(0.0, 0.05)
+            contact_count = 0
+
+        elif failure_mode == "unstable_grasp":
+            fail_time = self._rng.uniform(3.0, 5.0)
+            logs.extend([
+                f"[{1.0:.2f}s] Approaching object",
+                f"[{1.5:.2f}s] Contact detected - closing gripper",
+                f"[{1.8:.2f}s] Gripper closed - width: {quality['grasp_width']:.4f}m",
+                f"[{2.0:.2f}s] Applying torque: {quality['torque_value']:.1f}Nm",
+                f"[{2.2:.2f}s] Beginning lift",
+                f"[{2.5:.2f}s] Lifting - height: 0.05m",
+                f"[{3.0:.2f}s] Lifting - height: 0.15m",
+                f"[{fail_time:.2f}s] WARNING: Object rotating during lift - angular velocity increasing",
+                f"[{fail_time + 0.2:.2f}s] WARNING: Object angular velocity 1.5 rad/s exceeds stability threshold",
+                f"[{fail_time + 0.5:.2f}s] ERROR: Unstable grasp - object shifting in gripper",
+                f"[{fail_time + 0.7:.2f}s] GRASP FAILED: unstable_grasp - grasp not centered on center of mass",
+            ])
+            object_z = self._rng.uniform(0.05, 0.15)
+            contact_count = 1
 
         else:  # timeout
             logs.extend([

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import uuid
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -15,112 +17,226 @@ from app.core.parser import ManualParser
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Prompt templates
+# Prompt templates -- optimized for structured output and code quality
 # ---------------------------------------------------------------------------
 
-INITIAL_CODE_PROMPT = """\
-You are an expert robotics engineer writing Isaac Sim Python code for a robot grasping task.
+# System-level instruction shared across all code-generation prompts.
+# Separated from the user prompt so the LLM treats it as a persistent role.
+SYSTEM_PROMPT = """\
+You are an expert robotics engineer specializing in NVIDIA Isaac Sim grasping \
+simulations.  You write production-quality Python code that:
+- Uses the `omni.isaac.core` API correctly (ArticulationController, RigidPrim, \
+XFormPrim, World, SimulationContext).
+- Sets the physics time step to 1/120 s.
+- Uses position control for arm joints and torque control for gripper fingers.
+- Includes robust error handling: contact-loss detection, joint-limit clamping, \
+and timeout guards.
+- Never imports modules that are unavailable inside Isaac Sim's embedded Python.
+- Always returns results through the prescribed function signature.
 
+When generating code, follow this phased grasp sequence:
+  Phase 1 - APPROACH: Move end-effector above the object with clearance.
+  Phase 2 - DESCEND:  Lower to the grasp pose around the object center of mass.
+  Phase 3 - GRASP:    Close gripper fingers with controlled torque ramp.
+  Phase 4 - LIFT:     Raise the object vertically while monitoring contact.
+  Phase 5 - HOLD:     Maintain grip force for the required duration.
+
+Output ONLY valid Python code. Do NOT include markdown fences, explanations, \
+or commentary outside the code itself."""
+
+INITIAL_CODE_PROMPT = """\
 ## Robot Manual Context
-The following are relevant excerpts from the robot's manual:
+The following are relevant excerpts from the robot's manual.  Use these to \
+determine correct joint names, control API calls, torque limits, and motion \
+planning parameters.
 {manual_context}
 
 ## Object Information
 - Filename: {object_filename}
-- Dimensions (bounding box): X={dim_x:.4f}m, Y={dim_y:.4f}m, Z={dim_z:.4f}m
-- Volume: {volume}
+- Bounding-box dimensions: X={dim_x:.4f} m, Y={dim_y:.4f} m, Z={dim_z:.4f} m
+- Volume: {volume} m^3
 - Center of mass: {center_of_mass}
+- Estimated mass (plastic, 1200 kg/m^3): {estimated_mass:.3f} kg
 
 ## Robot Model
 - Model: {robot_model}
-- Joint names found in manual: {joint_names}
-- Control functions found in manual: {control_functions}
+- Joint names (from manual): {joint_names}
+- Control functions (from manual): {control_functions}
 
-## Requirements
-Generate a complete Python script for NVIDIA Isaac Sim that performs the following:
+## Task Parameters
+- Object spawn position: (0.5, 0.0, {object_height:.4f})
+- Minimum gripper torque for reliable grasp: {min_torque} Nm
+- Lift height: 0.3 m
+- Hold duration: 5 s
 
-1. **Load the robot USD model** at the world origin.
-2. **Load the target object** from the CAD file at position (0.5, 0.0, {object_height}).
-3. **Set up joint controllers** for the robot's arm and gripper using ArticulationController.
-4. **Plan an approach trajectory** that:
-   - Moves the end-effector above the object (pre-grasp pose).
-   - Lowers to the grasp pose around the object's center of mass.
-5. **Execute the grasp**:
-   - Close the gripper fingers with appropriate torque based on object size.
-   - Use a torque of at least {min_torque} Nm for reliable grasping.
-6. **Lift the object** vertically by 0.3 meters.
-7. **Hold the object** for 5 seconds while maintaining grip force.
-
-## Code Structure
-The script MUST define a function with this exact signature:
+## Required Function Signature
+The script MUST define exactly one entry-point function:
 
 ```python
-def run_grasp_simulation(sim_context, robot_prim_path: str, object_prim_path: str) -> dict:
+def run_grasp_simulation(
+    sim_context,
+    robot_prim_path: str,
+    object_prim_path: str,
+) -> dict:
     \"\"\"Execute the grasping sequence.
 
     Args:
-        sim_context: The Isaac Sim simulation context.
-        robot_prim_path: USD path to the robot.
-        object_prim_path: USD path to the target object.
+        sim_context: The Isaac Sim SimulationContext instance.
+        robot_prim_path: USD prim path to the robot (e.g. "/World/Robot").
+        object_prim_path: USD prim path to the target object.
 
     Returns:
-        dict with keys: success (bool), duration (float), logs (list[str])
+        dict with keys:
+            success  (bool)  - True if object held for full duration.
+            duration (float) - Wall-clock seconds elapsed.
+            logs     (list[str]) - Ordered log messages for each phase.
     \"\"\"
 ```
 
-## Important Constraints
-- Use `omni.isaac.core` APIs for articulation control.
-- Set physics time step to 1/120 seconds.
-- Use position control for arm joints, torque control for gripper.
-- Include error handling for contact loss detection.
-- All joint commands must respect the limits from the manual.
+## Grasp Sequence (implement each phase)
+1. **APPROACH** -- Move end-effector to pre-grasp pose \
+(directly above object, clearance = object_height + 0.10 m).  \
+Open gripper to width >= max(dim_x, dim_y) * 1.2.
+2. **DESCEND** -- Lower end-effector to grasp height = object center-of-mass Z.  \
+Use smooth interpolation over >= 60 sim steps.
+3. **GRASP** -- Ramp gripper torque from 20% to 100% of target over 30 steps.  \
+Verify contact force > 0.5 N after closure.  If no contact, abort with \
+success=False.
+4. **LIFT** -- Raise by 0.3 m over >= 120 sim steps.  Monitor contact each step; \
+if lost, abort.
+5. **HOLD** -- Maintain grip for 5 s of sim time.  Check contact every 60 steps.
 
-Generate ONLY the Python code, no explanations.
-"""
+## Few-Shot Example (simplified pattern)
+Below is a minimal reference showing the expected code structure.  Adapt joint \
+names, torques, and positions to the actual robot and object.
+
+```python
+import time
+import numpy as np
+from omni.isaac.core.articulations import ArticulationView
+from omni.isaac.core.prims import RigidPrimView
+
+def run_grasp_simulation(sim_context, robot_prim_path: str, object_prim_path: str) -> dict:
+    logs = []
+    start = time.time()
+    dt = 1.0 / 120.0
+
+    # -- initialise articulation
+    robot = ArticulationView(prim_paths_expr=robot_prim_path)
+    robot.initialize()
+    dof_names = robot.dof_names[0]  # list of joint name strings
+
+    # -- Phase 1: APPROACH
+    logs.append("Phase 1: moving to pre-grasp pose")
+    pre_grasp_positions = np.zeros(robot.num_dof)
+    # ... set arm joints to reach above the object ...
+    robot.set_joint_position_targets(pre_grasp_positions)
+    for _ in range(120):
+        sim_context.step(render=False)
+
+    # -- Phase 2: DESCEND
+    logs.append("Phase 2: descending to grasp height")
+    grasp_positions = pre_grasp_positions.copy()
+    # ... adjust Z to object center of mass ...
+    robot.set_joint_position_targets(grasp_positions)
+    for _ in range(60):
+        sim_context.step(render=False)
+
+    # -- Phase 3: GRASP (torque ramp)
+    logs.append("Phase 3: closing gripper")
+    target_torque = 5.0  # Nm -- adapt from min_torque
+    for step in range(30):
+        fraction = (step + 1) / 30.0
+        robot.set_joint_efforts(
+            np.array([target_torque * fraction]),
+            joint_indices=[gripper_idx],
+        )
+        sim_context.step(render=False)
+
+    # -- verify contact
+    # ... read contact sensor or check gripper position convergence ...
+    contact_ok = True  # placeholder
+    if not contact_ok:
+        logs.append("ERROR: no contact detected after grasp closure")
+        return {{"success": False, "duration": time.time() - start, "logs": logs}}
+
+    # -- Phase 4: LIFT
+    logs.append("Phase 4: lifting object")
+    lift_positions = grasp_positions.copy()
+    # ... raise Z by 0.3 m ...
+    robot.set_joint_position_targets(lift_positions)
+    for _ in range(120):
+        sim_context.step(render=False)
+
+    # -- Phase 5: HOLD
+    logs.append("Phase 5: holding for 5 s")
+    hold_steps = int(5.0 / dt)
+    for i in range(hold_steps):
+        robot.set_joint_efforts(
+            np.array([target_torque]),
+            joint_indices=[gripper_idx],
+        )
+        sim_context.step(render=False)
+
+    logs.append("Grasp sequence completed successfully")
+    return {{"success": True, "duration": time.time() - start, "logs": logs}}
+```
+
+## Constraints
+- Use `omni.isaac.core` APIs only.
+- All joint commands MUST respect limits from the manual.
+- Do NOT use `time.sleep`; advance simulation with `sim_context.step()`.
+- Physics time step: 1/120 s.
+- Clamp all torque values to the manual-specified maximums.
+
+Generate the complete implementation now."""
 
 CORRECTION_PROMPT = """\
-You are an expert robotics engineer fixing Isaac Sim grasping code that failed during simulation.
+You are fixing Isaac Sim grasping code that failed during simulation.
 
-## Current Code
+## Current Code (to be corrected)
 ```python
 {current_code}
 ```
 
-## Error Log from Simulation
+## Simulation Error Log
 ```
 {error_log}
 ```
 
-## Iteration
-This is correction attempt {iteration} of {max_iterations}.
+## Attempt {iteration} of {max_iterations}
+{escalation_note}
 
 ## Object Information
-- Dimensions (bounding box): X={dim_x:.4f}m, Y={dim_y:.4f}m, Z={dim_z:.4f}m
-- Volume: {volume}
+- Bounding-box: X={dim_x:.4f} m, Y={dim_y:.4f} m, Z={dim_z:.4f} m
+- Volume: {volume} m^3
+- Estimated mass: {estimated_mass:.3f} kg
 
-## Error Analysis and Correction Strategy
-Based on the error type, apply these specific fixes:
+## Diagnosed Error Category: **{error_type}**
 
+## Correction Strategy
 {correction_strategy}
 
-## Requirements
-1. Fix the code to address the specific failure described in the error log.
-2. Keep the same function signature: `run_grasp_simulation(sim_context, robot_prim_path, object_prim_path) -> dict`
-3. Make minimal, targeted changes - do not rewrite working parts.
-4. Add a comment at each changed line explaining the fix.
+## Rules
+1. Keep the function signature: \
+`run_grasp_simulation(sim_context, robot_prim_path, object_prim_path) -> dict`
+2. Make MINIMAL, TARGETED changes -- do not rewrite parts that work.
+3. Add an inline comment `# FIX(iter {iteration}): <reason>` at every changed line.
+4. Preserve all existing logging (logs.append calls).
+5. If the error is in physics parameters (torque, speed, height), adjust the \
+   value by the percentage suggested in the correction strategy -- do not guess.
 
-Generate ONLY the corrected Python code, no explanations.
-"""
+Generate ONLY the corrected Python code."""
 
 FEASIBILITY_PROMPT = """\
-You are a robotics engineer assessing whether a grasping task is physically feasible.
+Assess whether the following grasping task is physically feasible.
 
-## Object Specifications
-- Dimensions: X={dim_x:.4f}m, Y={dim_y:.4f}m, Z={dim_z:.4f}m
+## Object
+- Dimensions: X={dim_x:.4f} m, Y={dim_y:.4f} m, Z={dim_z:.4f} m
 - Volume: {volume} m^3
-- Estimated mass: {estimated_mass} kg (based on volume, assuming average density)
+- Estimated mass: {estimated_mass} kg (volume * 1200 kg/m^3)
 
-## Robot Specifications
+## Robot
 - Model: {robot_model}
 - Max payload: {max_payload} kg
 - Max grip force: {max_grip_force} N
@@ -128,63 +244,196 @@ You are a robotics engineer assessing whether a grasping task is physically feas
 - Joint count: {joint_count}
 
 ## Assessment Criteria
-1. Can the gripper physically encompass the object? (dimensions vs. gripper opening)
-2. Is the object mass within the robot's payload capacity?
-3. Is sufficient grip force available to hold the object against gravity?
-4. Are there any kinematic constraints that prevent reaching the object?
+1. Gripper opening vs. smallest graspable object dimension.
+2. Object mass vs. payload capacity (include 20% safety margin).
+3. Required grip force to hold object against gravity (F >= m*g / mu, mu=0.4).
+4. Reachability -- object at (0.5, 0, object_height) within typical workspace.
 
-Respond in this exact JSON format:
-{{
-    "feasible": true/false,
-    "confidence": 0.0-1.0,
-    "reason": "Brief explanation",
-    "warnings": ["list of potential issues"],
-    "recommended_torque": float_value_in_nm
-}}
-"""
+Respond with ONLY this JSON (no markdown, no extra text):
+{{"feasible": <bool>, "confidence": <0.0-1.0>, "reason": "<one sentence>", \
+"warnings": ["<issue 1>", ...], "recommended_torque": <float Nm>}}"""
 
-# Error type to correction strategy mapping
-CORRECTION_STRATEGIES = {
+# Prompt used to validate generated code before sending it to simulation.
+# This catches common mistakes (missing imports, wrong signatures, unsafe ops).
+CODE_VALIDATION_PROMPT = """\
+Review the following Isaac Sim grasping code for correctness and safety.
+
+```python
+{code}
+```
+
+Check for these issues:
+1. SIGNATURE -- Does it define `run_grasp_simulation(sim_context, \
+robot_prim_path: str, object_prim_path: str) -> dict`?
+2. RETURN VALUE -- Does every code path return a dict with keys: \
+success (bool), duration (float), logs (list[str])?
+3. IMPORTS -- Are all imports available inside Isaac Sim's Python environment? \
+   Allowed: omni.isaac.core.*, numpy, math, time.  Disallowed: torch, scipy, \
+   tensorflow, external HTTP libraries.
+4. SAFETY -- No `os.system`, `subprocess`, `eval`, `exec`, or file writes.
+5. PHYSICS -- Is `sim_context.step()` used (not `time.sleep`) to advance sim?
+6. JOINT LIMITS -- Are torque/position values clamped or bounded?
+
+Respond with ONLY this JSON (no markdown, no extra text):
+{{"valid": <bool>, "issues": ["<issue description>", ...], \
+"suggested_fix": "<brief fix or empty string>"}}"""
+
+# ---------------------------------------------------------------------------
+# Error classification and correction strategies
+# ---------------------------------------------------------------------------
+
+# Expanded keyword sets for more accurate error classification
+_ERROR_KEYWORDS: dict[str, list[str]] = {
+    "slip": [
+        "slip", "dropped", "lost grip", "fell", "sliding",
+        "insufficient friction", "grip lost", "object fell",
+    ],
+    "collision": [
+        "collision", "collide", "penetration", "overlap",
+        "self-collision", "hit", "crash", "intersect",
+    ],
+    "joint_limit": [
+        "joint limit", "joint_limit", "out of range", "limit exceeded",
+        "position limit", "velocity limit", "beyond range",
+    ],
+    "no_contact": [
+        "no contact", "no_contact", "miss", "not touching",
+        "zero contact", "no force", "failed to reach",
+    ],
+    "timeout": [
+        "timeout", "timed out", "too slow", "exceeded",
+        "max steps", "deadline", "hung",
+    ],
+    "overforce": [
+        "overforce", "exceeded force limit", "exceeded safe limit",
+        "force exceeded", "torque exceeded", "excessive force",
+        "risk of damage", "emergency stop",
+    ],
+    "unstable_grasp": [
+        "unstable_grasp", "unstable grasp", "rotating during lift",
+        "angular velocity", "object shifting", "not centered",
+        "asymmetric", "object tilting",
+    ],
+    "workspace_violation": [
+        "workspace", "unreachable", "out of reach", "ik failed",
+        "inverse kinematics", "beyond range", "cannot reach",
+        "outside workspace",
+    ],
+    "import_error": [
+        "importerror", "modulenotfounderror", "no module named",
+        "cannot import",
+    ],
+    "attribute_error": [
+        "attributeerror", "has no attribute", "undefined",
+    ],
+}
+
+# Correction strategies with quantified adjustments
+CORRECTION_STRATEGIES: dict[str, str] = {
     "slip": (
-        "The object slipped from the gripper. Apply these fixes:\n"
-        "- INCREASE gripper torque by 30-50% from current value.\n"
-        "- NARROW the grasp width to create more contact surface.\n"
-        "- ADD a pre-grasp squeeze phase: close fingers slowly, then increase force.\n"
-        "- VERIFY that contact detection thresholds are not too permissive."
+        "The object slipped from the gripper.\n"
+        "1. INCREASE gripper torque by 40% from current value.\n"
+        "2. NARROW initial grasp width by 10% to create tighter contact.\n"
+        "3. ADD a torque-ramp phase: ramp from 30% to 100% over 30 sim steps "
+        "before the lift phase.\n"
+        "4. INSERT a contact-force check after closure: if measured force < 0.5 N, "
+        "re-close with 50% more torque before proceeding.\n"
+        "5. REDUCE lift speed by 30% (increase lift step count by 40%)."
     ),
     "collision": (
-        "The robot collided with the object or environment. Apply these fixes:\n"
-        "- INCREASE approach clearance by adding 0.05m to the pre-grasp height.\n"
-        "- ADJUST the approach angle to come from directly above if coming from the side.\n"
-        "- ADD intermediate waypoints to avoid collision zones.\n"
-        "- REDUCE approach speed by 30% near the object."
+        "The robot collided with the object or environment.\n"
+        "1. INCREASE pre-grasp clearance by 0.05 m (add to Z of approach pose).\n"
+        "2. SWITCH to a top-down approach trajectory if currently using lateral.\n"
+        "3. ADD at least one intermediate waypoint between current pose and "
+        "pre-grasp pose to create a collision-free arc.\n"
+        "4. REDUCE approach velocity by 30% in the last 0.1 m of descent.\n"
+        "5. ENSURE gripper is fully open before descent begins."
+    ),
+    "joint_limit": (
+        "A joint exceeded its limits.\n"
+        "1. CLAMP all joint position targets to [lower_limit + 5%, "
+        "upper_limit - 5%] using np.clip.\n"
+        "2. REDUCE joint velocity commands by 20%.\n"
+        "3. CHECK that the target grasp pose is reachable -- if not, "
+        "try grasping along the shorter object axis.\n"
+        "4. ADD joint-limit validation before every set_joint_position_targets call."
     ),
     "no_contact": (
-        "The gripper did not make contact with the object. Apply these fixes:\n"
-        "- ADJUST the grasp position closer to the object's center of mass.\n"
-        "- WIDEN the initial gripper opening before approach.\n"
-        "- LOWER the approach target position by 0.02m.\n"
-        "- INCREASE the grasp closure range to ensure fingers reach the object."
+        "The gripper did not make contact with the object.\n"
+        "1. LOWER the grasp target Z by 0.02 m (closer to table surface).\n"
+        "2. WIDEN initial gripper opening by 20%.\n"
+        "3. SHIFT grasp X/Y to match the object center of mass exactly.\n"
+        "4. INCREASE the gripper closure range -- ensure fingers travel at least "
+        "the full object width.\n"
+        "5. ADD a secondary contact attempt: if first grasp fails, open and "
+        "retry 0.01 m lower."
     ),
     "timeout": (
-        "The simulation timed out before completing. Apply these fixes:\n"
-        "- SIMPLIFY the motion plan by reducing waypoints.\n"
-        "- INCREASE joint velocity limits by 20%.\n"
-        "- REMOVE unnecessary pauses or waiting steps.\n"
-        "- USE direct joint position commands instead of trajectory planning."
+        "The simulation timed out.\n"
+        "1. REDUCE total waypoints to at most 3 (pre-grasp, grasp, lift).\n"
+        "2. INCREASE joint velocity limits by 25%.\n"
+        "3. REMOVE any time.sleep() calls -- use only sim_context.step().\n"
+        "4. CUT hold duration to 3 s if currently > 5 s.\n"
+        "5. USE direct joint position targets instead of trajectory interpolation."
+    ),
+    "overforce": (
+        "The gripper applied excessive force, risking damage.\n"
+        "1. REDUCE gripper torque by 40-50% from current value.\n"
+        "2. ADD a force feedback check: if contact force > 40N per finger, "
+        "reduce torque immediately.\n"
+        "3. CLAMP maximum torque to 8 Nm for the gripper joints.\n"
+        "4. USE a gentler torque ramp: ramp from 10% to 60% of max over 50 steps.\n"
+        "5. ENSURE the force check runs every sim step during the grasp phase."
+    ),
+    "unstable_grasp": (
+        "The object was grasped but became unstable during lift.\n"
+        "1. SHIFT the grasp point to align with the object's center of mass.\n"
+        "2. APPLY symmetric forces on all gripper fingers.\n"
+        "3. REDUCE lift speed by 40% (increase lift step count).\n"
+        "4. ADD angular velocity monitoring during lift: if > 0.5 rad/s, pause "
+        "and re-stabilize grip before continuing.\n"
+        "5. INCREASE gripper torque by 15% during lift to maintain firm hold."
+    ),
+    "workspace_violation": (
+        "The target position is outside the robot's reachable workspace.\n"
+        "1. CHECK that the object is within 0.15-0.60m from the robot base.\n"
+        "2. ADJUST the approach to use a different arm configuration "
+        "(elbow-up vs elbow-down).\n"
+        "3. MOVE the grasp target to the nearest reachable point on the object.\n"
+        "4. VERIFY that the lift target (current_z + 0.3m) does not exceed "
+        "the workspace ceiling (0.50m above base).\n"
+        "5. If the object is too far, consider a two-step approach: first slide "
+        "the object closer, then grasp."
+    ),
+    "import_error": (
+        "An import failed inside Isaac Sim.\n"
+        "1. REMOVE the failing import and replace with the Isaac Sim equivalent.\n"
+        "2. Allowed imports: omni.isaac.core.*, numpy, math, time.\n"
+        "3. Do NOT use torch, scipy, tensorflow, or any pip-only package.\n"
+        "4. For matrix operations, use numpy instead of scipy.spatial."
+    ),
+    "attribute_error": (
+        "An attribute or method does not exist on an object.\n"
+        "1. CHECK the Isaac Sim API: ArticulationView uses set_joint_position_targets, "
+        "set_joint_velocity_targets, set_joint_efforts.\n"
+        "2. VERIFY prim paths are correct and the prim exists at that path.\n"
+        "3. ENSURE robot.initialize() is called before any control commands.\n"
+        "4. If using deprecated API, replace with the current equivalent."
     ),
     "unknown": (
-        "An unspecified error occurred. Apply general improvements:\n"
-        "- CHECK that all joint names and paths are correct.\n"
-        "- VERIFY that physics simulation step is 1/120s.\n"
-        "- ENSURE proper initialization of the articulation controller.\n"
-        "- ADD more robust error handling around key operations."
+        "An unspecified error occurred.  Apply general hardening:\n"
+        "1. VERIFY all joint names and USD prim paths are correct.\n"
+        "2. ENSURE physics time step is 1/120 s.\n"
+        "3. WRAP each phase in try/except, logging the error and returning "
+        "success=False on failure.\n"
+        "4. ADD robot.initialize() if missing.\n"
+        "5. CHECK that sim_context.step() is used instead of time.sleep()."
     ),
 }
 
 
 class GraspCodeGenerator:
-    """RAG-based engine that generates and corrects robot grasping code."""
+    """RAG-based engine that generates and iteratively corrects robot grasping code."""
 
     def __init__(self):
         self._llm = ChatOpenAI(
@@ -196,6 +445,10 @@ class GraspCodeGenerator:
         self._embeddings = OpenAIEmbeddings(api_key=settings.openai_api_key)
         self._parser = ManualParser()
         self._stores: dict[str, Chroma] = {}
+
+    # ------------------------------------------------------------------
+    # Manual ingestion & RAG retrieval
+    # ------------------------------------------------------------------
 
     def ingest_manual(self, file_path: str) -> str:
         """Parse a robot manual PDF and store embeddings in ChromaDB.
@@ -259,6 +512,47 @@ class GraspCodeGenerator:
         docs = store.similarity_search(query, k=k)
         return [doc.page_content for doc in docs]
 
+    def _query_manual_for_task(
+        self,
+        collection_id: str,
+        cad_metadata: dict,
+        robot_model: str,
+    ) -> str:
+        """Build task-specific RAG queries and return deduplicated context.
+
+        Instead of generic keyword queries, this constructs queries that are
+        grounded in the actual object dimensions and robot model so the
+        retrieved manual sections are maximally relevant.
+        """
+        dims = cad_metadata.get("dimensions", {})
+        max_dim = max(dims.get("x", 0.1), dims.get("y", 0.1), dims.get("z", 0.1))
+
+        # Task-specific queries grounded in actual parameters
+        queries = [
+            f"{robot_model} gripper finger control torque force limits",
+            f"{robot_model} joint names position limits articulation",
+            f"grasping objects approximately {max_dim:.3f} m wide pick and place",
+            f"{robot_model} end effector pose control inverse kinematics",
+            f"Isaac Sim ArticulationController set_joint_position_targets",
+            f"{robot_model} gripper opening width maximum aperture",
+        ]
+
+        manual_sections: list[str] = []
+        for q in queries:
+            sections = self._query_manual(collection_id, q, k=3)
+            manual_sections.extend(sections)
+
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for s in manual_sections:
+            if s not in seen:
+                seen.add(s)
+                unique.append(s)
+
+        # Limit to top-10 most relevant unique sections
+        return "\n---\n".join(unique[:10])
+
     def _get_manual_metadata(self, collection_id: str) -> dict:
         """Extract joint names and control functions from stored metadata."""
         store = self._get_store(collection_id)
@@ -271,7 +565,11 @@ class GraspCodeGenerator:
             }
         return {"joint_names": "", "control_functions": ""}
 
-    def generate_initial_code(
+    # ------------------------------------------------------------------
+    # Code generation
+    # ------------------------------------------------------------------
+
+    async def generate_initial_code(
         self,
         cad_metadata: dict,
         robot_model: str,
@@ -287,38 +585,20 @@ class GraspCodeGenerator:
         Returns:
             Generated Python code as a string.
         """
-        # Query manual for relevant context
-        queries = [
-            "gripper control joint positions torque",
-            "grasping procedure pick and place",
-            "articulation controller joint limits",
-            "end effector position control",
-        ]
-        manual_sections = []
-        for q in queries:
-            sections = self._query_manual(manual_collection_id, q, k=3)
-            manual_sections.extend(sections)
-
-        # Deduplicate while preserving order
-        seen = set()
-        unique_sections = []
-        for s in manual_sections:
-            if s not in seen:
-                seen.add(s)
-                unique_sections.append(s)
-        manual_context = "\n---\n".join(unique_sections[:8])
+        # Optimised RAG retrieval with task-specific queries
+        manual_context = self._query_manual_for_task(
+            manual_collection_id, cad_metadata, robot_model,
+        )
 
         meta = self._get_manual_metadata(manual_collection_id)
         dims = cad_metadata.get("dimensions", {})
         dim_z = dims.get("z", 0.1)
 
-        # Estimate minimum torque based on object size
         volume = cad_metadata.get("volume") or (
             dims.get("x", 0.1) * dims.get("y", 0.1) * dim_z
         )
-        # Rough mass estimate: volume * density_of_plastic (1200 kg/m^3)
         estimated_mass = volume * 1200 if volume else 0.5
-        min_torque = max(1.0, estimated_mass * 9.81 * 0.5)  # safety factor
+        min_torque = max(1.0, estimated_mass * 9.81 * 0.5)
 
         prompt = INITIAL_CODE_PROMPT.format(
             manual_context=manual_context,
@@ -328,6 +608,7 @@ class GraspCodeGenerator:
             dim_z=dim_z,
             volume=volume or "unknown",
             center_of_mass=cad_metadata.get("center_of_mass", "[0, 0, 0]"),
+            estimated_mass=estimated_mass,
             robot_model=robot_model,
             joint_names=meta.get("joint_names", "not specified"),
             control_functions=meta.get("control_functions", "not specified"),
@@ -336,11 +617,30 @@ class GraspCodeGenerator:
         )
 
         logger.info("Generating initial grasping code for robot=%s", robot_model)
-        response = self._llm.invoke(prompt)
+        response = await self._llm.ainvoke(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+        )
         code = self._extract_code(response.content)
+
+        # Validate the generated code before returning
+        validation = await self._validate_code(code)
+        if not validation["valid"]:
+            logger.warning(
+                "Generated code failed validation: %s -- requesting fix",
+                validation["issues"],
+            )
+            code = await self._fix_validation_issues(code, validation)
+
         return code
 
-    def correct_code(
+    # ------------------------------------------------------------------
+    # Code correction
+    # ------------------------------------------------------------------
+
+    async def correct_code(
         self,
         current_code: str,
         error_log: str,
@@ -367,6 +667,23 @@ class GraspCodeGenerator:
         volume = cad_metadata.get("volume") or (
             dims.get("x", 0.1) * dims.get("y", 0.1) * dims.get("z", 0.1)
         )
+        estimated_mass = (volume * 1200) if volume else 0.5
+
+        # Escalation note: later iterations get progressively more aggressive
+        if iteration <= 3:
+            escalation_note = "Early attempt -- make conservative, targeted fixes."
+        elif iteration <= 10:
+            escalation_note = (
+                "Mid-stage attempt -- apply the correction strategy fully "
+                "and consider alternative grasp approaches (e.g. different axis)."
+            )
+        else:
+            escalation_note = (
+                "Late-stage attempt -- make aggressive changes. Consider "
+                "simplifying the entire approach: use direct joint position "
+                "commands, reduce waypoints to 3, and increase all safety margins "
+                "by 50%."
+            )
 
         prompt = CORRECTION_PROMPT.format(
             current_code=current_code,
@@ -377,17 +694,29 @@ class GraspCodeGenerator:
             dim_y=dims.get("y", 0.1),
             dim_z=dims.get("z", 0.1),
             volume=volume or "unknown",
+            estimated_mass=estimated_mass,
+            error_type=error_type,
             correction_strategy=strategy,
+            escalation_note=escalation_note,
         )
 
         logger.info(
             "Correcting code: iteration=%d, error_type=%s", iteration, error_type
         )
-        response = self._llm.invoke(prompt)
+        response = await self._llm.ainvoke(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+        )
         code = self._extract_code(response.content)
         return code
 
-    def assess_feasibility(
+    # ------------------------------------------------------------------
+    # Feasibility assessment
+    # ------------------------------------------------------------------
+
+    async def assess_feasibility(
         self, cad_metadata: dict, robot_specs: dict
     ) -> dict:
         """Assess whether the grasping task is physically feasible.
@@ -418,54 +747,119 @@ class GraspCodeGenerator:
             joint_count=robot_specs.get("joint_count", 6),
         )
 
-        response = self._llm.invoke(prompt)
-
-        import json
-
-        try:
-            result = json.loads(response.content)
-        except json.JSONDecodeError:
-            # Try extracting JSON from markdown code block
-            content = response.content
-            if "```" in content:
-                json_str = content.split("```")[1]
-                if json_str.startswith("json"):
-                    json_str = json_str[4:]
-                result = json.loads(json_str.strip())
-            else:
-                logger.warning("Failed to parse feasibility response as JSON")
-                result = {
-                    "feasible": True,
-                    "confidence": 0.5,
-                    "reason": "Could not parse LLM response; assuming feasible.",
-                }
+        response = await self._llm.ainvoke(prompt)
+        result = self._parse_json_response(
+            response.content,
+            fallback={
+                "feasible": True,
+                "confidence": 0.5,
+                "reason": "Could not parse LLM response; assuming feasible.",
+            },
+        )
 
         return {
             "feasible": result.get("feasible", True),
             "reason": result.get("reason", ""),
             "confidence": result.get("confidence", 0.5),
+            "warnings": result.get("warnings", []),
+            "recommended_torque": result.get("recommended_torque"),
         }
+
+    # ------------------------------------------------------------------
+    # Code validation
+    # ------------------------------------------------------------------
+
+    async def _validate_code(self, code: str) -> dict:
+        """Run a lightweight LLM-based validation pass on generated code.
+
+        Returns dict with 'valid' (bool), 'issues' (list[str]),
+        and 'suggested_fix' (str).
+        """
+        prompt = CODE_VALIDATION_PROMPT.format(code=code)
+        try:
+            response = await self._llm.ainvoke(prompt)
+            result = self._parse_json_response(
+                response.content,
+                fallback={"valid": True, "issues": [], "suggested_fix": ""},
+            )
+            return {
+                "valid": result.get("valid", True),
+                "issues": result.get("issues", []),
+                "suggested_fix": result.get("suggested_fix", ""),
+            }
+        except Exception as exc:
+            logger.warning("Code validation LLM call failed: %s", exc)
+            return {"valid": True, "issues": [], "suggested_fix": ""}
+
+    async def _fix_validation_issues(self, code: str, validation: dict) -> str:
+        """Ask the LLM to fix specific validation issues in the code."""
+        issues_text = "\n".join(f"- {issue}" for issue in validation["issues"])
+        fix_prompt = (
+            f"The following code has validation issues. Fix ONLY these issues "
+            f"and return the corrected code.\n\n"
+            f"## Issues\n{issues_text}\n\n"
+            f"## Suggested fix\n{validation.get('suggested_fix', 'N/A')}\n\n"
+            f"## Code\n```python\n{code}\n```\n\n"
+            f"Return ONLY the corrected Python code."
+        )
+        try:
+            response = await self._llm.ainvoke(
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": fix_prompt},
+                ]
+            )
+            return self._extract_code(response.content)
+        except Exception as exc:
+            logger.warning("Validation fix LLM call failed: %s -- using original", exc)
+            return code
+
+    # ------------------------------------------------------------------
+    # Error classification
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _classify_error(error_log: str) -> str:
-        """Classify the type of simulation error from the log."""
+        """Classify the simulation error using keyword matching.
+
+        Uses expanded keyword sets and returns the category with the most
+        keyword matches for better accuracy when logs contain mixed signals.
+        """
         log_lower = error_log.lower()
-        if any(w in log_lower for w in ("slip", "dropped", "lost grip", "fell")):
-            return "slip"
-        if any(w in log_lower for w in ("collision", "collide", "penetration", "overlap")):
-            return "collision"
-        if any(w in log_lower for w in ("no contact", "no_contact", "miss", "not touching")):
-            return "no_contact"
-        if any(w in log_lower for w in ("timeout", "timed out", "too slow", "exceeded")):
-            return "timeout"
-        return "unknown"
+        scores: dict[str, int] = {}
+        for category, keywords in _ERROR_KEYWORDS.items():
+            scores[category] = sum(1 for kw in keywords if kw in log_lower)
+
+        best = max(scores, key=scores.get)  # type: ignore[arg-type]
+        if scores[best] == 0:
+            return "unknown"
+        return best
+
+    # ------------------------------------------------------------------
+    # Response parsing helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _extract_code(response_text: str) -> str:
-        """Extract Python code from an LLM response, stripping markdown fences."""
+        """Extract Python code from an LLM response, stripping markdown fences.
+
+        Handles multiple code blocks by joining them, and tolerates extra text
+        before/after fences.
+        """
         text = response_text.strip()
 
-        # If wrapped in code fences, extract the content
+        # Collect all fenced code blocks
+        blocks: list[str] = []
+        pattern = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL)
+        for m in pattern.finditer(text):
+            block = m.group(1).strip()
+            if block:
+                blocks.append(block)
+
+        if blocks:
+            return "\n\n".join(blocks)
+
+        # Fallback: legacy split-based extraction for single fence
         if "```python" in text:
             parts = text.split("```python", 1)
             code = parts[1].rsplit("```", 1)[0]
@@ -473,13 +867,45 @@ class GraspCodeGenerator:
         if "```" in text:
             parts = text.split("```", 1)
             code = parts[1].rsplit("```", 1)[0]
-            # Remove optional language hint on first line
             lines = code.split("\n", 1)
             if lines[0].strip() in ("python", "py", ""):
                 return lines[1].strip() if len(lines) > 1 else ""
             return code.strip()
 
+        # No fences -- assume the entire response is code
         return text
+
+    @staticmethod
+    def _parse_json_response(response_text: str, fallback: dict) -> dict:
+        """Parse a JSON response from the LLM, tolerating markdown fences."""
+        text = response_text.strip()
+
+        # Try direct parse first
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Try extracting from markdown code block
+        json_pattern = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
+        m = json_pattern.search(text)
+        if m:
+            try:
+                return json.loads(m.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+
+        # Try finding a JSON object in the text
+        brace_pattern = re.compile(r"\{.*\}", re.DOTALL)
+        m = brace_pattern.search(text)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        logger.warning("Failed to parse JSON from LLM response")
+        return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +946,7 @@ async def generate_code(
                 return _generate_default_code(cad_metadata, robot_model)
 
         collection_id = _manual_collections[manual_path]
-        return gen.generate_initial_code(cad_metadata, robot_model, collection_id)
+        return await gen.generate_initial_code(cad_metadata, robot_model, collection_id)
 
     return _generate_default_code(cad_metadata, robot_model)
 
@@ -530,11 +956,22 @@ async def refine_code(
     error_log: str,
     cad_metadata: dict,
     robot_model: str,
+    iteration: int | None = None,
 ) -> str:
-    """Refine existing code based on simulation error feedback."""
+    """Refine existing code based on simulation error feedback.
+
+    Args:
+        current_code: The code that failed.
+        error_log: Error/failure log from the simulation.
+        cad_metadata: Object metadata.
+        robot_model: Robot model name (unused here but kept for API compat).
+        iteration: Explicit iteration number.  Falls back to a hash-derived
+            value for backward compatibility.
+    """
     gen = _get_generator()
-    iteration = len(current_code) % 20 + 1
-    return gen.correct_code(current_code, error_log, iteration, cad_metadata)
+    if iteration is None:
+        iteration = len(current_code) % 20 + 1
+    return await gen.correct_code(current_code, error_log, iteration, cad_metadata)
 
 
 def _generate_default_code(cad_metadata: dict, robot_model: str) -> str:
@@ -551,6 +988,7 @@ def _generate_default_code(cad_metadata: dict, robot_model: str) -> str:
     return f'''\
 """Auto-generated grasping code for {robot_model}."""
 import time
+import numpy as np
 
 def run_grasp_simulation(sim_context, robot_prim_path: str, object_prim_path: str) -> dict:
     """Execute a pick-and-place grasping sequence."""
@@ -562,33 +1000,44 @@ def run_grasp_simulation(sim_context, robot_prim_path: str, object_prim_path: st
     approach_height = {approach_height:.4f}
     lift_height = 0.30
     hold_duration = 5.0
+    dt = 1.0 / 120.0
 
     try:
-        logs.append("Moving to pre-grasp position")
+        # Phase 1: APPROACH
+        logs.append("Phase 1: moving to pre-grasp position")
         pre_grasp_position = [0.5, 0.0, approach_height]
-        time.sleep(0.05)
+        for _ in range(120):
+            sim_context.step(render=False)
 
-        logs.append(f"Opening gripper to width: {{grasp_width:.4f}}m")
-        time.sleep(0.05)
-
-        logs.append("Approaching object")
+        # Phase 2: DESCEND
+        logs.append("Phase 2: descending to grasp height")
         grasp_position = [0.5, 0.0, {dim_z / 2 + 0.01:.4f}]
-        time.sleep(0.05)
+        for _ in range(60):
+            sim_context.step(render=False)
 
-        logs.append(f"Closing gripper with torque: {{torque:.1f}}Nm")
-        time.sleep(0.05)
+        # Phase 3: GRASP with torque ramp
+        logs.append(f"Phase 3: closing gripper (torque={{torque:.1f}} Nm)")
+        for step in range(30):
+            fraction = (step + 1) / 30.0
+            applied = torque * fraction
+            sim_context.step(render=False)
 
-        logs.append("Verifying contact force")
+        # Verify contact
         contact_force = torque * 2
-        if contact_force < 1.0:
-            logs.append("ERROR: Insufficient contact force")
+        if contact_force < 0.5:
+            logs.append("ERROR: insufficient contact force")
             return {{"success": False, "duration": time.time() - start_time, "logs": logs}}
 
-        logs.append(f"Lifting object to height: {{lift_height}}m")
-        time.sleep(0.05)
+        # Phase 4: LIFT
+        logs.append(f"Phase 4: lifting object by {{lift_height}} m")
+        for _ in range(120):
+            sim_context.step(render=False)
 
-        logs.append(f"Holding object for {{hold_duration}}s")
-        time.sleep(0.1)
+        # Phase 5: HOLD
+        hold_steps = int(hold_duration / dt)
+        logs.append(f"Phase 5: holding for {{hold_duration}} s ({{hold_steps}} steps)")
+        for _ in range(hold_steps):
+            sim_context.step(render=False)
 
         logs.append("Grasp sequence completed successfully")
         return {{"success": True, "duration": time.time() - start_time, "logs": logs}}

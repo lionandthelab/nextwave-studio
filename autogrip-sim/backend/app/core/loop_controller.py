@@ -110,14 +110,14 @@ class CorrectionLoopController:
                 # -- Step 1: Generate or correct code --
                 if iteration == 1:
                     await emit("generating_code", iteration)
-                    current_code = self._llm.generate_initial_code(
+                    current_code = await self._llm.generate_initial_code(
                         cad_metadata=cad_metadata,
                         robot_model=robot_model,
                         manual_collection_id=manual_collection_id,
                     )
                 else:
                     await emit("correcting_code", iteration, error_log=last_error_log)
-                    current_code = self._llm.correct_code(
+                    current_code = await self._llm.correct_code(
                         current_code=current_code,
                         error_log=last_error_log,
                         iteration=iteration,

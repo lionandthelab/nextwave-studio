@@ -1,6 +1,7 @@
 """Application configuration using pydantic-settings."""
 
 from pathlib import Path
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -11,10 +12,23 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_max_tokens: int = 4096
 
+    @field_validator("openai_api_key")
+    @classmethod
+    def validate_api_key(cls, v: str) -> str:
+        if not v:
+            raise ValueError(
+                "OPENAI_API_KEY must be set. "
+                "Provide it via environment variable or .env file."
+            )
+        return v
+
     # Isaac Sim
     isaac_sim_path: str = "/isaac-sim"
     isaac_sim_headless: bool = True
     isaac_sim_docker_image: str = "nvcr.io/nvidia/isaac-sim:4.2.0"
+
+    # CORS
+    cors_origins: list[str] = ["http://localhost:8000", "http://localhost:3000"]
 
     # App
     app_host: str = "0.0.0.0"

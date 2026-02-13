@@ -11,6 +11,7 @@ langchain-openai==0.3.0
 langchain-community==0.3.14
 openai==1.58.1
 chromadb==0.5.23
+langchain-chroma>=0.2.0
 faiss-cpu==1.9.0.post1
 
 # PDF Parsing
@@ -19,7 +20,7 @@ unstructured==0.16.12
 
 # 3D / CAD Processing
 trimesh==4.5.3
-numpy==2.2.1
+numpy>=1.26.2,<2
 numpy-stl==3.1.2
 
 # Utilities
@@ -34,4 +35,3 @@ imageio==2.36.1
 # Testing
 pytest==8.3.4
 pytest-asyncio==0.25.0
-httpx==0.28.1

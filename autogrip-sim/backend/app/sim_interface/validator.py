@@ -3,9 +3,40 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+# Object-category-specific threshold presets based on Unitree Z1 + H1 hand specs
+OBJECT_THRESHOLDS: dict[str, dict[str, float]] = {
+    "small_light": {  # < 5cm max dim, < 200g
+        "min_contact_force": 1.5,
+        "max_safe_force": 30.0,
+        "hold_height": 0.15,
+        "hold_duration": 3.0,
+    },
+    "medium": {  # 5-15cm, 200g-2kg
+        "min_contact_force": 5.0,
+        "max_safe_force": 80.0,
+        "hold_height": 0.15,
+        "hold_duration": 5.0,
+    },
+    "large_heavy": {  # > 15cm, 2-5kg
+        "min_contact_force": 15.0,
+        "max_safe_force": 100.0,
+        "hold_height": 0.10,
+        "hold_duration": 5.0,
+    },
+}
+
+# Unitree Z1 arm workspace boundaries (meters from base)
+WORKSPACE_LIMITS = {
+    "x_min": 0.15, "x_max": 0.60,
+    "y_min": -0.40, "y_max": 0.40,
+    "z_min": -0.10, "z_max": 0.50,
+    "radius_max": 0.60,
+}
 
 
 @dataclass
@@ -32,12 +63,12 @@ class ValidationResult:
 class GraspValidator:
     """Validates simulation results against physics-based criteria."""
 
-    # Default thresholds
-    HOLD_HEIGHT_THRESHOLD = 0.1  # meters - object must be above this z
+    # Default thresholds -- calibrated for Unitree Z1 arm + H1 hand
+    HOLD_HEIGHT_THRESHOLD = 0.15  # meters - object must be lifted above this z
     HOLD_DURATION_THRESHOLD = 5.0  # seconds - must hold for at least this long
-    MIN_CONTACT_FORCE = 0.5  # Newtons - minimum contact force
+    MIN_CONTACT_FORCE = 2.0  # Newtons - minimum reliable contact force
     MAX_ANGULAR_VELOCITY = 1.0  # rad/s - object must not spin
-    MAX_SAFE_FORCE = 500.0  # Newtons - upper bound for safe operation
+    MAX_SAFE_FORCE = 100.0  # Newtons - Unitree Z1/H1 safe operating limit
 
     def validate(self, sim_result: dict) -> ValidationResult:
         """Run all validation checks on a simulation result.
@@ -92,6 +123,16 @@ class GraspValidator:
             suggestions.append(
                 "Applied force is outside the safe operating range. "
                 "Reduce torque to protect the robot and object."
+            )
+
+        # -- Check 5: Workspace Test --
+        workspace_check = self._check_workspace(sim_result)
+        checks[workspace_check.name] = workspace_check
+        if not workspace_check.passed:
+            error_lines.append(f"WORKSPACE FAILED: {workspace_check.message}")
+            suggestions.append(
+                "The object position is outside the robot's reachable workspace. "
+                "Reposition the object within 0.15-0.60m from the robot base."
             )
 
         overall_success = all(c.passed for c in checks.values())
@@ -199,8 +240,6 @@ class GraspValidator:
         obj_state = sim_result.get("object_final_state", {})
         ang_vel = obj_state.get("angular_velocity", [0, 0, 0])
 
-        import math
-
         magnitude = math.sqrt(sum(v**2 for v in ang_vel))
         passed = magnitude <= self.MAX_ANGULAR_VELOCITY
 
@@ -261,5 +300,41 @@ class GraspValidator:
             passed=passed,
             value=value,
             threshold=self.MAX_SAFE_FORCE,
+            message=msg,
+        )
+
+    def _check_workspace(self, sim_result: dict) -> CheckResult:
+        """Check 5 - Workspace Test: Object position within robot reachable workspace."""
+        obj_state = sim_result.get("object_final_state", {})
+        position = obj_state.get("position", [0, 0, 0])
+
+        x = position[0] if len(position) > 0 else 0.0
+        y = position[1] if len(position) > 1 else 0.0
+
+        dist = math.sqrt(x**2 + y**2)
+        within = (
+            WORKSPACE_LIMITS["x_min"] <= x <= WORKSPACE_LIMITS["x_max"]
+            and WORKSPACE_LIMITS["y_min"] <= y <= WORKSPACE_LIMITS["y_max"]
+            and dist <= WORKSPACE_LIMITS["radius_max"]
+        )
+
+        if within:
+            msg = (
+                f"Object at ({x:.3f}, {y:.3f}) is within workspace "
+                f"(radius {dist:.3f}m <= {WORKSPACE_LIMITS['radius_max']}m)."
+            )
+        else:
+            msg = (
+                f"Object at ({x:.3f}, {y:.3f}) is outside reachable workspace "
+                f"(radius {dist:.3f}m, limits: x=[{WORKSPACE_LIMITS['x_min']}, "
+                f"{WORKSPACE_LIMITS['x_max']}], y=[{WORKSPACE_LIMITS['y_min']}, "
+                f"{WORKSPACE_LIMITS['y_max']}])."
+            )
+
+        return CheckResult(
+            name="workspace_test",
+            passed=within,
+            value=dist,
+            threshold=WORKSPACE_LIMITS["radius_max"],
             message=msg,
         )

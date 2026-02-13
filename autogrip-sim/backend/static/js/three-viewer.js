@@ -1,251 +1,322 @@
 /* ========================================
-   STL Viewer - Canvas 2D Wireframe Renderer
-   Parses binary/ASCII STL and renders a
-   rotating wireframe preview on a <canvas>.
+   STL Viewer - Three.js WebGL Renderer
+   Real 3D viewer with STLLoader, OrbitControls,
+   lighting, bounding box, center of mass, and grid.
    ======================================== */
 
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+
 class STLViewer {
-  constructor(canvas) {
-    this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
-    this.triangles = [];
-    this.center = { x: 0, y: 0, z: 0 };
-    this.scale = 1;
-    this.rotation = { x: -0.5, y: 0, z: 0 };
+  constructor(container) {
+    this.container = container;
+    this.scene = null;
+    this.camera = null;
+    this.renderer = null;
+    this.controls = null;
+    this.mesh = null;
+    this.wireframeMesh = null;
+    this.bboxHelper = null;
+    this.comMarker = null;
+    this.gridHelper = null;
     this.animationId = null;
-    this.autoRotateSpeed = 0.008;
+    this.showWireframe = false;
+    this.showBbox = true;
+    this.meshInfo = { vertices: 0, triangles: 0 };
+
+    this._initScene();
 
     // Store globally for cleanup
     window._stlViewerInstance = this;
   }
 
+  _initScene() {
+    const width = this.container.clientWidth || 800;
+    const height = this.container.clientHeight || 600;
+
+    // Scene
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x0d1117);
+
+    // Camera
+    this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000);
+    this.camera.position.set(0, 100, 200);
+
+    // Renderer
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    this.renderer.setSize(width, height);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.2;
+    this.container.appendChild(this.renderer.domElement);
+
+    // Controls
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.08;
+    this.controls.rotateSpeed = 0.8;
+    this.controls.zoomSpeed = 1.2;
+    this.controls.panSpeed = 0.8;
+    this.controls.minDistance = 1;
+    this.controls.maxDistance = 5000;
+
+    // Lighting
+    this._setupLighting();
+
+    // Grid
+    this._setupGrid();
+
+    // Handle resize
+    this._resizeObserver = new ResizeObserver(() => this._onResize());
+    this._resizeObserver.observe(this.container);
+  }
+
+  _setupLighting() {
+    // Ambient light - soft overall illumination
+    const ambient = new THREE.AmbientLight(0x404060, 0.6);
+    this.scene.add(ambient);
+
+    // Hemisphere light - natural sky/ground gradient
+    const hemiLight = new THREE.HemisphereLight(0x58a6ff, 0x1a1a2e, 0.4);
+    this.scene.add(hemiLight);
+
+    // Main directional light
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    dirLight.position.set(50, 100, 80);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.width = 1024;
+    dirLight.shadow.mapSize.height = 1024;
+    dirLight.shadow.camera.near = 0.5;
+    dirLight.shadow.camera.far = 500;
+    dirLight.shadow.camera.left = -100;
+    dirLight.shadow.camera.right = 100;
+    dirLight.shadow.camera.top = 100;
+    dirLight.shadow.camera.bottom = -100;
+    this.scene.add(dirLight);
+
+    // Fill light from the opposite side
+    const fillLight = new THREE.DirectionalLight(0x58a6ff, 0.3);
+    fillLight.position.set(-30, 40, -60);
+    this.scene.add(fillLight);
+
+    // Rim light from behind
+    const rimLight = new THREE.DirectionalLight(0xbc8cff, 0.2);
+    rimLight.position.set(0, -20, -80);
+    this.scene.add(rimLight);
+  }
+
+  _setupGrid() {
+    // Ground grid
+    this.gridHelper = new THREE.GridHelper(200, 20, 0x30363d, 0x21262d);
+    this.gridHelper.position.y = 0;
+    this.gridHelper.material.opacity = 0.4;
+    this.gridHelper.material.transparent = true;
+    this.scene.add(this.gridHelper);
+  }
+
   loadFromBuffer(buffer) {
-    this.triangles = this.parseSTL(buffer);
-    if (this.triangles.length === 0) return;
-    this.computeBounds();
-    this.render();
-  }
+    // Remove existing mesh
+    this._clearModel();
 
-  parseSTL(buffer) {
-    const view = new DataView(buffer);
+    const loader = new STLLoader();
+    const geometry = loader.parse(buffer);
 
-    // Try binary first: 80 byte header + 4 byte triangle count
-    if (buffer.byteLength > 84) {
-      const triCount = view.getUint32(80, true);
-      const expectedSize = 84 + triCount * 50;
+    if (!geometry || geometry.attributes.position.count === 0) return;
 
-      if (Math.abs(buffer.byteLength - expectedSize) < 10) {
-        return this.parseBinarySTL(view, triCount);
-      }
-    }
+    // Compute normals for proper lighting
+    geometry.computeVertexNormals();
 
-    // Fall back to ASCII
-    const text = new TextDecoder().decode(buffer);
-    if (text.trimStart().startsWith('solid')) {
-      return this.parseASCIISTL(text);
-    }
-
-    // Force binary parse
-    const triCount = view.getUint32(80, true);
-    return this.parseBinarySTL(view, triCount);
-  }
-
-  parseBinarySTL(view, triCount) {
-    const triangles = [];
-    let offset = 84;
-
-    for (let i = 0; i < triCount && offset + 50 <= view.byteLength; i++) {
-      // Skip normal (12 bytes)
-      offset += 12;
-
-      const verts = [];
-      for (let v = 0; v < 3; v++) {
-        verts.push({
-          x: view.getFloat32(offset, true),
-          y: view.getFloat32(offset + 4, true),
-          z: view.getFloat32(offset + 8, true),
-        });
-        offset += 12;
-      }
-
-      // Skip attribute byte count
-      offset += 2;
-
-      triangles.push(verts);
-    }
-
-    return triangles;
-  }
-
-  parseASCIISTL(text) {
-    const triangles = [];
-    const facetRegex = /facet\s+normal\s+[\s\S]*?outer\s+loop\s+([\s\S]*?)endloop/gi;
-    const vertexRegex = /vertex\s+([-\d.e+]+)\s+([-\d.e+]+)\s+([-\d.e+]+)/gi;
-    let facetMatch;
-
-    while ((facetMatch = facetRegex.exec(text)) !== null) {
-      const verts = [];
-      let vertMatch;
-      const loopText = facetMatch[1];
-      const localVertexRegex = /vertex\s+([-\d.e+]+)\s+([-\d.e+]+)\s+([-\d.e+]+)/gi;
-
-      while ((vertMatch = localVertexRegex.exec(loopText)) !== null) {
-        verts.push({
-          x: parseFloat(vertMatch[1]),
-          y: parseFloat(vertMatch[2]),
-          z: parseFloat(vertMatch[3]),
-        });
-      }
-
-      if (verts.length === 3) {
-        triangles.push(verts);
-      }
-    }
-
-    return triangles;
-  }
-
-  computeBounds() {
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-
-    for (const tri of this.triangles) {
-      for (const v of tri) {
-        minX = Math.min(minX, v.x);
-        minY = Math.min(minY, v.y);
-        minZ = Math.min(minZ, v.z);
-        maxX = Math.max(maxX, v.x);
-        maxY = Math.max(maxY, v.y);
-        maxZ = Math.max(maxZ, v.z);
-      }
-    }
-
-    this.center = {
-      x: (minX + maxX) / 2,
-      y: (minY + maxY) / 2,
-      z: (minZ + maxZ) / 2,
+    // Store mesh info
+    this.meshInfo = {
+      vertices: geometry.attributes.position.count,
+      triangles: geometry.attributes.position.count / 3,
     };
 
-    const dx = maxX - minX;
-    const dy = maxY - minY;
-    const dz = maxZ - minZ;
-    const maxDim = Math.max(dx, dy, dz);
+    // Material - metallic blue with slight transparency
+    const material = new THREE.MeshPhysicalMaterial({
+      color: 0x4a90d9,
+      metalness: 0.3,
+      roughness: 0.4,
+      clearcoat: 0.2,
+      clearcoatRoughness: 0.4,
+      side: THREE.DoubleSide,
+    });
 
-    this.scale = Math.min(this.canvas.width, this.canvas.height) * 0.4 / (maxDim || 1);
+    this.mesh = new THREE.Mesh(geometry, material);
+    this.mesh.castShadow = true;
+    this.mesh.receiveShadow = true;
+    this.scene.add(this.mesh);
+
+    // Center model on geometry
+    geometry.computeBoundingBox();
+    const bbox = geometry.boundingBox;
+    const center = new THREE.Vector3();
+    bbox.getCenter(center);
+    geometry.translate(-center.x, -center.y, -center.z);
+
+    // Position mesh so bottom sits on grid
+    const size = new THREE.Vector3();
+    geometry.boundingBox.getSize(size);
+    // Recompute after centering
+    geometry.computeBoundingBox();
+    const newBbox = geometry.boundingBox;
+    this.mesh.position.y = -newBbox.min.y;
+
+    // Wireframe overlay
+    const wireGeo = new THREE.WireframeGeometry(geometry);
+    const wireMat = new THREE.LineBasicMaterial({
+      color: 0x58a6ff,
+      opacity: 0.08,
+      transparent: true,
+    });
+    this.wireframeMesh = new THREE.LineSegments(wireGeo, wireMat);
+    this.wireframeMesh.position.copy(this.mesh.position);
+    this.wireframeMesh.visible = this.showWireframe;
+    this.scene.add(this.wireframeMesh);
+
+    // Bounding box helper
+    this.bboxHelper = new THREE.Box3Helper(
+      new THREE.Box3().setFromObject(this.mesh),
+      0x58a6ff
+    );
+    this.bboxHelper.material.opacity = 0.3;
+    this.bboxHelper.material.transparent = true;
+    this.bboxHelper.visible = this.showBbox;
+    this.scene.add(this.bboxHelper);
+
+    // Center of mass indicator (approximate: centroid of bounding box)
+    const comPos = new THREE.Vector3();
+    new THREE.Box3().setFromObject(this.mesh).getCenter(comPos);
+    const comGeo = new THREE.SphereGeometry(
+      Math.max(size.x, size.y, size.z) * 0.015,
+      16,
+      16
+    );
+    const comMat = new THREE.MeshBasicMaterial({
+      color: 0x3fb950,
+      opacity: 0.8,
+      transparent: true,
+    });
+    this.comMarker = new THREE.Mesh(comGeo, comMat);
+    this.comMarker.position.copy(comPos);
+    this.scene.add(this.comMarker);
+
+    // Add glow ring around CoM
+    const ringGeo = new THREE.RingGeometry(
+      Math.max(size.x, size.y, size.z) * 0.02,
+      Math.max(size.x, size.y, size.z) * 0.03,
+      32
+    );
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x3fb950,
+      opacity: 0.3,
+      transparent: true,
+      side: THREE.DoubleSide,
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.copy(comPos);
+    this.comMarker.add(ring);
+
+    // Adjust grid to model size
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const gridSize = Math.ceil(maxDim * 2 / 10) * 10;
+    this.scene.remove(this.gridHelper);
+    this.gridHelper = new THREE.GridHelper(gridSize, 20, 0x30363d, 0x21262d);
+    this.gridHelper.material.opacity = 0.4;
+    this.gridHelper.material.transparent = true;
+    this.scene.add(this.gridHelper);
+
+    // Fit camera to model
+    this._fitCameraToModel(size, maxDim);
+
+    // Dispatch info event
+    this._dispatchMeshInfo();
   }
 
-  project(point) {
-    // Center the point
-    let x = point.x - this.center.x;
-    let y = point.y - this.center.y;
-    let z = point.z - this.center.z;
-
-    // Rotate X
-    const cosX = Math.cos(this.rotation.x);
-    const sinX = Math.sin(this.rotation.x);
-    const y1 = y * cosX - z * sinX;
-    const z1 = y * sinX + z * cosX;
-    y = y1;
-    z = z1;
-
-    // Rotate Y
-    const cosY = Math.cos(this.rotation.y);
-    const sinY = Math.sin(this.rotation.y);
-    const x1 = x * cosY + z * sinY;
-    const z2 = -x * sinY + z * cosY;
-    x = x1;
-    z = z2;
-
-    // Scale and project to 2D (orthographic)
-    const sx = x * this.scale + this.canvas.width / 2;
-    const sy = -y * this.scale + this.canvas.height / 2;
-
-    return { x: sx, y: sy, z: z };
+  _clearModel() {
+    if (this.mesh) {
+      this.scene.remove(this.mesh);
+      this.mesh.geometry.dispose();
+      this.mesh.material.dispose();
+      this.mesh = null;
+    }
+    if (this.wireframeMesh) {
+      this.scene.remove(this.wireframeMesh);
+      this.wireframeMesh.geometry.dispose();
+      this.wireframeMesh.material.dispose();
+      this.wireframeMesh = null;
+    }
+    if (this.bboxHelper) {
+      this.scene.remove(this.bboxHelper);
+      this.bboxHelper = null;
+    }
+    if (this.comMarker) {
+      this.scene.remove(this.comMarker);
+      this.comMarker = null;
+    }
   }
 
-  render() {
-    const ctx = this.ctx;
-    const w = this.canvas.width;
-    const h = this.canvas.height;
+  _fitCameraToModel(size, maxDim) {
+    const distance = maxDim * 2.5;
+    this.camera.position.set(
+      distance * 0.6,
+      distance * 0.5,
+      distance * 0.8
+    );
+    this.camera.lookAt(0, size.y * 0.3, 0);
+    this.controls.target.set(0, size.y * 0.3, 0);
+    this.controls.update();
 
-    ctx.clearRect(0, 0, w, h);
-
-    // Background
-    ctx.fillStyle = '#0d1117';
-    ctx.fillRect(0, 0, w, h);
-
-    if (this.triangles.length === 0) return;
-
-    // Calculate projected triangles with depth for sorting
-    const projected = [];
-    for (const tri of this.triangles) {
-      const pts = tri.map(v => this.project(v));
-      const avgZ = (pts[0].z + pts[1].z + pts[2].z) / 3;
-      projected.push({ pts, avgZ });
-    }
-
-    // Sort back-to-front (painter's algorithm)
-    projected.sort((a, b) => a.avgZ - b.avgZ);
-
-    // Draw triangles
-    for (const { pts, avgZ } of projected) {
-      // Simple depth-based shading
-      const maxZ = this.triangles.length > 0 ? this.scale * 100 : 1;
-      const brightness = 0.3 + 0.5 * ((avgZ + maxZ) / (2 * maxZ));
-      const r = Math.round(88 * brightness);
-      const g = Math.round(166 * brightness);
-      const b = Math.round(255 * brightness);
-
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      ctx.lineTo(pts[1].x, pts[1].y);
-      ctx.lineTo(pts[2].x, pts[2].y);
-      ctx.closePath();
-
-      // Fill with semi-transparent color
-      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.15)`;
-      ctx.fill();
-
-      // Wireframe edges
-      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.4)`;
-      ctx.lineWidth = 0.5;
-      ctx.stroke();
-    }
-
-    // Draw subtle grid on bottom
-    this.drawGrid(ctx, w, h);
+    // Update near/far planes
+    this.camera.near = maxDim * 0.01;
+    this.camera.far = maxDim * 20;
+    this.camera.updateProjectionMatrix();
   }
 
-  drawGrid(ctx, w, h) {
-    ctx.save();
-    ctx.strokeStyle = 'rgba(48, 54, 61, 0.3)';
-    ctx.lineWidth = 0.5;
+  resetCamera() {
+    if (!this.mesh) return;
+    const bbox = new THREE.Box3().setFromObject(this.mesh);
+    const size = new THREE.Vector3();
+    bbox.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    this._fitCameraToModel(size, maxDim);
+  }
 
-    const gridSize = 20;
-    const cx = w / 2;
-    const cy = h - 40;
-
-    for (let i = -10; i <= 10; i++) {
-      const x = cx + i * gridSize;
-      ctx.beginPath();
-      ctx.moveTo(x, cy - 5);
-      ctx.lineTo(x, cy + 5);
-      ctx.stroke();
+  toggleWireframe() {
+    this.showWireframe = !this.showWireframe;
+    if (this.wireframeMesh) {
+      this.wireframeMesh.visible = this.showWireframe;
+      if (this.showWireframe) {
+        this.wireframeMesh.material.opacity = 0.15;
+      }
     }
+    return this.showWireframe;
+  }
 
-    ctx.beginPath();
-    ctx.moveTo(cx - 10 * gridSize, cy);
-    ctx.lineTo(cx + 10 * gridSize, cy);
-    ctx.stroke();
+  toggleBbox() {
+    this.showBbox = !this.showBbox;
+    if (this.bboxHelper) {
+      this.bboxHelper.visible = this.showBbox;
+    }
+    return this.showBbox;
+  }
 
-    ctx.restore();
+  _dispatchMeshInfo() {
+    const event = new CustomEvent('meshloaded', {
+      detail: this.meshInfo,
+    });
+    this.container.dispatchEvent(event);
   }
 
   startAnimation() {
     const animate = () => {
-      this.rotation.y += this.autoRotateSpeed;
-      this.render();
       this.animationId = requestAnimationFrame(animate);
+      this.controls.update();
+      this.renderer.render(this.scene, this.camera);
     };
     animate();
   }
@@ -255,6 +326,37 @@ class STLViewer {
       cancelAnimationFrame(this.animationId);
       this.animationId = null;
     }
+  }
+
+  _onResize() {
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    if (width === 0 || height === 0) return;
+
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(width, height);
+  }
+
+  dispose() {
+    this.stopAnimation();
+    this._clearModel();
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+    }
+    if (this.renderer) {
+      this.renderer.dispose();
+      if (this.renderer.domElement.parentNode) {
+        this.renderer.domElement.parentNode.removeChild(this.renderer.domElement);
+      }
+    }
+    if (this.controls) {
+      this.controls.dispose();
+    }
+    this.scene = null;
+    this.camera = null;
+    this.renderer = null;
+    window._stlViewerInstance = null;
   }
 }
 

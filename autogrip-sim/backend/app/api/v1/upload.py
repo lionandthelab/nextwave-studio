@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import aiofiles
@@ -20,6 +20,24 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 
 ALLOWED_CAD_EXTENSIONS = {".stl", ".obj", ".step", ".stp"}
 ALLOWED_MANUAL_EXTENSIONS = {".pdf"}
+
+ALLOWED_CAD_CONTENT_TYPES = {
+    "application/octet-stream",
+    "model/stl",
+    "model/obj",
+    "application/step",
+    "application/stp",
+    "application/vnd.ms-pki.stl",
+}
+ALLOWED_MANUAL_CONTENT_TYPES = {
+    "application/pdf",
+    "application/octet-stream",
+}
+
+
+def _sanitize_filename(filename: str) -> str:
+    """Strip directory components from a filename to prevent path traversal."""
+    return PurePosixPath(filename).name or "unknown"
 
 
 def _validate_extension(filename: str, allowed: set[str]) -> str:
@@ -80,11 +98,27 @@ def _extract_cad_metadata(filepath: Path, filename: str) -> CADMetadata:
         )
 
 
+def _validate_content_type(
+    file: UploadFile, allowed: set[str], file_kind: str
+) -> None:
+    """Validate the MIME content type of an uploaded file."""
+    content_type = (file.content_type or "").lower()
+    if content_type and content_type not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported content type '{content_type}' for {file_kind} upload. "
+                f"Allowed: {sorted(allowed)}"
+            ),
+        )
+
+
 @router.post("/cad", response_model=UploadResponse)
 async def upload_cad(file: UploadFile) -> UploadResponse:
     """Upload a CAD file (.stl, .obj, .step)."""
-    filename = file.filename or "unknown"
+    filename = _sanitize_filename(file.filename or "unknown")
     _validate_extension(filename, ALLOWED_CAD_EXTENSIONS)
+    _validate_content_type(file, ALLOWED_CAD_CONTENT_TYPES, "CAD")
 
     file_id, dest_path, size = await _save_upload(file, settings.cad_upload_path)
 
@@ -112,8 +146,9 @@ async def upload_cad(file: UploadFile) -> UploadResponse:
 @router.post("/manual", response_model=UploadResponse)
 async def upload_manual(file: UploadFile) -> UploadResponse:
     """Upload a robot manual PDF."""
-    filename = file.filename or "unknown"
+    filename = _sanitize_filename(file.filename or "unknown")
     _validate_extension(filename, ALLOWED_MANUAL_EXTENSIONS)
+    _validate_content_type(file, ALLOWED_MANUAL_CONTENT_TYPES, "manual")
 
     file_id, dest_path, size = await _save_upload(file, settings.manual_upload_path)
 

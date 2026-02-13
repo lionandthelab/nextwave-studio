@@ -74,7 +74,7 @@ async def test_stop_generation(client: AsyncClient, sample_stl_bytes: bytes):
 
 async def test_stop_nonexistent_session(client: AsyncClient):
     """Stopping a non-existent session should return 404."""
-    resp = await client.post("/api/v1/generate/stop/nonexistent_session")
+    resp = await client.post("/api/v1/generate/stop/00000000000000000000000000000000")
     assert resp.status_code == 404
 
 
@@ -104,7 +104,7 @@ async def test_get_status(client: AsyncClient, sample_stl_bytes: bytes):
 
 async def test_get_status_nonexistent(client: AsyncClient):
     """Getting status of a non-existent session should return 404."""
-    resp = await client.get("/api/v1/generate/status/nonexistent")
+    resp = await client.get("/api/v1/generate/status/00000000000000000000000000000000")
     assert resp.status_code == 404
 
 
@@ -133,7 +133,7 @@ async def test_get_code(client: AsyncClient, sample_stl_bytes: bytes):
 
 async def test_get_code_nonexistent(client: AsyncClient):
     """Getting code for a non-existent session should return 404."""
-    resp = await client.get("/api/v1/generate/code/nonexistent")
+    resp = await client.get("/api/v1/generate/code/00000000000000000000000000000000")
     assert resp.status_code == 404
 
 

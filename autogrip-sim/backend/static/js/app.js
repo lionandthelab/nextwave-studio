@@ -15,6 +15,9 @@ class AutoGripApp {
     this.previousCode = '';
     this.currentCode = '';
     this.activeLogFilter = 'all';
+    this.logCount = 0;
+    this.iterationResults = [];
+    this.stlViewer = null;
 
     // Bind DOM elements
     this.bindElements();
@@ -66,14 +69,23 @@ class AutoGripApp {
     this.progressCounter = document.getElementById('progressCounter');
     this.mainProgressFill = document.getElementById('mainProgressFill');
     this.progressStatus = document.getElementById('progressStatus');
+    this.progressSteps = document.getElementById('progressSteps');
 
     // Viewer
     this.viewerPlaceholder = document.getElementById('viewerPlaceholder');
-    this.cadPreviewCanvas = document.getElementById('cadPreviewCanvas');
+    this.threeCanvas = document.getElementById('threeCanvas');
     this.simulationFrame = document.getElementById('simulationFrame');
     this.resultGif = document.getElementById('resultGif');
     this.iterationBadge = document.getElementById('iterationBadge');
     this.statusBadge = document.getElementById('statusBadge');
+    this.viewerLoading = document.getElementById('viewerLoading');
+    this.viewerToolbar = document.getElementById('viewerToolbar');
+    this.meshInfoEl = document.getElementById('meshInfo');
+
+    // Viewer toolbar buttons
+    this.resetViewBtn = document.getElementById('resetViewBtn');
+    this.toggleWireframeBtn = document.getElementById('toggleWireframeBtn');
+    this.toggleBboxBtn = document.getElementById('toggleBboxBtn');
 
     // Code
     this.codePlaceholder = document.getElementById('codePlaceholder');
@@ -87,6 +99,7 @@ class AutoGripApp {
     this.logContainer = document.getElementById('logContainer');
     this.clearLogsBtn = document.getElementById('clearLogsBtn');
     this.filterBtns = document.querySelectorAll('.filter-btn');
+    this.logCountEl = document.getElementById('logCount');
 
     // Session badge
     this.sessionBadge = document.getElementById('sessionBadge');
@@ -146,6 +159,39 @@ class AutoGripApp {
     this.downloadCodeBtn.addEventListener('click', () => this.downloadCode(this.currentCode, 'grasp_code.py'));
     this.clearLogsBtn.addEventListener('click', () => this.clearLogs());
 
+    // Viewer toolbar
+    if (this.resetViewBtn) {
+      this.resetViewBtn.addEventListener('click', () => {
+        if (this.stlViewer) this.stlViewer.resetCamera();
+      });
+    }
+    if (this.toggleWireframeBtn) {
+      this.toggleWireframeBtn.addEventListener('click', () => {
+        if (this.stlViewer) {
+          const active = this.stlViewer.toggleWireframe();
+          this.toggleWireframeBtn.classList.toggle('active', active);
+        }
+      });
+    }
+    if (this.toggleBboxBtn) {
+      this.toggleBboxBtn.addEventListener('click', () => {
+        if (this.stlViewer) {
+          const active = this.stlViewer.toggleBbox();
+          this.toggleBboxBtn.classList.toggle('active', active);
+        }
+      });
+    }
+
+    // Mesh info event from Three.js viewer
+    if (this.threeCanvas) {
+      this.threeCanvas.addEventListener('meshloaded', (e) => {
+        const info = e.detail;
+        if (this.meshInfoEl) {
+          this.meshInfoEl.textContent = `${info.triangles.toLocaleString()} tris | ${info.vertices.toLocaleString()} verts`;
+        }
+      });
+    }
+
     // Log filters
     this.filterBtns.forEach(btn => {
       btn.addEventListener('click', () => {
@@ -171,6 +217,11 @@ class AutoGripApp {
       } catch (e) {
         // Ignore
       }
+    }
+
+    // Initialize bounding box button as active (default on)
+    if (this.toggleBboxBtn) {
+      this.toggleBboxBtn.classList.add('active');
     }
 
     this.addLog('info', 'AutoGrip-Sim Engine ready. Upload a CAD file to begin.');
@@ -268,7 +319,7 @@ class AutoGripApp {
           this.displayCADInfo(data.metadata);
         }
 
-        // Try to show STL preview
+        // Show 3D preview for STL files
         if (ext === '.stl' && window.STLViewer) {
           this.showSTLPreview(file);
         }
@@ -338,29 +389,52 @@ class AutoGripApp {
   }
 
   showSTLPreview(file) {
+    // Show loading state
+    this.viewerLoading.classList.remove('hidden');
+    this.viewerPlaceholder.classList.add('hidden');
+
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const viewer = new window.STLViewer(this.cadPreviewCanvas);
-        viewer.loadFromBuffer(e.target.result);
-        viewer.startAnimation();
+        // Dispose previous viewer if exists
+        if (this.stlViewer) {
+          this.stlViewer.dispose();
+          this.stlViewer = null;
+        }
 
-        this.viewerPlaceholder.classList.add('hidden');
-        this.cadPreviewCanvas.classList.remove('hidden');
+        // Show Three.js canvas
+        this.threeCanvas.classList.remove('hidden');
         this.simulationFrame.classList.add('hidden');
         this.resultGif.classList.add('hidden');
+
+        // Create new Three.js viewer
+        this.stlViewer = new window.STLViewer(this.threeCanvas);
+        this.stlViewer.loadFromBuffer(e.target.result);
+        this.stlViewer.startAnimation();
+
+        // Show toolbar
+        this.viewerToolbar.classList.remove('hidden');
+
+        // Hide loading
+        this.viewerLoading.classList.add('hidden');
+
+        this.addLog('info', '3D preview loaded with orbit controls');
       } catch (err) {
-        // Silently fail - preview is optional
+        this.viewerLoading.classList.add('hidden');
+        this.viewerPlaceholder.classList.remove('hidden');
+        this.addLog('warn', `3D preview unavailable: ${err.message}`);
       }
     };
     reader.readAsArrayBuffer(file);
   }
 
   hideCADPreview() {
-    this.cadPreviewCanvas.classList.add('hidden');
+    this.threeCanvas.classList.add('hidden');
+    this.viewerToolbar.classList.add('hidden');
     this.viewerPlaceholder.classList.remove('hidden');
-    if (window._stlViewerInstance) {
-      window._stlViewerInstance.stopAnimation();
+    if (this.stlViewer) {
+      this.stlViewer.dispose();
+      this.stlViewer = null;
     }
   }
 
@@ -481,6 +555,7 @@ class AutoGripApp {
         const data = JSON.parse(e.data);
         const success = data.success;
         const score = data.score;
+        this.recordIterationResult(success);
         if (success) {
           this.addLog('success', `Iteration ${this.currentIteration} succeeded (score: ${score})`);
         } else {
@@ -630,12 +705,38 @@ class AutoGripApp {
 
     if (running) {
       this.currentIteration = 0;
+      this.iterationResults = [];
       this.updateProgress(0, this.maxIter, 'initializing');
+      this.buildProgressSteps();
     }
   }
 
   updateStartButton() {
     this.startBtn.disabled = !this.cadFileId;
+  }
+
+  buildProgressSteps() {
+    this.progressSteps.innerHTML = '';
+    for (let i = 0; i < this.maxIter; i++) {
+      const step = document.createElement('div');
+      step.className = 'progress-step';
+      step.title = `Iteration ${i + 1}`;
+      this.progressSteps.appendChild(step);
+    }
+  }
+
+  recordIterationResult(success) {
+    this.iterationResults.push(success);
+    const steps = this.progressSteps.querySelectorAll('.progress-step');
+    const idx = this.iterationResults.length - 1;
+    if (steps[idx]) {
+      steps[idx].classList.remove('step-current');
+      steps[idx].classList.add(success ? 'step-success' : 'step-fail');
+    }
+    // Mark next step as current
+    if (steps[idx + 1]) {
+      steps[idx + 1].classList.add('step-current');
+    }
   }
 
   updateProgress(iteration, maxIter, status) {
@@ -648,6 +749,13 @@ class AutoGripApp {
 
     this.iterationBadge.classList.remove('hidden');
     this.iterationBadge.textContent = `Iteration ${iteration}`;
+
+    // Mark current step
+    const steps = this.progressSteps.querySelectorAll('.progress-step');
+    steps.forEach(s => s.classList.remove('step-current'));
+    if (iteration > 0 && iteration <= steps.length && status === 'running') {
+      steps[iteration - 1].classList.add('step-current');
+    }
 
     const statusMap = {
       initializing: 'Initializing pipeline...',
@@ -754,10 +862,17 @@ class AutoGripApp {
 
   // --- Viewer ---
   updateViewer(base64Image) {
+    // Hide 3D preview, show simulation frame
     this.viewerPlaceholder.classList.add('hidden');
-    this.cadPreviewCanvas.classList.add('hidden');
+    this.threeCanvas.classList.add('hidden');
+    this.viewerToolbar.classList.add('hidden');
     this.resultGif.classList.add('hidden');
     this.simulationFrame.classList.remove('hidden');
+
+    // Stop Three.js animation to save resources
+    if (this.stlViewer) {
+      this.stlViewer.stopAnimation();
+    }
 
     // Handle data URL or raw base64
     if (base64Image.startsWith('data:')) {
@@ -769,7 +884,8 @@ class AutoGripApp {
 
   updateViewerUrl(url) {
     this.viewerPlaceholder.classList.add('hidden');
-    this.cadPreviewCanvas.classList.add('hidden');
+    this.threeCanvas.classList.add('hidden');
+    this.viewerToolbar.classList.add('hidden');
     this.resultGif.classList.add('hidden');
     this.simulationFrame.classList.remove('hidden');
     this.simulationFrame.src = url;
@@ -778,7 +894,8 @@ class AutoGripApp {
   showResult(gifUrl, code) {
     if (gifUrl) {
       this.viewerPlaceholder.classList.add('hidden');
-      this.cadPreviewCanvas.classList.add('hidden');
+      this.threeCanvas.classList.add('hidden');
+      this.viewerToolbar.classList.add('hidden');
       this.simulationFrame.classList.add('hidden');
       this.resultGif.classList.remove('hidden');
       this.resultGif.src = gifUrl;
@@ -812,6 +929,8 @@ class AutoGripApp {
     }
 
     this.logContainer.appendChild(entry);
+    this.logCount++;
+    this.logCountEl.textContent = this.logCount;
     this.scrollLogsToBottom();
   }
 
@@ -826,6 +945,8 @@ class AutoGripApp {
 
   clearLogs() {
     this.logContainer.innerHTML = '';
+    this.logCount = 0;
+    this.logCountEl.textContent = '0';
     this.addLog('info', 'Logs cleared');
   }
 
@@ -851,7 +972,16 @@ class AutoGripApp {
   showNotification(message, type = 'info') {
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
-    toast.textContent = message;
+
+    // Add icon based on type
+    const icons = {
+      success: '<svg class="toast-icon" viewBox="0 0 16 16" fill="currentColor"><path d="M8 16A8 8 0 108 0a8 8 0 000 16zm3.78-9.72a.75.75 0 00-1.06-1.06L7.25 8.69 5.28 6.72a.75.75 0 00-1.06 1.06l2.5 2.5a.75.75 0 001.06 0l4-4z"/></svg>',
+      error: '<svg class="toast-icon" viewBox="0 0 16 16" fill="currentColor"><path d="M2.343 13.657A8 8 0 1113.657 2.343 8 8 0 012.343 13.657zM6.03 4.97a.75.75 0 00-1.06 1.06L6.94 8 4.97 9.97a.75.75 0 101.06 1.06L8 9.06l1.97 1.97a.75.75 0 101.06-1.06L9.06 8l1.97-1.97a.75.75 0 10-1.06-1.06L8 6.94 6.03 4.97z"/></svg>',
+      info: '<svg class="toast-icon" viewBox="0 0 16 16" fill="currentColor"><path d="M0 8a8 8 0 1116 0A8 8 0 010 8zm8-3a1 1 0 100-2 1 1 0 000 2zm-2 3a1 1 0 011-1h1v4h1a1 1 0 110 2H7a1 1 0 110-2h1V8H7a1 1 0 01-1-1z"/></svg>',
+      warn: '<svg class="toast-icon" viewBox="0 0 16 16" fill="currentColor"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0114.082 15H1.918a1.75 1.75 0 01-1.543-2.575L6.457 1.047zM8 5a.75.75 0 00-.75.75v2.5a.75.75 0 001.5 0v-2.5A.75.75 0 008 5zm1 6a1 1 0 10-2 0 1 1 0 002 0z"/></svg>',
+    };
+
+    toast.innerHTML = `${icons[type] || icons.info}<span>${this.escapeHtml(message)}</span>`;
     this.toastContainer.appendChild(toast);
 
     setTimeout(() => {

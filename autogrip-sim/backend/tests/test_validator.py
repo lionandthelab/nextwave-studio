@@ -61,10 +61,10 @@ class TestSuccessfulGrasp:
     """Tests for a fully passing simulation result."""
 
     def test_successful_grasp(self, validator: GraspValidator):
-        """All 4 checks should pass with good sim_result values."""
+        """All 5 checks should pass with good sim_result values."""
         result = validator.validate(_make_sim_result())
         assert result.success is True
-        assert len(result.checks) == 4
+        assert len(result.checks) == 5
         assert all(c.passed for c in result.checks.values())
         assert result.error_log == ""
         assert result.suggestions == []
@@ -245,3 +245,106 @@ class TestEdgeCaseThresholds:
         )
         result = validator.validate(sim)
         assert result.checks["hold_test"].passed is True
+
+
+class TestWorkspaceCheck:
+    """Tests for the _check_workspace method."""
+
+    def test_workspace_pass_default_position(self, validator: GraspValidator):
+        """Default object position (0.5, 0.0) should be within workspace."""
+        sim = _make_sim_result()
+        result = validator.validate(sim)
+        assert "workspace_test" in result.checks
+        assert result.checks["workspace_test"].passed is True
+
+    def test_workspace_fail_object_too_far_x(self, validator: GraspValidator):
+        """Object beyond x_max should fail workspace check."""
+        sim = _make_sim_result()
+        sim["object_final_state"]["position"] = [0.8, 0.0, 0.3]
+        result = validator.validate(sim)
+        assert result.checks["workspace_test"].passed is False
+        assert "outside" in result.checks["workspace_test"].message.lower()
+
+    def test_workspace_fail_object_too_close(self, validator: GraspValidator):
+        """Object below x_min should fail workspace check."""
+        sim = _make_sim_result()
+        sim["object_final_state"]["position"] = [0.05, 0.0, 0.3]
+        result = validator.validate(sim)
+        assert result.checks["workspace_test"].passed is False
+
+    def test_workspace_fail_object_y_out_of_range(self, validator: GraspValidator):
+        """Object beyond y limits should fail workspace check."""
+        sim = _make_sim_result()
+        sim["object_final_state"]["position"] = [0.4, 0.5, 0.3]
+        result = validator.validate(sim)
+        assert result.checks["workspace_test"].passed is False
+
+    def test_workspace_fail_radius_exceeded(self, validator: GraspValidator):
+        """Object beyond radius_max should fail workspace check."""
+        sim = _make_sim_result()
+        # (0.5, 0.35) -> radius ~= 0.61 > 0.60
+        sim["object_final_state"]["position"] = [0.5, 0.35, 0.3]
+        result = validator.validate(sim)
+        assert result.checks["workspace_test"].passed is False
+
+    def test_workspace_boundary_values(self, validator: GraspValidator):
+        """Object exactly at workspace boundaries should pass."""
+        from app.sim_interface.validator import WORKSPACE_LIMITS
+
+        sim = _make_sim_result()
+        sim["object_final_state"]["position"] = [
+            WORKSPACE_LIMITS["x_min"],
+            0.0,
+            0.3,
+        ]
+        result = validator.validate(sim)
+        assert result.checks["workspace_test"].passed is True
+
+    def test_successful_grasp_now_has_5_checks(self, validator: GraspValidator):
+        """Successful grasp should now pass all 5 checks including workspace."""
+        result = validator.validate(_make_sim_result())
+        assert result.success is True
+        assert len(result.checks) == 5
+        assert "workspace_test" in result.checks
+        assert all(c.passed for c in result.checks.values())
+
+
+class TestUpdatedThresholds:
+    """Tests to verify the updated threshold values."""
+
+    def test_hold_height_threshold(self, validator: GraspValidator):
+        """HOLD_HEIGHT_THRESHOLD should be 0.15."""
+        assert validator.HOLD_HEIGHT_THRESHOLD == 0.15
+
+    def test_min_contact_force(self, validator: GraspValidator):
+        """MIN_CONTACT_FORCE should be 2.0."""
+        assert validator.MIN_CONTACT_FORCE == 2.0
+
+    def test_max_safe_force(self, validator: GraspValidator):
+        """MAX_SAFE_FORCE should be 100.0."""
+        assert validator.MAX_SAFE_FORCE == 100.0
+
+    def test_workspace_limits_defined(self):
+        """WORKSPACE_LIMITS should contain all required boundaries."""
+        from app.sim_interface.validator import WORKSPACE_LIMITS
+
+        assert "x_min" in WORKSPACE_LIMITS
+        assert "x_max" in WORKSPACE_LIMITS
+        assert "y_min" in WORKSPACE_LIMITS
+        assert "y_max" in WORKSPACE_LIMITS
+        assert "z_min" in WORKSPACE_LIMITS
+        assert "z_max" in WORKSPACE_LIMITS
+        assert "radius_max" in WORKSPACE_LIMITS
+
+    def test_object_thresholds_presets(self):
+        """OBJECT_THRESHOLDS should have small_light, medium, large_heavy."""
+        from app.sim_interface.validator import OBJECT_THRESHOLDS
+
+        assert "small_light" in OBJECT_THRESHOLDS
+        assert "medium" in OBJECT_THRESHOLDS
+        assert "large_heavy" in OBJECT_THRESHOLDS
+        for preset in OBJECT_THRESHOLDS.values():
+            assert "min_contact_force" in preset
+            assert "max_safe_force" in preset
+            assert "hold_height" in preset
+            assert "hold_duration" in preset
