@@ -6,10 +6,11 @@ import pytest
 
 from app.sim_interface.connector import IsaacSimConnector, MockSimulator, SimulationContext
 
+
 @pytest.fixture()
-def connector() -> IsaacSimConnector:
-    """Provide a fresh IsaacSimConnector instance."""
-    return IsaacSimConnector()
+def connector(sim_http_client) -> IsaacSimConnector:
+    """Provide a fresh IsaacSimConnector backed by the test sim_server."""
+    return IsaacSimConnector(http_client=sim_http_client)
 
 
 @pytest.fixture()

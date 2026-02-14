@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     isaac_sim_path: str = "/isaac-sim"
     isaac_sim_headless: bool = True
     isaac_sim_docker_image: str = "nvcr.io/nvidia/isaac-sim:4.2.0"
+    isaac_sim_endpoint: str = "http://localhost:9090"
 
     # CORS
     cors_origins: list[str] = ["http://localhost:8000", "http://localhost:3000"]

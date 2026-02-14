@@ -37,6 +37,7 @@ async def _event_generator(session_id: str):
     """Yield SSE events as the correction loop progresses."""
     last_log_index = 0
     last_iteration = 0
+    last_result_index = 0  # track results separately from iteration count
     last_code = None
     start_time = time.monotonic()
 
@@ -71,19 +72,22 @@ async def _event_generator(session_id: str):
 
         # Emit iteration updates
         if session.current_iteration > last_iteration:
-            # Emit iteration_start for the new iteration
-            yield {
-                "event": "iteration_start",
-                "data": json.dumps({"iteration": session.current_iteration}),
-            }
-
-            # Emit any new results as iteration_result events
-            for result in session.results[last_iteration:]:
+            # Emit iteration_start for each missed iteration
+            for it in range(last_iteration + 1, session.current_iteration + 1):
                 yield {
-                    "event": "iteration_result",
-                    "data": result.model_dump_json(),
+                    "event": "iteration_start",
+                    "data": json.dumps({"iteration": it}),
                 }
             last_iteration = session.current_iteration
+
+        # Emit any new results (tracked separately to avoid skipping)
+        new_results = session.results[last_result_index:]
+        for result in new_results:
+            yield {
+                "event": "iteration_result",
+                "data": result.model_dump_json(),
+            }
+        last_result_index = len(session.results)
 
         # Emit code_update when generated code changes
         if session.generated_code and session.generated_code != last_code:

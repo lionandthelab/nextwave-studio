@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import base64
 import hashlib
 import io
 import logging
@@ -11,6 +11,8 @@ import random
 import struct
 import time
 from dataclasses import dataclass, field
+
+import httpx
 
 from app.config import settings
 
@@ -317,8 +319,8 @@ class MockSimulator:
                 "contact_count": 2,
             },
             "contact_forces": [
-                {"finger": "left", "force_n": quality["torque_value"] / 0.03 * 1.05},
-                {"finger": "right", "force_n": quality["torque_value"] / 0.03 * 0.95},
+                {"finger": "left", "force_n": quality["torque_value"] / 0.06 * 1.05},
+                {"finger": "right", "force_n": quality["torque_value"] / 0.06 * 0.95},
             ],
             "joint_states": {
                 "joint_0": {"position": 0.0, "torque": 0.0},
@@ -530,17 +532,30 @@ class MockSimulator:
 
 
 # ---------------------------------------------------------------------------
-# IsaacSimConnector
+# IsaacSimConnector - communicates with sim_server via HTTP
 # ---------------------------------------------------------------------------
 
 
 class IsaacSimConnector:
-    """Manages connection to NVIDIA Isaac Sim or falls back to MockSimulator."""
+    """Manages connection to Isaac Sim server via HTTP REST API.
 
-    def __init__(self):
+    Communicates with the sim_server running inside the Isaac Sim Docker
+    container (or in mock mode for development/testing).
+    """
+
+    def __init__(self, http_client: httpx.AsyncClient | None = None):
         self._context: SimulationContext | None = None
-        self._mock = MockSimulator()
-        self._use_mock = True  # Always use mock in development
+        self._http_client = http_client
+        self._owns_client = http_client is None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return the HTTP client, creating one if needed."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                base_url=settings.isaac_sim_endpoint,
+                timeout=60.0,
+            )
+        return self._http_client
 
     @property
     def context(self) -> SimulationContext | None:
@@ -549,8 +564,7 @@ class IsaacSimConnector:
     async def start_simulation(self, headless: bool = True) -> bool:
         """Start a new simulation session.
 
-        In production, this would launch Isaac Sim via subprocess or Docker.
-        Currently uses MockSimulator for development.
+        Sends /init to the sim_server to initialise the simulation engine.
 
         Args:
             headless: Whether to run without GUI.
@@ -558,21 +572,24 @@ class IsaacSimConnector:
         Returns:
             True if the simulation started successfully.
         """
-        self._context = SimulationContext(running=True, headless=headless)
-        self._mock.reset()
+        client = await self._get_client()
+        resp = await client.post("/init", json={"headless": headless})
+        resp.raise_for_status()
 
-        logger.info(
-            "Simulation started (mock=%s, headless=%s)",
-            self._use_mock,
-            headless,
-        )
+        self._context = SimulationContext(running=True, headless=headless)
         self._context.logs.append("Simulation session started")
+
+        logger.info("Simulation started (headless=%s)", headless)
         return True
 
     async def load_scene(self) -> bool:
         """Set up the basic simulation scene (ground plane, lighting, gravity)."""
         if not self._context:
             raise RuntimeError("Simulation not started")
+
+        client = await self._get_client()
+        resp = await client.post("/scene/load", json={})
+        resp.raise_for_status()
 
         self._context.ground_plane = True
         self._context.logs.append(
@@ -592,6 +609,10 @@ class IsaacSimConnector:
         """
         if not self._context:
             raise RuntimeError("Simulation not started")
+
+        client = await self._get_client()
+        resp = await client.post("/robot/load", json={"model": robot_model})
+        resp.raise_for_status()
 
         prim_path = f"/World/{robot_model}"
         self._context.robot = RobotState(
@@ -629,6 +650,13 @@ class IsaacSimConnector:
         if not self._context:
             raise RuntimeError("Simulation not started")
 
+        client = await self._get_client()
+        resp = await client.post("/object/load", json={
+            "cad_file_path": cad_file_path,
+            "position": list(position),
+        })
+        resp.raise_for_status()
+
         obj_name = f"object_{hashlib.md5(cad_file_path.encode()).hexdigest()[:8]}"
         prim_path = f"/World/{obj_name}"
 
@@ -648,6 +676,9 @@ class IsaacSimConnector:
     async def execute_code(self, code: str) -> dict:
         """Execute generated grasping code in the simulation.
 
+        Sends the code to the sim_server for execution, decodes base64
+        frames from the response, and updates the local context.
+
         Args:
             code: Python code string to execute.
 
@@ -659,13 +690,31 @@ class IsaacSimConnector:
 
         self._context.logs.append("Executing generated grasping code...")
 
-        if self._use_mock:
-            result = await self._mock.simulate_execution(code, self._context)
-        else:
-            # Production path: would use Isaac Sim's script execution API
-            raise NotImplementedError("Production Isaac Sim execution not yet implemented")
+        client = await self._get_client()
+        resp = await client.post("/execute", json={"code": code})
+        resp.raise_for_status()
+        result = resp.json()
 
-        return result
+        # Decode base64 frames to PNG bytes
+        frames_b64 = result.get("frames", [])
+        frames = [base64.b64decode(f) for f in frames_b64]
+
+        # Update local context
+        duration = result.get("duration", 0.0)
+        self._context.elapsed_time += duration
+        self._context.frame_count += len(frames)
+        self._context.frames.extend(frames)
+        self._context.logs.extend(result.get("logs", []))
+
+        return {
+            "success": result["success"],
+            "duration": result["duration"],
+            "frames": frames,
+            "logs": result.get("logs", []),
+            "object_final_state": result["object_final_state"],
+            "contact_forces": result["contact_forces"],
+            "joint_states": result["joint_states"],
+        }
 
     async def capture_frames(self) -> list[bytes]:
         """Return all captured simulation frames as PNG bytes."""
@@ -676,6 +725,12 @@ class IsaacSimConnector:
     async def stop_simulation(self):
         """Stop and clean up the simulation session."""
         if self._context:
+            try:
+                client = await self._get_client()
+                await client.post("/reset")
+            except Exception:
+                logger.warning("Failed to reset sim server during stop")
+
             self._context.running = False
             self._context.logs.append("Simulation session stopped")
             logger.info("Simulation stopped (elapsed=%.1fs)", self._context.elapsed_time)
@@ -703,3 +758,9 @@ class IsaacSimConnector:
             "contacts": obj.contacts,
             "mass": obj.mass,
         }
+
+    async def close(self):
+        """Close the HTTP client if owned by this connector."""
+        if self._owns_client and self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None

@@ -60,12 +60,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static files
-static_dir = Path(__file__).resolve().parent.parent / "static"
-if static_dir.is_dir():
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
-# API routers
+# API routers (registered before static mount so they take priority)
 app.include_router(upload.router, prefix="/api/v1")
 app.include_router(generate.router, prefix="/api/v1")
 app.include_router(monitor.router, prefix="/api/v1")
@@ -75,20 +70,18 @@ app.include_router(monitor.router, prefix="/api/v1")
 # Root endpoints
 # ------------------------------------------------------------------
 
-@app.get("/")
-async def root():
-    """Serve the frontend dashboard."""
-    index = static_dir / "index.html"
-    if index.is_file():
-        return FileResponse(str(index))
-    return JSONResponse(
-        {"status": "ok", "service": "AutoGrip-Sim Engine", "version": "0.1.0"}
-    )
-
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# Static files – mounted at "/" with html=True so that index.html is
+# served for "/" and relative paths (css/style.css, js/app.js) resolve
+# correctly.  Must be registered AFTER API routers to avoid shadowing.
+static_dir = Path(__file__).resolve().parent.parent / "static"
+if static_dir.is_dir():
+    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
 
 # ------------------------------------------------------------------

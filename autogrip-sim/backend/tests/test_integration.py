@@ -1,7 +1,7 @@
 """End-to-end integration test of the full self-correcting loop.
 
 Tests the full pipeline: generate code -> simulate -> validate -> correct,
-using the MockSimulator and mocked LLM engine.
+using the sim_server (mock mode) and mocked LLM engine.
 """
 
 from __future__ import annotations
@@ -15,6 +15,12 @@ from app.sim_interface.connector import IsaacSimConnector, MockSimulator
 from app.sim_interface.validator import GraspValidator, ValidationResult
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture()
+def connector(sim_http_client) -> IsaacSimConnector:
+    """Provide a fresh IsaacSimConnector backed by the test sim_server."""
+    return IsaacSimConnector(http_client=sim_http_client)
 
 
 # ---------------------------------------------------------------------------
@@ -50,9 +56,8 @@ def _make_bad_code() -> str:
 class TestSelfCorrectingLoop:
     """Integration tests for the generate -> simulate -> validate -> correct pipeline."""
 
-    async def test_full_loop_with_mock_simulator(self):
-        """Run the full loop with MockSimulator until success or max iterations."""
-        connector = IsaacSimConnector()
+    async def test_full_loop_with_mock_simulator(self, connector):
+        """Run the full loop with sim_server until success or max iterations."""
         validator = GraspValidator()
 
         await connector.start_simulation(headless=True)
@@ -100,10 +105,8 @@ class TestSelfCorrectingLoop:
         assert len(all_results) > 0
         assert all(isinstance(r["success"], bool) for r in all_results)
 
-    async def test_loop_produces_frames(self):
+    async def test_loop_produces_frames(self, connector):
         """Running simulation should produce capturable frames."""
-        connector = IsaacSimConnector()
-
         await connector.start_simulation(headless=True)
         await connector.load_scene()
         await connector.load_robot("unitree_h1")
@@ -121,9 +124,8 @@ class TestSelfCorrectingLoop:
 
         await connector.stop_simulation()
 
-    async def test_validator_results_structure(self):
+    async def test_validator_results_structure(self, connector):
         """Validation results should have consistent structure across iterations."""
-        connector = IsaacSimConnector()
         validator = GraspValidator()
 
         await connector.start_simulation(headless=True)
@@ -163,12 +165,12 @@ class TestSelfCorrectingLoop:
 class TestRunnerIntegration:
     """Integration tests using the runner module functions."""
 
-    async def test_run_and_validate_pipeline(self):
+    async def test_run_and_validate_pipeline(self, sim_http_client):
         """run_simulation + validate_result should produce valid output."""
         from app.sim_interface import runner
 
-        # Reset singletons
-        runner._connector = None
+        # Inject connector with test sim_server
+        runner._connector = IsaacSimConnector(http_client=sim_http_client)
         runner._validator = None
 
         sim_output = await runner.run_simulation(
@@ -193,11 +195,11 @@ class TestRunnerIntegration:
         runner._connector = None
         runner._validator = None
 
-    async def test_multiple_iterations_consistent(self):
+    async def test_multiple_iterations_consistent(self, sim_http_client):
         """Multiple run+validate cycles should produce consistent check keys."""
         from app.sim_interface import runner
 
-        runner._connector = None
+        runner._connector = IsaacSimConnector(http_client=sim_http_client)
         runner._validator = None
 
         check_keys_set = None

@@ -1,7 +1,7 @@
 """End-to-end integration test for the self-correcting loop.
 
 Tests the full flow: upload -> create session -> run correction loop
-with mocked LLM but real MockSimulator and GraspValidator.
+with mocked LLM but real sim_server (mock mode) and GraspValidator.
 """
 
 from __future__ import annotations
@@ -10,12 +10,24 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 
 from app.api.v1.generate import run_correction_loop
 from app.session_manager import session_manager
+from app.sim_interface.connector import IsaacSimConnector
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _inject_sim_connector(sim_http_client):
+    """Ensure runner uses a connector connected to the test sim_server."""
+    from app.sim_interface import runner
+
+    runner._connector = IsaacSimConnector(http_client=sim_http_client)
+    yield
+    runner._connector = None
 
 
 async def _upload_and_create_session(

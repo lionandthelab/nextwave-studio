@@ -23,7 +23,7 @@ RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
 WORKDIR /autogrip-sim
 
 # Copy simulation scripts
-COPY sim_scripts/ /autogrip-sim/sim_scripts/
+COPY docker/sim_scripts/ /autogrip-sim/sim_scripts/
 
 # Expose port for internal communication with main backend
 EXPOSE 9090

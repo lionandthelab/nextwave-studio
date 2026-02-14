@@ -18,6 +18,8 @@ class AutoGripApp {
     this.logCount = 0;
     this.iterationResults = [];
     this.stlViewer = null;
+    this._graspQueue = [];     // queued grasp animation results
+    this._graspPlaying = false; // animation lock
 
     // Bind DOM elements
     this.bindElements();
@@ -418,6 +420,9 @@ class AutoGripApp {
         // Hide loading
         this.viewerLoading.classList.add('hidden');
 
+        // Show gripper immediately for visual preview
+        this.stlViewer.addGripper();
+
         this.addLog('info', '3D preview loaded with orbit controls');
       } catch (err) {
         this.viewerLoading.classList.add('hidden');
@@ -433,9 +438,12 @@ class AutoGripApp {
     this.viewerToolbar.classList.add('hidden');
     this.viewerPlaceholder.classList.remove('hidden');
     if (this.stlViewer) {
+      this.stlViewer.removeGripper();
       this.stlViewer.dispose();
       this.stlViewer = null;
     }
+    this._graspQueue = [];
+    this._graspPlaying = false;
   }
 
   // --- Generation Control ---
@@ -561,6 +569,8 @@ class AutoGripApp {
         } else {
           this.addLog('warn', `Iteration ${this.currentIteration} failed - ${data.error || 'retrying...'}`);
         }
+        // Queue gripper animation (backend is faster than the 3D animation)
+        this.queueGraspAnimation(success, this.currentIteration);
       } catch {
         // ignore
       }
@@ -605,7 +615,12 @@ class AutoGripApp {
           this.addLog('error', `Generation ended with status: ${status}`);
           this.updateProgress(this.currentIteration, this.maxIter, 'error');
         }
-        this.showResult(data.gif_url, data.code);
+        // Update code but keep 3D viewer visible (don't switch to GIF)
+        if (data.code) this.updateCode(data.code);
+        this.showNotification(
+          status === 'success' ? 'Generation completed successfully!' : `Generation ended: ${status}`,
+          status === 'success' ? 'success' : 'warn'
+        );
       } catch {
         this.addLog('info', 'Generation completed');
         this.fetchResults();
@@ -706,9 +721,16 @@ class AutoGripApp {
     if (running) {
       this.currentIteration = 0;
       this.iterationResults = [];
+      this._graspQueue = [];
+      this._graspPlaying = false;
       this.updateProgress(0, this.maxIter, 'initializing');
       this.buildProgressSteps();
+      // Add gripper to 3D viewer for grasp animation
+      if (this.stlViewer && this.stlViewer.mesh) {
+        this.stlViewer.addGripper();
+      }
     }
+    // Don't remove gripper on completion – let queued animations finish
   }
 
   updateStartButton() {
@@ -862,6 +884,11 @@ class AutoGripApp {
 
   // --- Viewer ---
   updateViewer(base64Image) {
+    // If 3D gripper animation is active, keep the 3D viewer visible
+    if (this.stlViewer && this.stlViewer.gripperGroup) {
+      return; // skip flat frame – 3D animation is running
+    }
+
     // Hide 3D preview, show simulation frame
     this.viewerPlaceholder.classList.add('hidden');
     this.threeCanvas.classList.add('hidden');
@@ -906,6 +933,28 @@ class AutoGripApp {
     }
 
     this.showNotification('Generation completed successfully!', 'success');
+  }
+
+  // --- Grasp Animation Queue ---
+  queueGraspAnimation(success, iteration) {
+    this._graspQueue.push({ success, iteration });
+    if (!this._graspPlaying) {
+      this._processGraspQueue();
+    }
+  }
+
+  async _processGraspQueue() {
+    if (this._graspPlaying) return;
+    this._graspPlaying = true;
+
+    while (this._graspQueue.length > 0) {
+      const { success, iteration } = this._graspQueue.shift();
+      if (this.stlViewer && this.stlViewer.gripperGroup) {
+        await this.stlViewer.animateGraspAttempt(success, iteration);
+      }
+    }
+
+    this._graspPlaying = false;
   }
 
   // --- Logs ---

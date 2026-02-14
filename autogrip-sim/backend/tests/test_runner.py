@@ -6,17 +6,19 @@ Covers: run_simulation, validate_result integration with connector and validator
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 
 from app.sim_interface import runner
+from app.sim_interface.connector import IsaacSimConnector
 
 
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.fixture(autouse=True)
-def reset_runner_singletons():
-    """Reset module-level singletons between tests."""
-    runner._connector = None
+@pytest_asyncio.fixture(autouse=True)
+async def reset_runner_singletons(sim_http_client):
+    """Reset module-level singletons and inject test connector."""
+    runner._connector = IsaacSimConnector(http_client=sim_http_client)
     runner._validator = None
     yield
     runner._connector = None

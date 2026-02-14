@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import struct
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.config import Settings
+
+# Make sim_server importable from docker/sim_scripts/
+_sim_scripts_dir = str(Path(__file__).resolve().parent.parent / "docker" / "sim_scripts")
+if _sim_scripts_dir not in sys.path:
+    sys.path.insert(0, _sim_scripts_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -187,3 +193,24 @@ async def client(tmp_upload_dir: Path):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
+
+
+# ---------------------------------------------------------------------------
+# Sim-server fixture (for IsaacSimConnector HTTP tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture()
+async def sim_http_client():
+    """Provide an httpx.AsyncClient connected to sim_server via ASGI transport.
+
+    The sim_server runs in mock mode (no real Isaac Sim) and provides the
+    same REST API that the Docker-based sim_server exposes.
+    """
+    from sim_server import app as sim_app, sim_manager
+
+    transport = ASGITransport(app=sim_app)
+    async with AsyncClient(transport=transport, base_url="http://sim-test") as ac:
+        yield ac
+    # Reset sim_server state after each test
+    await sim_manager.reset()
