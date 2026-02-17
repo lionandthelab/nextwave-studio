@@ -38,3 +38,6 @@ Thumbs.db
 
 # Docker
 docker/sim_scripts/__pycache__/
+
+# oh-my-claudecode tool state
+.omc/
