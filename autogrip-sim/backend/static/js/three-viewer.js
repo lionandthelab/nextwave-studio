@@ -60,7 +60,7 @@ class STLViewer {
     this.controls.rotateSpeed = 0.8;
     this.controls.zoomSpeed = 1.2;
     this.controls.panSpeed = 0.8;
-    this.controls.minDistance = 1;
+    this.controls.minDistance = 0.05;
     this.controls.maxDistance = 5000;
 
     // Lighting
@@ -271,10 +271,11 @@ class STLViewer {
     this.controls.target.set(0, size.y * 0.3, 0);
     this.controls.update();
 
-    // Update near/far planes
-    this.camera.near = maxDim * 0.01;
+    // Update near/far planes and zoom limits for close inspection
+    this.camera.near = maxDim * 0.005;
     this.camera.far = maxDim * 20;
     this.camera.updateProjectionMatrix();
+    this.controls.minDistance = maxDim * 0.03;
   }
 
   resetCamera() {
@@ -298,7 +299,12 @@ class STLViewer {
     const objSize = new THREE.Vector3();
     bbox.getSize(objSize);
     const maxDim = Math.max(objSize.x, objSize.y, objSize.z);
-    const s = maxDim * 0.3; // scale unit
+
+    // Scale hand so palm is wider than the object cross-section and
+    // fingers are long enough to reach alongside the object height.
+    // This ensures fingers hang OUTSIDE the object bounding box.
+    const crossSection = Math.max(objSize.x, objSize.z);
+    const s = Math.max(crossSection * 1.35, objSize.y * 0.8, maxDim * 0.6);
 
     // Store metrics for animation
     this._gs = {
@@ -306,20 +312,24 @@ class STLViewer {
       objBbox: bbox,
       objCenter: new THREE.Vector3(),
       maxDim,
-      startY: bbox.max.y + maxDim * 0.85,
-      graspY: bbox.max.y + s * 0.15,
-      liftY: bbox.max.y + maxDim * 0.65,
-      // Curl angles (radians) for closed grasp
+      startY: bbox.max.y + s * 1.6,
+      graspY: bbox.max.y + s * 0.22 * 0.5 + s * 0.08,  // palm just above object top
+      liftY: bbox.max.y + s * 1.0,
+      // Curl angles: NEGATIVE = inward curl for front fingers (toward +Z / object center)
       curlAngles: {
-        proximal: Math.PI * 0.38,
-        middle: Math.PI * 0.33,
-        distal: Math.PI * 0.22,
+        proximal: -Math.PI * 0.38,
+        middle: -Math.PI * 0.33,
+        distal: -Math.PI * 0.22,
       },
+      // Thumb curls in opposite direction (positive) to oppose the fingers
       thumbCurl: {
         proximal: Math.PI * 0.30,
         middle: Math.PI * 0.25,
         distal: Math.PI * 0.18,
       },
+      // Splay angles: fingers start slightly outward before closing
+      splayOpen: 0.25,       // radians outward for 4 fingers (positive = away from object)
+      thumbSplayOpen: -0.20, // thumb splays the other way
     };
     bbox.getCenter(this._gs.objCenter);
 
@@ -445,6 +455,7 @@ class STLViewer {
     const { len, w } = spec;
     const segLens = [len * 0.42, len * 0.32, len * 0.26];
     const joints = [];
+    const segWidths = [];
 
     const group = new THREE.Group();
     let parent = group;
@@ -462,6 +473,7 @@ class STLViewer {
 
       // Phalanx segment (extends downward from joint)
       const segW = w * (1 - i * 0.1);
+      segWidths.push(segW);
       const segD = segW * 0.9;
       const segGeo = new THREE.BoxGeometry(segW, segLen * 0.85, segD);
       const seg = new THREE.Mesh(segGeo, bodyMat);
@@ -510,7 +522,83 @@ class STLViewer {
     tipMarker.position.y = -segLens[segLens.length - 1];
     joints[joints.length - 1].add(tipMarker);
 
-    return { group, joints, tipMarker };
+    return { group, joints, segWidths, tipMarker };
+  }
+
+  /** Add a translucent tray marker at the pick-and-place target position. */
+  addTrayMarker(position) {
+    this.removeTrayMarker();
+    if (!this.mesh) return;
+
+    const bbox = new THREE.Box3().setFromObject(this.mesh);
+    const objSize = new THREE.Vector3();
+    bbox.getSize(objSize);
+    const maxDim = Math.max(objSize.x, objSize.y, objSize.z);
+
+    // Scale from sim meters to viewer units (rough mapping)
+    const scale = maxDim / 0.15; // assume object ~15cm in sim
+    const trayX = (position[0] - 0.5) * scale; // offset from object center at (0.5,0,0.05)
+    const trayZ = -position[1] * scale;
+    const trayY = 0;
+
+    this._trayGroup = new THREE.Group();
+
+    // Tray base
+    const baseW = maxDim * 0.8;
+    const baseH = maxDim * 0.04;
+    const baseD = maxDim * 0.8;
+    const baseMat = new THREE.MeshPhysicalMaterial({
+      color: 0x3fb950, metalness: 0.2, roughness: 0.6,
+      transparent: true, opacity: 0.35,
+    });
+    const baseGeo = new THREE.BoxGeometry(baseW, baseH, baseD);
+    const base = new THREE.Mesh(baseGeo, baseMat);
+    base.position.y = baseH / 2;
+    this._trayGroup.add(base);
+
+    // Tray walls (4 sides)
+    const wallH = maxDim * 0.12;
+    const wallThick = maxDim * 0.02;
+    const wallMat = new THREE.MeshPhysicalMaterial({
+      color: 0x3fb950, metalness: 0.2, roughness: 0.6,
+      transparent: true, opacity: 0.25,
+    });
+    const wallConfigs = [
+      { w: baseW, d: wallThick, x: 0, z: -baseD / 2 },
+      { w: baseW, d: wallThick, x: 0, z: baseD / 2 },
+      { w: wallThick, d: baseD, x: -baseW / 2, z: 0 },
+      { w: wallThick, d: baseD, x: baseW / 2, z: 0 },
+    ];
+    wallConfigs.forEach(cfg => {
+      const wGeo = new THREE.BoxGeometry(cfg.w, wallH, cfg.d);
+      const wall = new THREE.Mesh(wGeo, wallMat);
+      wall.position.set(cfg.x, baseH + wallH / 2, cfg.z);
+      this._trayGroup.add(wall);
+    });
+
+    // Target crosshair on the tray
+    const ringGeo = new THREE.RingGeometry(maxDim * 0.08, maxDim * 0.12, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x3fb950, transparent: true, opacity: 0.5, side: THREE.DoubleSide,
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = baseH + 0.5;
+    this._trayGroup.add(ring);
+
+    this._trayGroup.position.set(trayX, trayY, trayZ);
+    this.scene.add(this._trayGroup);
+  }
+
+  removeTrayMarker() {
+    if (this._trayGroup) {
+      this._trayGroup.traverse(child => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+      });
+      this.scene.remove(this._trayGroup);
+      this._trayGroup = null;
+    }
   }
 
   removeGripper() {
@@ -527,12 +615,181 @@ class STLViewer {
     this._gs = null;
   }
 
+  /**
+   * Pre-compute mesh triangles in world space for exact collision detection.
+   * Returns array of THREE.Triangle objects.
+   */
+  _buildMeshTriangles() {
+    if (!this.mesh) return [];
+    const geometry = this.mesh.geometry;
+    const positions = geometry.attributes.position;
+    const worldMatrix = this.mesh.matrixWorld;
+    const triangles = [];
+
+    for (let i = 0; i < positions.count; i += 3) {
+      const v0 = new THREE.Vector3().fromBufferAttribute(positions, i).applyMatrix4(worldMatrix);
+      const v1 = new THREE.Vector3().fromBufferAttribute(positions, i + 1).applyMatrix4(worldMatrix);
+      const v2 = new THREE.Vector3().fromBufferAttribute(positions, i + 2).applyMatrix4(worldMatrix);
+      triangles.push(new THREE.Triangle(v0, v1, v2));
+    }
+    return triangles;
+  }
+
+  /**
+   * Compute the minimum unsigned distance from a point to any mesh triangle.
+   * This is mathematically exact — no raycasting heuristics.
+   */
+  _minDistToTriangles(point, triangles) {
+    let minDist = Infinity;
+    const closestPt = new THREE.Vector3();
+
+    for (const tri of triangles) {
+      tri.closestPointToPoint(point, closestPt);
+      const dist = point.distanceTo(closestPt);
+      if (dist < minDist) {
+        minDist = dist;
+        if (minDist < 1e-6) return 0; // touching — early exit
+      }
+    }
+    return minDist;
+  }
+
+  /**
+   * Pre-compute per-finger max curl factor using exact point-to-triangle
+   * distance collision detection. Samples points along each phalanx segment's
+   * centerline AND at its edges (±width, ±depth offsets). Stops curling when
+   * any sample point's distance to the nearest mesh triangle is below threshold.
+   * Returns an array of factors [0..1] per finger, or null on error.
+   */
+  _precomputeFingerLimits() {
+    if (!this.mesh || !this._fingerJoints || !this._gs) return null;
+
+    const g = this._gs;
+    const limits = [];
+    const STEPS = 30;
+
+    // Build world-space triangles once (exact geometry, no raycasting)
+    this.mesh.updateMatrixWorld(true);
+    const triangles = this._buildMeshTriangles();
+    if (!triangles.length) return null;
+
+    // Object AABB for quick rejection
+    const objBox = new THREE.Box3().setFromObject(this.mesh);
+    const objBoxExpanded = objBox.clone().expandByScalar(g.maxDim * 0.5);
+
+    // Move gripper to grasp height temporarily
+    const savedY = this.gripperGroup.position.y;
+    this.gripperGroup.position.y = g.graspY;
+
+    for (const finger of this._fingerJoints) {
+      const baseAngles = finger.isThumb ? g.thumbCurl : g.curlAngles;
+      const savedRots = finger.joints.map(j => j.rotation.x);
+      let limitFactor = 1.0;
+
+      for (let s = 1; s <= STEPS; s++) {
+        const f = s / STEPS;
+
+        // Set joints to this curl level
+        finger.joints[0].rotation.x = baseAngles.proximal * f;
+        finger.joints[1].rotation.x = baseAngles.middle * f;
+        finger.joints[2].rotation.x = baseAngles.distal * f;
+        this.gripperGroup.updateMatrixWorld(true);
+
+        let penetrating = false;
+
+        // Check each of the 3 phalanx segments
+        for (let ji = 0; ji < 3 && !penetrating; ji++) {
+          // Segment endpoints in world space
+          const topPos = new THREE.Vector3();
+          finger.joints[ji].getWorldPosition(topPos);
+          const bottomPos = new THREE.Vector3();
+          if (ji < 2) {
+            finger.joints[ji + 1].getWorldPosition(bottomPos);
+          } else {
+            finger.tipMarker.getWorldPosition(bottomPos);
+          }
+
+          const halfW = (finger.segWidths[ji] || g.scale * 0.1) * 0.55;
+
+          // Compute perpendicular axes for edge sampling
+          const segDir = bottomPos.clone().sub(topPos);
+          const segLen = segDir.length();
+          if (segLen < 1e-6) continue;
+          segDir.normalize();
+          const refUp = Math.abs(segDir.y) < 0.9
+            ? new THREE.Vector3(0, 1, 0)
+            : new THREE.Vector3(1, 0, 0);
+          const perp1 = new THREE.Vector3().crossVectors(segDir, refUp).normalize();
+          const perp2 = new THREE.Vector3().crossVectors(segDir, perp1).normalize();
+
+          // Sample 5 positions along segment, each with center + 4 edges = 25 pts
+          for (let t = 0; t <= 1.0 && !penetrating; t += 0.25) {
+            const center = topPos.clone().lerp(bottomPos, t);
+
+            // Quick AABB rejection
+            if (!objBoxExpanded.containsPoint(center)) continue;
+
+            // Center point + 4 edge points (at finger half-width from center)
+            const samplePoints = [
+              center,
+              center.clone().addScaledVector(perp1, halfW),
+              center.clone().addScaledVector(perp1, -halfW),
+              center.clone().addScaledVector(perp2, halfW),
+              center.clone().addScaledVector(perp2, -halfW),
+            ];
+
+            for (const pt of samplePoints) {
+              const dist = this._minDistToTriangles(pt, triangles);
+              // If center point is within halfW of surface, finger edge touches
+              // If edge point is within thin margin, finger edge is on surface
+              const threshold = (pt === center) ? halfW : halfW * 0.15;
+              if (dist < threshold) {
+                penetrating = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (penetrating) {
+          limitFactor = Math.max(0.05, (s - 1) / STEPS);
+          break;
+        }
+      }
+
+      // Restore joint rotations
+      finger.joints.forEach((j, i) => { j.rotation.x = savedRots[i]; });
+      limits.push(limitFactor);
+    }
+
+    // Restore gripper position
+    this.gripperGroup.position.y = savedY;
+    this.gripperGroup.updateMatrixWorld(true);
+
+    return limits;
+  }
+
+  /**
+   * Fallback curl factor when triangle distance is unavailable.
+   */
+  _calculateCurlFactor() {
+    if (!this.mesh || !this._gs) return 0.65;
+    const g = this._gs;
+    const bbox = new THREE.Box3().setFromObject(this.mesh);
+    const objSize = new THREE.Vector3();
+    bbox.getSize(objSize);
+    const objRadius = Math.max(objSize.x, objSize.z) / 2;
+    const fingerReach = g.scale * 0.88 * 0.42;
+    const ratio = objRadius / Math.max(fingerReach, 0.01);
+    return Math.max(0.2, Math.min(0.95, 1.0 - ratio * 0.7));
+  }
+
   _fitCameraForGrasp() {
     if (!this._gs) return;
     const g = this._gs;
     const sceneHeight = g.startY + g.scale;
-    const lookY = sceneHeight * 0.38;
-    const dist = g.maxDim * 2.8;
+    const lookY = sceneHeight * 0.35;
+    const dist = Math.max(g.maxDim, g.scale) * 3.5;
     this.camera.position.set(
       dist * 0.8,
       lookY + dist * 0.35,
@@ -551,22 +808,32 @@ class STLViewer {
     this._clearContactIndicators();
     this._clearResultLabel();
 
-    // 1. Reset position & all finger joints to open
+    // 1. Reset position & splay fingers outward (pre-approach posture)
     this.gripperGroup.position.y = g.startY;
     this._fingerJoints.forEach(f => {
-      f.joints.forEach(j => { j.rotation.x = 0; });
+      const splay = f.isThumb ? g.thumbSplayOpen : g.splayOpen;
+      f.joints[0].rotation.x = splay;
+      f.joints[1].rotation.x = splay * 0.5;
+      f.joints[2].rotation.x = 0;
     });
 
-    // 2. Descend to grasp position
-    await this._tween(this.gripperGroup.position, 'y', g.graspY, 700);
+    // 2. Descend to grasp position with fingers splayed open
+    await this._tween(this.gripperGroup.position, 'y', g.graspY, 800);
 
-    // 3. Curl all fingers simultaneously (thumb uses different angles)
+    // 3. Curl fingers inward — collision limits prevent mesh penetration
+    const fingerLimits = this._precomputeFingerLimits();
+    const fallbackFactor = this._calculateCurlFactor();
     const curlPromises = [];
-    this._fingerJoints.forEach(f => {
+    this._fingerJoints.forEach((f, idx) => {
       const angles = f.isThumb ? g.thumbCurl : g.curlAngles;
-      const targets = [angles.proximal, angles.middle, angles.distal];
+      const limit = fingerLimits ? fingerLimits[idx] : fallbackFactor;
+      const targets = [
+        angles.proximal * limit,
+        angles.middle * limit,
+        angles.distal * limit,
+      ];
       f.joints.forEach((joint, i) => {
-        curlPromises.push(this._tween(joint.rotation, 'x', targets[i], 500));
+        curlPromises.push(this._tween(joint.rotation, 'x', targets[i], 600));
       });
     });
     await Promise.all(curlPromises);
@@ -729,6 +996,358 @@ class STLViewer {
     return new Promise(r => setTimeout(r, ms));
   }
 
+  // ==========================================================
+  // Simulation Replay — data-driven animation from Isaac Sim
+  // ==========================================================
+
+  /**
+   * Replay a simulation iteration using real data from the backend.
+   * @param {Object} replayData — replay_data from SimulationResult SSE event
+   *   phases: [{name, timestamp}], object_trajectory: [{position, timestamp}],
+   *   contact_forces: [{finger, force_n}], mode, success, place_target, duration
+   */
+  async replaySimulation(replayData) {
+    if (!this.gripperGroup || !this._gs || !this._fingerJoints) return;
+    const g = this._gs;
+
+    this._clearContactIndicators();
+    this._clearResultLabel();
+    this._clearPhaseLabel();
+
+    // Reset gripper position & all finger joints to open
+    this.gripperGroup.position.y = g.startY;
+    this._fingerJoints.forEach(f => {
+      f.joints.forEach(j => { j.rotation.x = 0; });
+    });
+
+    const phases = replayData.phases || [];
+    const mode = replayData.mode || 'grasp_only';
+    const success = replayData.success;
+    const placeTarget = replayData.place_target;
+    const trajectory = replayData.object_trajectory || [];
+    const contactForces = replayData.contact_forces || [];
+
+    // Compute animation speed factor based on duration (cap replay to ~6-10s)
+    const simDuration = replayData.duration || 9.0;
+    const targetReplayTime = Math.min(simDuration, 8.0);
+    const speedFactor = simDuration / targetReplayTime;
+
+    // Calculate phase-to-phase intervals (ms) scaled to replay time
+    const phaseDurations = [];
+    for (let i = 0; i < phases.length; i++) {
+      const nextT = i + 1 < phases.length ? phases[i + 1].timestamp : phases[i].timestamp + 1.0;
+      phaseDurations.push(Math.max(200, ((nextT - phases[i].timestamp) / speedFactor) * 1000));
+    }
+
+    // Transport target in viewer coordinates (for pick-and-place lateral move)
+    let transportX = 0;
+    let transportZ = 0;
+    if (placeTarget && this.mesh) {
+      const bbox = new THREE.Box3().setFromObject(this.mesh);
+      const objSize = new THREE.Vector3();
+      bbox.getSize(objSize);
+      const maxDim = Math.max(objSize.x, objSize.y, objSize.z);
+      const scale = maxDim / 0.15;
+      transportX = (placeTarget[0] - 0.5) * scale;
+      transportZ = -placeTarget[1] * scale;
+    }
+
+    // Execute each phase
+    for (let i = 0; i < phases.length; i++) {
+      const phase = phases[i];
+      const dur = phaseDurations[i];
+      this._showPhaseLabel(phase.name, i + 1, phases.length);
+
+      switch (phase.name) {
+        case 'APPROACH': {
+          // Splay fingers outward while approaching
+          this._fingerJoints.forEach(f => {
+            const splay = f.isThumb ? g.thumbSplayOpen : g.splayOpen;
+            f.joints[0].rotation.x = splay;
+            f.joints[1].rotation.x = splay * 0.5;
+            f.joints[2].rotation.x = 0;
+          });
+          await this._tween(this.gripperGroup.position, 'y', g.startY - g.scale * 0.2, dur);
+          break;
+        }
+
+        case 'DESCEND':
+          await this._tween(this.gripperGroup.position, 'y', g.graspY, dur);
+          break;
+
+        case 'GRASP': {
+          // Curl fingers inward with per-finger collision limits
+          const fingerLimits = this._precomputeFingerLimits();
+          const fallbackFactor = this._calculateCurlFactor();
+          const curlPromises = [];
+          this._fingerJoints.forEach((f, idx) => {
+            const baseAngles = f.isThumb ? g.thumbCurl : g.curlAngles;
+            const limit = fingerLimits ? fingerLimits[idx] : fallbackFactor;
+            const targets = [
+              baseAngles.proximal * limit,
+              baseAngles.middle * limit,
+              baseAngles.distal * limit,
+            ];
+            f.joints.forEach((joint, j) => {
+              curlPromises.push(this._tween(joint.rotation, 'x', targets[j], dur));
+            });
+          });
+          await Promise.all(curlPromises);
+          this._showContactPointsWithForce(contactForces, success);
+          break;
+        }
+
+        case 'LIFT':
+          // Lift gripper + object
+          if (this.mesh && success) {
+            const origObjY = this.mesh.position.y;
+            this._replayObjOrigY = origObjY;
+            await Promise.all([
+              this._tween(this.gripperGroup.position, 'y', g.liftY, dur),
+              this._tween(this.mesh.position, 'y', origObjY + g.maxDim * 0.5, dur),
+            ]);
+          } else {
+            await this._tween(this.gripperGroup.position, 'y', g.liftY, dur);
+          }
+          break;
+
+        case 'HOLD':
+          // Grasp-only: hold and show result
+          await this._delay(dur);
+          break;
+
+        case 'TRANSPORT':
+          // Move laterally toward place target
+          if (this.mesh && success) {
+            await Promise.all([
+              this._tween(this.gripperGroup.position, 'x', g.objCenter.x + transportX, dur),
+              this._tween(this.gripperGroup.position, 'z', g.objCenter.z + transportZ, dur),
+              this._tween(this.mesh.position, 'x', this.mesh.position.x + transportX, dur),
+              this._tween(this.mesh.position, 'z', this.mesh.position.z + transportZ, dur),
+            ]);
+          } else {
+            await Promise.all([
+              this._tween(this.gripperGroup.position, 'x', g.objCenter.x + transportX, dur),
+              this._tween(this.gripperGroup.position, 'z', g.objCenter.z + transportZ, dur),
+            ]);
+          }
+          break;
+
+        case 'PLACE':
+          // Lower into tray
+          if (this.mesh && success) {
+            await Promise.all([
+              this._tween(this.gripperGroup.position, 'y', g.graspY, dur),
+              this._tween(this.mesh.position, 'y', this._replayObjOrigY || 0, dur),
+            ]);
+          } else {
+            await this._tween(this.gripperGroup.position, 'y', g.graspY, dur);
+          }
+          break;
+
+        case 'RELEASE': {
+          // Uncurl fingers
+          this._clearContactIndicators();
+          const releasePromises = [];
+          this._fingerJoints.forEach(f => {
+            f.joints.forEach(joint => {
+              releasePromises.push(this._tween(joint.rotation, 'x', 0, dur));
+            });
+          });
+          await Promise.all(releasePromises);
+          break;
+        }
+
+        case 'RETRACT':
+          // Raise arm back up
+          await this._tween(this.gripperGroup.position, 'y', g.startY, dur);
+          break;
+
+        default:
+          await this._delay(dur);
+          break;
+      }
+    }
+
+    // Final result feedback
+    if (success) {
+      await this._flashGripper(0x3fb950, 3);
+      const resultText = mode === 'pick_and_place' ? 'PLACED' : 'HOLD';
+      this._showResultLabel(resultText, 0x3fb950);
+    } else {
+      await this._flashGripper(0xf85149, 3);
+      this._showResultLabel('FAILED', 0xf85149);
+      // Drop animation on failure
+      if (this.mesh && mode === 'grasp_only') {
+        const origY = this.mesh.position.y;
+        await this._tween(this.mesh.position, 'y', origY - g.maxDim * 0.15, 300);
+        await this._delay(200);
+        await this._tween(this.mesh.position, 'y', origY, 250);
+      }
+    }
+
+    await this._delay(800);
+
+    // Reset to start position
+    this._clearContactIndicators();
+    this._clearResultLabel();
+    this._clearPhaseLabel();
+
+    // Uncurl any remaining finger curl
+    const resetPromises = [];
+    this._fingerJoints.forEach(f => {
+      f.joints.forEach(joint => {
+        resetPromises.push(this._tween(joint.rotation, 'x', 0, 300));
+      });
+    });
+    await Promise.all(resetPromises);
+
+    // Reset object position if moved during PnP
+    if (this.mesh && mode === 'pick_and_place') {
+      const origCenter = g.objCenter.clone();
+      origCenter.y = this._replayObjOrigY || this.mesh.position.y;
+      await Promise.all([
+        this._tween(this.mesh.position, 'x', 0, 400),
+        this._tween(this.mesh.position, 'z', 0, 400),
+        this._tween(this.mesh.position, 'y', this._replayObjOrigY || this.mesh.position.y, 400),
+      ]);
+    }
+
+    // Return gripper to start
+    await Promise.all([
+      this._tween(this.gripperGroup.position, 'x', g.objCenter.x, 400),
+      this._tween(this.gripperGroup.position, 'z', g.objCenter.z, 400),
+      this._tween(this.gripperGroup.position, 'y', g.startY, 400),
+    ]);
+
+    this._replayObjOrigY = null;
+  }
+
+  /** Show contact indicators sized by force magnitude. */
+  _showContactPointsWithForce(contactForces, success) {
+    if (!this._fingerJoints || !this._gs) return;
+    const g = this._gs;
+    const color = success ? 0x3fb950 : 0xf85149;
+
+    // Map force data by finger name
+    const forceMap = {};
+    contactForces.forEach(c => { forceMap[c.finger] = c.force_n || 0; });
+
+    const fingerNames = ['index', 'middle', 'ring', 'pinky', 'thumb'];
+    this._fingerJoints.forEach((f, idx) => {
+      const worldPos = new THREE.Vector3();
+      f.tipMarker.getWorldPosition(worldPos);
+
+      const fName = fingerNames[idx] || `finger_${idx}`;
+      const force = forceMap[fName] || 0;
+      // Scale indicator by force (min 0.03, max 0.08 of scale)
+      const radius = g.scale * (0.03 + Math.min(force / 20, 0.05));
+
+      // Sphere
+      const sGeo = new THREE.SphereGeometry(radius, 10, 10);
+      const sMat = new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.9,
+      });
+      const sphere = new THREE.Mesh(sGeo, sMat);
+      sphere.position.copy(worldPos);
+      this.scene.add(sphere);
+      this._contactIndicators.push(sphere);
+
+      // Force label (only if force > 0)
+      if (force > 0.1) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 128;
+        canvas.height = 32;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = `#${color.toString(16).padStart(6, '0')}`;
+        ctx.font = 'bold 18px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`${force.toFixed(1)}N`, 64, 16);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        const spMat = new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0.85 });
+        const sprite = new THREE.Sprite(spMat);
+        sprite.position.copy(worldPos);
+        sprite.position.y += g.scale * 0.15;
+        sprite.scale.set(g.scale * 0.5, g.scale * 0.12, 1);
+        this.scene.add(sprite);
+        this._contactIndicators.push(sprite);
+      }
+
+      // Glow ring
+      const rGeo = new THREE.RingGeometry(radius * 1.5, radius * 2.2, 20);
+      const rMat = new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.3, side: THREE.DoubleSide,
+      });
+      const ring = new THREE.Mesh(rGeo, rMat);
+      ring.position.copy(worldPos);
+      this.scene.add(ring);
+      this._contactIndicators.push(ring);
+    });
+  }
+
+  /** Show floating phase label above the gripper. */
+  _showPhaseLabel(phaseName, phaseNum, totalPhases) {
+    this._clearPhaseLabel();
+    if (!this._gs) return;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+
+    // Phase badge background
+    ctx.fillStyle = 'rgba(88, 166, 255, 0.85)';
+    ctx.beginPath();
+    ctx.roundRect(20, 6, 472, 52, 8);
+    ctx.fill();
+
+    // Phase text
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 28px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${phaseNum}/${totalPhases}  ${phaseName}`, 256, 32);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+    this._phaseSprite = new THREE.Sprite(mat);
+
+    const g = this._gs;
+    this._phaseSprite.position.set(
+      this.gripperGroup.position.x,
+      this.gripperGroup.position.y + g.scale * 2.0,
+      this.gripperGroup.position.z
+    );
+    this._phaseSprite.scale.set(g.maxDim * 2.0, g.maxDim * 0.25, 1);
+    this.scene.add(this._phaseSprite);
+
+    // Auto-update position to follow gripper
+    this._phaseFollowId = setInterval(() => {
+      if (this._phaseSprite && this.gripperGroup) {
+        this._phaseSprite.position.set(
+          this.gripperGroup.position.x,
+          this.gripperGroup.position.y + g.scale * 2.0,
+          this.gripperGroup.position.z
+        );
+      }
+    }, 50);
+  }
+
+  _clearPhaseLabel() {
+    if (this._phaseFollowId) {
+      clearInterval(this._phaseFollowId);
+      this._phaseFollowId = null;
+    }
+    if (this._phaseSprite) {
+      this.scene.remove(this._phaseSprite);
+      this._phaseSprite.material.map.dispose();
+      this._phaseSprite.material.dispose();
+      this._phaseSprite = null;
+    }
+  }
+
   toggleWireframe() {
     this.showWireframe = !this.showWireframe;
     if (this.wireframeMesh) {
@@ -784,7 +1403,9 @@ class STLViewer {
   dispose() {
     this.stopAnimation();
     this.removeGripper();
+    this.removeTrayMarker();
     this._clearResultLabel();
+    this._clearPhaseLabel();
     this._clearModel();
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();

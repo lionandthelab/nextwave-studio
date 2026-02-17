@@ -24,25 +24,66 @@ logger = logging.getLogger(__name__)
 # Separated from the user prompt so the LLM treats it as a persistent role.
 SYSTEM_PROMPT = """\
 You are an expert robotics engineer specializing in NVIDIA Isaac Sim grasping \
-simulations.  You write production-quality Python code that:
-- Uses the `omni.isaac.core` API correctly (ArticulationController, RigidPrim, \
+simulations with a Franka Panda arm and Allegro Hand (4-finger dexterous hand).
+
+Robot Configuration:
+- ARM: Franka Panda (7 DOF) -- joints: panda_joint1 through panda_joint7.
+  Position control for arm joints. Workspace radius ~0.855 m. Payload 3 kg.
+- HAND: Allegro Hand (16 DOF) -- 4 fingers x 4 joints each.
+  Index: joint_0..joint_3, Middle: joint_4..joint_7,
+  Ring: joint_8..joint_11, Thumb: joint_12..joint_15.
+  Torque control for finger joints (max ~0.7 Nm per joint).
+- Combined prim: /World/Robot  (23 DOF total: indices 0-6 arm, 7-22 fingers).
+
+You write production-quality Python code that:
+- Uses the `omni.isaac.core` API correctly (Articulation, RigidPrim, \
 XFormPrim, World, SimulationContext).
 - Sets the physics time step to 1/120 s.
-- Uses position control for arm joints and torque control for gripper fingers.
+- Uses position control for Franka arm joints (indices 0-6).
+- Uses torque control for Allegro finger joints (indices 7-22).
+- Coordinates arm positioning THEN finger grasping (not simultaneous).
 - Includes robust error handling: contact-loss detection, joint-limit clamping, \
 and timeout guards.
 - Never imports modules that are unavailable inside Isaac Sim's embedded Python.
 - Always returns results through the prescribed function signature.
 
 When generating code, follow this phased grasp sequence:
-  Phase 1 - APPROACH: Move end-effector above the object with clearance.
-  Phase 2 - DESCEND:  Lower to the grasp pose around the object center of mass.
-  Phase 3 - GRASP:    Close gripper fingers with controlled torque ramp.
-  Phase 4 - LIFT:     Raise the object vertically while monitoring contact.
-  Phase 5 - HOLD:     Maintain grip force for the required duration.
+  Phase 1 - APPROACH: Move Franka arm to pre-grasp pose above object.
+  Phase 2 - DESCEND:  Lower end-effector to grasp height around object COM.
+  Phase 3 - GRASP:    Close all 4 Allegro fingers with controlled torque ramp.
+  Phase 4 - LIFT:     Raise the object using Franka arm while maintaining grip.
+  Phase 5 - HOLD:     Maintain finger torques for the required duration.
 
 Output ONLY valid Python code. Do NOT include markdown fences, explanations, \
 or commentary outside the code itself."""
+
+PICK_AND_PLACE_SYSTEM_PROMPT = """\
+You are an expert robotics engineer specializing in NVIDIA Isaac Sim \
+pick-and-place simulations with a Franka Panda arm and Allegro Hand.
+
+Robot Configuration:
+- ARM: Franka Panda (7 DOF) -- joints: panda_joint1 through panda_joint7.
+- HAND: Allegro Hand (16 DOF) -- 4 fingers x 4 joints each.
+- Combined prim: /World/Robot  (23 DOF total).
+
+You write production-quality Python for an 8-phase pick-and-place sequence:
+  Phase 1 - APPROACH:  Move Franka arm to pre-grasp pose above object.
+  Phase 2 - DESCEND:   Lower end-effector to grasp height around object COM.
+  Phase 3 - GRASP:     Close all 4 Allegro fingers with controlled torque ramp.
+  Phase 4 - LIFT:      Raise the object using Franka arm while maintaining grip.
+  Phase 5 - TRANSPORT: Move arm laterally to place_target position.
+  Phase 6 - PLACE:     Lower object into the tray at place_target.
+  Phase 7 - RELEASE:   Open fingers gradually (torque ramp down).
+  Phase 8 - RETRACT:   Raise arm away from placed object.
+
+The function signature MUST be:
+  run_grasp_simulation(sim_context, robot_prim_path, object_prim_path, \
+place_target=None) -> dict
+
+Returns dict with: success (bool), duration (float), logs (list[str]), \
+object_trajectory (list[dict]).
+
+Output ONLY valid Python code. Do NOT include markdown fences."""
 
 INITIAL_CODE_PROMPT = """\
 ## Robot Manual Context
@@ -113,69 +154,80 @@ names, torques, and positions to the actual robot and object.
 ```python
 import time
 import numpy as np
-from omni.isaac.core.articulations import ArticulationView
-from omni.isaac.core.prims import RigidPrimView
+from omni.isaac.core.articulations import Articulation
+from omni.isaac.core.prims import RigidPrim
 
 def run_grasp_simulation(sim_context, robot_prim_path: str, object_prim_path: str) -> dict:
     logs = []
     start = time.time()
     dt = 1.0 / 120.0
 
-    # -- initialise articulation
-    robot = ArticulationView(prim_paths_expr=robot_prim_path)
+    # -- Initialise Franka + Allegro articulation (23 DOF)
+    robot = Articulation(prim_path=robot_prim_path)
     robot.initialize()
-    dof_names = robot.dof_names[0]  # list of joint name strings
+    num_dof = robot.num_dof  # 7 arm + 16 hand = 23
+    arm_idx = list(range(7))        # panda_joint1-7
+    finger_idx = list(range(7, 23)) # Allegro joint_0-15
 
-    # -- Phase 1: APPROACH
-    logs.append("Phase 1: moving to pre-grasp pose")
-    pre_grasp_positions = np.zeros(robot.num_dof)
-    # ... set arm joints to reach above the object ...
-    robot.set_joint_position_targets(pre_grasp_positions)
+    # Get object position for approach planning
+    obj = RigidPrim(prim_path=object_prim_path)
+    obj_pos, _ = obj.get_world_pose()
+
+    # -- Phase 1: APPROACH (move Franka arm to pre-grasp pose)
+    logs.append("Phase 1: moving Franka arm to pre-grasp pose")
+    pre_grasp = np.zeros(num_dof)
+    pre_grasp[0:7] = [0.0, -0.5, 0.0, -2.0, 0.0, 2.0, 0.785]
+    pre_grasp[7:23] = 0.0  # fingers open
+    robot.set_joint_position_targets(pre_grasp)
+    for _ in range(180):
+        sim_context.step(render=False)
+
+    # -- Phase 2: DESCEND (adjust arm to reach around object)
+    logs.append("Phase 2: descending to grasp height")
+    descend = pre_grasp.copy()
+    # Adjust arm joints to lower end-effector to object height
+    descend[1] = -0.3   # shoulder pitch
+    descend[3] = -2.2   # elbow
+    robot.set_joint_position_targets(descend)
     for _ in range(120):
         sim_context.step(render=False)
 
-    # -- Phase 2: DESCEND
-    logs.append("Phase 2: descending to grasp height")
-    grasp_positions = pre_grasp_positions.copy()
-    # ... adjust Z to object center of mass ...
-    robot.set_joint_position_targets(grasp_positions)
-    for _ in range(60):
+    # -- Phase 3: GRASP (torque ramp on all 4 Allegro fingers)
+    logs.append("Phase 3: closing Allegro fingers")
+    target_torque = 0.5  # Nm per finger joint (max ~0.7)
+    for step in range(60):
+        fraction = (step + 1) / 60.0
+        efforts = np.zeros(num_dof)
+        efforts[finger_idx] = target_torque * fraction
+        robot.set_joint_efforts(efforts)
         sim_context.step(render=False)
 
-    # -- Phase 3: GRASP (torque ramp)
-    logs.append("Phase 3: closing gripper")
-    target_torque = 5.0  # Nm -- adapt from min_torque
-    for step in range(30):
-        fraction = (step + 1) / 30.0
-        robot.set_joint_efforts(
-            np.array([target_torque * fraction]),
-            joint_indices=[gripper_idx],
-        )
-        sim_context.step(render=False)
-
-    # -- verify contact
-    # ... read contact sensor or check gripper position convergence ...
-    contact_ok = True  # placeholder
-    if not contact_ok:
+    # -- verify contact via finger position convergence
+    pos_after = robot.get_joint_positions()
+    finger_moved = np.any(np.abs(pos_after[7:23]) > 0.05)
+    if not finger_moved:
         logs.append("ERROR: no contact detected after grasp closure")
         return {{"success": False, "duration": time.time() - start, "logs": logs}}
 
-    # -- Phase 4: LIFT
+    # -- Phase 4: LIFT (raise via Franka arm while maintaining finger torques)
     logs.append("Phase 4: lifting object")
-    lift_positions = grasp_positions.copy()
-    # ... raise Z by 0.3 m ...
-    robot.set_joint_position_targets(lift_positions)
-    for _ in range(120):
+    lift = descend.copy()
+    lift[1] = -0.6   # raise shoulder
+    lift[3] = -1.8   # adjust elbow
+    for _ in range(180):
+        efforts = np.zeros(num_dof)
+        efforts[finger_idx] = target_torque
+        robot.set_joint_efforts(efforts)
+        robot.set_joint_position_targets(lift)
         sim_context.step(render=False)
 
     # -- Phase 5: HOLD
     logs.append("Phase 5: holding for 5 s")
     hold_steps = int(5.0 / dt)
-    for i in range(hold_steps):
-        robot.set_joint_efforts(
-            np.array([target_torque]),
-            joint_indices=[gripper_idx],
-        )
+    for _ in range(hold_steps):
+        efforts = np.zeros(num_dof)
+        efforts[finger_idx] = target_torque
+        robot.set_joint_efforts(efforts)
         sim_context.step(render=False)
 
     logs.append("Grasp sequence completed successfully")
@@ -326,6 +378,16 @@ _ERROR_KEYWORDS: dict[str, list[str]] = {
     "attribute_error": [
         "attributeerror", "has no attribute", "undefined",
     ],
+    "place_miss": [
+        "place_miss", "place miss", "not accurately placed",
+        "missed target", "placement error", "off target",
+        "outside tray", "missed tray",
+    ],
+    "transport_drop": [
+        "transport_drop", "transport drop", "dropped during transport",
+        "lost during lateral", "object lost during",
+        "fell during transport", "transport failed",
+    ],
 }
 
 # Correction strategies with quantified adjustments
@@ -377,11 +439,11 @@ CORRECTION_STRATEGIES: dict[str, str] = {
         "5. USE direct joint position targets instead of trajectory interpolation."
     ),
     "overforce": (
-        "The gripper applied excessive force, risking damage.\n"
-        "1. REDUCE gripper torque by 40-50% from current value.\n"
-        "2. ADD a force feedback check: if contact force > 40N per finger, "
+        "The hand applied excessive force, risking damage.\n"
+        "1. REDUCE Allegro finger torque by 40-50% from current value.\n"
+        "2. ADD a force feedback check: if contact force > 20N per finger, "
         "reduce torque immediately.\n"
-        "3. CLAMP maximum torque to 8 Nm for the gripper joints.\n"
+        "3. CLAMP maximum torque to 0.7 Nm for each Allegro finger joint.\n"
         "4. USE a gentler torque ramp: ramp from 10% to 60% of max over 50 steps.\n"
         "5. ENSURE the force check runs every sim step during the grasp phase."
     ),
@@ -395,13 +457,13 @@ CORRECTION_STRATEGIES: dict[str, str] = {
         "5. INCREASE gripper torque by 15% during lift to maintain firm hold."
     ),
     "workspace_violation": (
-        "The target position is outside the robot's reachable workspace.\n"
-        "1. CHECK that the object is within 0.15-0.60m from the robot base.\n"
+        "The target position is outside the Franka Panda's reachable workspace.\n"
+        "1. CHECK that the object is within 0.10-0.85m from the robot base.\n"
         "2. ADJUST the approach to use a different arm configuration "
         "(elbow-up vs elbow-down).\n"
         "3. MOVE the grasp target to the nearest reachable point on the object.\n"
         "4. VERIFY that the lift target (current_z + 0.3m) does not exceed "
-        "the workspace ceiling (0.50m above base).\n"
+        "the workspace ceiling (0.80m above base).\n"
         "5. If the object is too far, consider a two-step approach: first slide "
         "the object closer, then grasp."
     ),
@@ -414,11 +476,36 @@ CORRECTION_STRATEGIES: dict[str, str] = {
     ),
     "attribute_error": (
         "An attribute or method does not exist on an object.\n"
-        "1. CHECK the Isaac Sim API: ArticulationView uses set_joint_position_targets, "
-        "set_joint_velocity_targets, set_joint_efforts.\n"
-        "2. VERIFY prim paths are correct and the prim exists at that path.\n"
+        "1. CHECK the Isaac Sim API: Articulation uses set_joint_position_targets, "
+        "set_joint_velocity_targets, set_joint_efforts, get_joint_positions.\n"
+        "2. VERIFY prim paths: robot at /World/Robot, object at /World/TargetObject.\n"
         "3. ENSURE robot.initialize() is called before any control commands.\n"
-        "4. If using deprecated API, replace with the current equivalent."
+        "4. If using deprecated API (ArticulationView), replace with Articulation."
+    ),
+    "place_miss": (
+        "The object was not placed accurately on the target tray.\n"
+        "1. VERIFY the TRANSPORT phase moves the arm to exactly the place_target "
+        "XY coordinates before lowering.\n"
+        "2. LOWER the object more slowly during the PLACE phase -- reduce descent "
+        "speed by 40%.\n"
+        "3. OPEN fingers more gradually during RELEASE -- ramp torque down over "
+        "30 steps instead of instant open.\n"
+        "4. ADD a final positioning check: read end-effector XY and correct "
+        "before release.\n"
+        "5. REDUCE release height -- lower the object to within 2cm of the tray "
+        "surface before opening fingers."
+    ),
+    "transport_drop": (
+        "The object was dropped during the TRANSPORT phase (lateral movement).\n"
+        "1. INCREASE finger torque by 20% during transport to compensate for "
+        "lateral acceleration.\n"
+        "2. REDUCE lateral movement speed by 30% -- use more sim steps.\n"
+        "3. ADD a contact-force check during transport: if force drops below "
+        "threshold, pause and re-grip.\n"
+        "4. MAINTAIN the lift height during transport -- do not lower the arm "
+        "until directly above the tray.\n"
+        "5. SPLIT the transport into smaller waypoints (at least 3) instead of "
+        "a single lateral move."
     ),
     "unknown": (
         "An unspecified error occurred.  Apply general hardening:\n"
@@ -927,6 +1014,8 @@ async def generate_code(
     cad_metadata: dict,
     robot_model: str,
     manual_path: str | None = None,
+    mode: str = "grasp_only",
+    place_target: list[float] | None = None,
 ) -> str:
     """Generate initial grasping code.
 
@@ -943,12 +1032,12 @@ async def generate_code(
                 _manual_collections[manual_path] = collection_id
             except Exception as exc:
                 logger.warning("Failed to ingest manual: %s", exc)
-                return _generate_default_code(cad_metadata, robot_model)
+                return _generate_default_code(cad_metadata, robot_model, mode=mode, place_target=place_target)
 
         collection_id = _manual_collections[manual_path]
         return await gen.generate_initial_code(cad_metadata, robot_model, collection_id)
 
-    return _generate_default_code(cad_metadata, robot_model)
+    return _generate_default_code(cad_metadata, robot_model, mode=mode, place_target=place_target)
 
 
 async def refine_code(
@@ -957,6 +1046,8 @@ async def refine_code(
     cad_metadata: dict,
     robot_model: str,
     iteration: int | None = None,
+    mode: str = "grasp_only",
+    place_target: list[float] | None = None,
 ) -> str:
     """Refine existing code based on simulation error feedback.
 
@@ -967,6 +1058,8 @@ async def refine_code(
         robot_model: Robot model name (unused here but kept for API compat).
         iteration: Explicit iteration number.  Falls back to a hash-derived
             value for backward compatibility.
+        mode: "grasp_only" or "pick_and_place".
+        place_target: [x, y, z] target position for pick-and-place.
     """
     gen = _get_generator()
     if iteration is None:
@@ -974,69 +1067,106 @@ async def refine_code(
     return await gen.correct_code(current_code, error_log, iteration, cad_metadata)
 
 
-def _generate_default_code(cad_metadata: dict, robot_model: str) -> str:
+def _generate_default_code(
+    cad_metadata: dict,
+    robot_model: str,
+    mode: str = "grasp_only",
+    place_target: list[float] | None = None,
+) -> str:
     """Generate a sensible default grasping script without RAG context."""
     dims = cad_metadata.get("dimensions", {})
     dim_x = dims.get("x", 0.05)
     dim_y = dims.get("y", 0.05)
     dim_z = dims.get("z", 0.05)
     max_dim = max(dim_x, dim_y, dim_z)
-    grasp_width = max_dim * 1.2
-    torque = max(2.0, max_dim * 50)
+    # Allegro finger torque: scale with object mass estimate, clamp to 0.7 Nm max
+    torque = min(0.7, max(0.2, max_dim * 5))
     approach_height = dim_z + 0.1
 
+    if mode == "pick_and_place" and place_target is not None:
+        return _generate_pick_and_place_code(torque, place_target)
+
     return f'''\
-"""Auto-generated grasping code for {robot_model}."""
+"""Auto-generated grasping code for Franka Panda + Allegro Hand."""
 import time
 import numpy as np
+from omni.isaac.core.articulations import Articulation
+from omni.isaac.core.prims import RigidPrim
 
 def run_grasp_simulation(sim_context, robot_prim_path: str, object_prim_path: str) -> dict:
-    """Execute a pick-and-place grasping sequence."""
+    """Execute a pick-and-place grasping sequence with Franka + Allegro."""
     logs = []
     start_time = time.time()
-
-    grasp_width = {grasp_width:.4f}
-    torque = {torque:.1f}
-    approach_height = {approach_height:.4f}
-    lift_height = 0.30
-    hold_duration = 5.0
     dt = 1.0 / 120.0
 
+    finger_torque = {torque:.3f}  # Nm per Allegro finger joint (max 0.7)
+    hold_duration = 5.0
+
     try:
-        # Phase 1: APPROACH
-        logs.append("Phase 1: moving to pre-grasp position")
-        pre_grasp_position = [0.5, 0.0, approach_height]
+        # Initialise robot (23 DOF: 7 arm + 16 fingers)
+        robot = Articulation(prim_path=robot_prim_path)
+        robot.initialize()
+        num_dof = robot.num_dof
+        arm_idx = list(range(7))
+        finger_idx = list(range(7, 23))
+
+        # Get object position
+        obj = RigidPrim(prim_path=object_prim_path)
+        obj_pos, _ = obj.get_world_pose()
+
+        # Phase 1: APPROACH -- move Franka arm to pre-grasp pose
+        logs.append("Phase 1: moving Franka arm to pre-grasp pose")
+        pre_grasp = np.zeros(num_dof)
+        pre_grasp[0:7] = [0.0, -0.5, 0.0, -2.0, 0.0, 2.0, 0.785]
+        pre_grasp[7:23] = 0.0  # fingers open
+        robot.set_joint_position_targets(pre_grasp)
+        for _ in range(180):
+            sim_context.step(render=False)
+
+        # Phase 2: DESCEND -- lower end-effector to object height
+        logs.append("Phase 2: descending to grasp height")
+        descend = pre_grasp.copy()
+        descend[1] = -0.3
+        descend[3] = -2.2
+        robot.set_joint_position_targets(descend)
         for _ in range(120):
             sim_context.step(render=False)
 
-        # Phase 2: DESCEND
-        logs.append("Phase 2: descending to grasp height")
-        grasp_position = [0.5, 0.0, {dim_z / 2 + 0.01:.4f}]
-        for _ in range(60):
+        # Phase 3: GRASP -- ramp torque on all 4 Allegro fingers
+        logs.append(f"Phase 3: closing Allegro fingers (torque={{finger_torque:.2f}} Nm)")
+        for step in range(60):
+            fraction = (step + 1) / 60.0
+            efforts = np.zeros(num_dof)
+            efforts[finger_idx] = finger_torque * fraction
+            robot.set_joint_efforts(efforts)
             sim_context.step(render=False)
 
-        # Phase 3: GRASP with torque ramp
-        logs.append(f"Phase 3: closing gripper (torque={{torque:.1f}} Nm)")
-        for step in range(30):
-            fraction = (step + 1) / 30.0
-            applied = torque * fraction
-            sim_context.step(render=False)
-
-        # Verify contact
-        contact_force = torque * 2
-        if contact_force < 0.5:
-            logs.append("ERROR: insufficient contact force")
+        # Verify contact via finger position change
+        pos_after = robot.get_joint_positions()
+        finger_moved = np.any(np.abs(pos_after[7:23]) > 0.05)
+        if not finger_moved:
+            logs.append("ERROR: no contact detected after grasp closure")
             return {{"success": False, "duration": time.time() - start_time, "logs": logs}}
 
-        # Phase 4: LIFT
-        logs.append(f"Phase 4: lifting object by {{lift_height}} m")
-        for _ in range(120):
+        # Phase 4: LIFT -- raise arm while maintaining finger torques
+        logs.append("Phase 4: lifting object")
+        lift = descend.copy()
+        lift[1] = -0.6
+        lift[3] = -1.8
+        for _ in range(180):
+            efforts = np.zeros(num_dof)
+            efforts[finger_idx] = finger_torque
+            robot.set_joint_efforts(efforts)
+            robot.set_joint_position_targets(lift)
             sim_context.step(render=False)
 
         # Phase 5: HOLD
         hold_steps = int(hold_duration / dt)
         logs.append(f"Phase 5: holding for {{hold_duration}} s ({{hold_steps}} steps)")
         for _ in range(hold_steps):
+            efforts = np.zeros(num_dof)
+            efforts[finger_idx] = finger_torque
+            robot.set_joint_efforts(efforts)
             sim_context.step(render=False)
 
         logs.append("Grasp sequence completed successfully")
@@ -1045,4 +1175,142 @@ def run_grasp_simulation(sim_context, robot_prim_path: str, object_prim_path: st
     except Exception as e:
         logs.append(f"ERROR: {{str(e)}}")
         return {{"success": False, "duration": time.time() - start_time, "logs": logs}}
+'''
+
+
+def _generate_pick_and_place_code(torque: float, place_target: list[float]) -> str:
+    """Generate an 8-phase pick-and-place script."""
+    pt_x, pt_y, pt_z = place_target[0], place_target[1], place_target[2]
+    return f'''\
+"""Auto-generated pick-and-place code for Franka Panda + Allegro Hand."""
+import time
+import numpy as np
+from omni.isaac.core.articulations import Articulation
+from omni.isaac.core.prims import RigidPrim
+
+def run_grasp_simulation(sim_context, robot_prim_path: str, object_prim_path: str, place_target=None) -> dict:
+    """Execute an 8-phase pick-and-place sequence with Franka + Allegro."""
+    logs = []
+    trajectory = []
+    start_time = time.time()
+    dt = 1.0 / 120.0
+
+    finger_torque = {torque:.3f}
+    if place_target is None:
+        place_target = [{pt_x}, {pt_y}, {pt_z}]
+
+    try:
+        robot = Articulation(prim_path=robot_prim_path)
+        robot.initialize()
+        num_dof = robot.num_dof
+        finger_idx = list(range(7, 23))
+
+        obj = RigidPrim(prim_path=object_prim_path)
+        obj_pos, _ = obj.get_world_pose()
+        trajectory.append({{"position": obj_pos.tolist(), "timestamp": 0.0}})
+
+        # Phase 1: APPROACH
+        logs.append("Phase 1 APPROACH: moving to pre-grasp pose")
+        pre_grasp = np.zeros(num_dof)
+        pre_grasp[0:7] = [0.0, -0.5, 0.0, -2.0, 0.0, 2.0, 0.785]
+        robot.set_joint_position_targets(pre_grasp)
+        for _ in range(180):
+            sim_context.step(render=False)
+
+        # Phase 2: DESCEND
+        logs.append("Phase 2 DESCEND: lowering to grasp height")
+        descend = pre_grasp.copy()
+        descend[1] = -0.3
+        descend[3] = -2.2
+        robot.set_joint_position_targets(descend)
+        for _ in range(120):
+            sim_context.step(render=False)
+
+        # Phase 3: GRASP
+        logs.append("Phase 3 GRASP: closing fingers")
+        for step in range(60):
+            fraction = (step + 1) / 60.0
+            efforts = np.zeros(num_dof)
+            efforts[finger_idx] = finger_torque * fraction
+            robot.set_joint_efforts(efforts)
+            sim_context.step(render=False)
+
+        pos_after = robot.get_joint_positions()
+        finger_moved = np.any(np.abs(pos_after[7:23]) > 0.05)
+        if not finger_moved:
+            logs.append("ERROR: no contact detected after grasp closure")
+            return {{"success": False, "duration": time.time() - start_time, "logs": logs, "object_trajectory": trajectory}}
+
+        # Phase 4: LIFT
+        logs.append("Phase 4 LIFT: raising object")
+        lift = descend.copy()
+        lift[1] = -0.6
+        lift[3] = -1.8
+        for _ in range(180):
+            efforts = np.zeros(num_dof)
+            efforts[finger_idx] = finger_torque
+            robot.set_joint_efforts(efforts)
+            robot.set_joint_position_targets(lift)
+            sim_context.step(render=False)
+        obj_pos, _ = obj.get_world_pose()
+        trajectory.append({{"position": obj_pos.tolist(), "timestamp": time.time() - start_time}})
+
+        # Phase 5: TRANSPORT
+        logs.append(f"Phase 5 TRANSPORT: moving to place target ({{place_target[0]:.2f}}, {{place_target[1]:.2f}})")
+        transport = lift.copy()
+        transport[0] = 0.3  # adjust base joint for lateral reach
+        for step in range(240):
+            efforts = np.zeros(num_dof)
+            efforts[finger_idx] = finger_torque * 1.1  # extra grip during transport
+            robot.set_joint_efforts(efforts)
+            robot.set_joint_position_targets(transport)
+            sim_context.step(render=False)
+            if step % 60 == 0:
+                obj_pos, _ = obj.get_world_pose()
+                trajectory.append({{"position": obj_pos.tolist(), "timestamp": time.time() - start_time}})
+
+        # Phase 6: PLACE
+        logs.append("Phase 6 PLACE: lowering into tray")
+        place_pose = transport.copy()
+        place_pose[1] = -0.2
+        place_pose[3] = -2.3
+        for _ in range(180):
+            efforts = np.zeros(num_dof)
+            efforts[finger_idx] = finger_torque
+            robot.set_joint_efforts(efforts)
+            robot.set_joint_position_targets(place_pose)
+            sim_context.step(render=False)
+        obj_pos, _ = obj.get_world_pose()
+        trajectory.append({{"position": obj_pos.tolist(), "timestamp": time.time() - start_time}})
+
+        # Phase 7: RELEASE
+        logs.append("Phase 7 RELEASE: opening fingers gradually")
+        for step in range(30):
+            fraction = 1.0 - (step + 1) / 30.0
+            efforts = np.zeros(num_dof)
+            efforts[finger_idx] = finger_torque * fraction
+            robot.set_joint_efforts(efforts)
+            sim_context.step(render=False)
+        # Fully open
+        robot.set_joint_efforts(np.zeros(num_dof))
+        for _ in range(60):
+            sim_context.step(render=False)
+
+        # Phase 8: RETRACT
+        logs.append("Phase 8 RETRACT: raising arm away")
+        retract = place_pose.copy()
+        retract[1] = -0.6
+        retract[3] = -1.5
+        robot.set_joint_position_targets(retract)
+        for _ in range(120):
+            sim_context.step(render=False)
+
+        obj_pos, _ = obj.get_world_pose()
+        trajectory.append({{"position": obj_pos.tolist(), "timestamp": time.time() - start_time}})
+        logs.append("Pick-and-place sequence completed successfully")
+        return {{"success": True, "duration": time.time() - start_time, "logs": logs, "object_trajectory": trajectory}}
+
+    except Exception as e:
+        logs.append(f"ERROR: {{str(e)}}")
+        return {{"success": False, "duration": time.time() - start_time, "logs": logs, "object_trajectory": trajectory}}
 '''

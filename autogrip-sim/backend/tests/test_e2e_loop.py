@@ -44,7 +44,7 @@ async def _upload_and_create_session(
     session = await session_manager.create_session(
         cad_file_id=cad_id,
         manual_file_id=None,
-        robot_model="unitree_h1",
+        robot_model="franka_allegro",
     )
     await session_manager.update_session(
         session.session_id,

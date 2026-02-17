@@ -10,6 +10,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV ACCEPT_EULA=Y
 ENV PRIVACY_CONSENT=Y
 
+# Install Xvfb (virtual display) for headless GPU rendering + WebRTC streaming
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install additional Python packages needed for AutoGrip-Sim
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
     fastapi==0.115.6 \
@@ -24,13 +28,19 @@ WORKDIR /autogrip-sim
 
 # Copy simulation scripts
 COPY docker/sim_scripts/ /autogrip-sim/sim_scripts/
+RUN chmod +x /autogrip-sim/sim_scripts/entrypoint.sh
 
-# Expose port for internal communication with main backend
-EXPOSE 9090
+# Expose ports: 9090 = sim API, 8211 = WebRTC signaling, 49100 = WebRTC media
+EXPOSE 9090 8211 49100
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD python3 -c "import httpx; httpx.get('http://localhost:9090/health').raise_for_status()" || exit 1
+# Health check (python3 not on PATH in Isaac Sim image, use curl)
+HEALTHCHECK --interval=15s --timeout=10s --retries=10 --start-period=120s \
+    CMD curl -f http://localhost:9090/health || exit 1
 
-# Entry point: Run the simulation server
-CMD ["/isaac-sim/python.sh", "/autogrip-sim/sim_scripts/sim_server.py"]
+# Enable WebRTC livestream extension
+ENV LIVESTREAM_ENABLED=true
+ENV OMNI_KIT_ALLOW_ROOT=1
+
+# Override base image entrypoint — run sim_server directly with Isaac Sim's Python
+ENTRYPOINT []
+CMD ["/bin/bash", "/autogrip-sim/sim_scripts/entrypoint.sh"]

@@ -18,12 +18,12 @@ async def test_create_session():
     session = await mgr.create_session(
         cad_file_id="cad_001",
         manual_file_id="man_001",
-        robot_model="unitree_h1",
+        robot_model="franka_allegro",
     )
     assert session.session_id
     assert session.cad_file_id == "cad_001"
     assert session.manual_file_id == "man_001"
-    assert session.robot_model == "unitree_h1"
+    assert session.robot_model == "franka_allegro"
     assert session.status == "created"
     assert session.created_at  # ISO timestamp string
     assert session.current_iteration == 0

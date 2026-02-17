@@ -59,6 +59,11 @@ class AutoGripApp {
 
     // Controls
     this.robotModel = document.getElementById('robotModel');
+    this.simMode = document.getElementById('simMode');
+    this.placeTargetGroup = document.getElementById('placeTargetGroup');
+    this.placeX = document.getElementById('placeX');
+    this.placeY = document.getElementById('placeY');
+    this.placeZ = document.getElementById('placeZ');
     this.maxIterations = document.getElementById('maxIterations');
     this.maxIterValue = document.getElementById('maxIterValue');
     this.successThreshold = document.getElementById('successThreshold');
@@ -83,6 +88,15 @@ class AutoGripApp {
     this.viewerLoading = document.getElementById('viewerLoading');
     this.viewerToolbar = document.getElementById('viewerToolbar');
     this.meshInfoEl = document.getElementById('meshInfo');
+
+    // Viewer tabs & livestream
+    this.tab3D = document.getElementById('tab3D');
+    this.tabLivestream = document.getElementById('tabLivestream');
+    this.livestreamContainer = document.getElementById('livestreamContainer');
+    this.livestreamFrame = document.getElementById('livestreamFrame');
+    this.livestreamOverlay = document.getElementById('livestreamOverlay');
+    this.activeViewerTab = '3d';
+    this.livestreamAvailable = false;
 
     // Viewer toolbar buttons
     this.resetViewBtn = document.getElementById('resetViewBtn');
@@ -184,6 +198,33 @@ class AutoGripApp {
       });
     }
 
+    // Simulation mode toggle
+    if (this.simMode) {
+      this.simMode.addEventListener('change', () => {
+        const isPnP = this.simMode.value === 'pick_and_place';
+        this.placeTargetGroup.classList.toggle('hidden', !isPnP);
+        // Update tray marker in 3D viewer
+        if (this.stlViewer && this.stlViewer.mesh) {
+          if (isPnP) {
+            const pt = [parseFloat(this.placeX.value), parseFloat(this.placeY.value), parseFloat(this.placeZ.value)];
+            if (this.stlViewer.addTrayMarker) this.stlViewer.addTrayMarker(pt);
+          } else {
+            if (this.stlViewer.removeTrayMarker) this.stlViewer.removeTrayMarker();
+          }
+        }
+      });
+    }
+
+    // Viewer tab switching (3D Preview / Isaac Sim Live)
+    if (this.tab3D) {
+      this.tab3D.addEventListener('click', () => this.switchViewerTab('3d'));
+    }
+    if (this.tabLivestream) {
+      this.tabLivestream.addEventListener('click', () => {
+        if (!this.tabLivestream.disabled) this.switchViewerTab('livestream');
+      });
+    }
+
     // Mesh info event from Three.js viewer
     if (this.threeCanvas) {
       this.threeCanvas.addEventListener('meshloaded', (e) => {
@@ -226,8 +267,98 @@ class AutoGripApp {
       this.toggleBboxBtn.classList.add('active');
     }
 
-    this.addLog('info', 'AutoGrip-Sim Engine ready. Upload a CAD file to begin.');
+    this.addLog('info', 'AutoGrip-Sim Engine ready. Upload a CAD file or select a preset to begin.');
     this.updateStartButton();
+
+    // Load preset objects
+    this.loadPresets();
+
+    // Check if Isaac Sim livestream is available
+    this.checkLivestreamStatus();
+  }
+
+  async loadPresets() {
+    const grid = document.getElementById('presetGrid');
+    if (!grid) return;
+    try {
+      const res = await fetch('/api/v1/upload/presets/list');
+      if (!res.ok) return;
+      const presets = await res.json();
+      const icons = {
+        'box_6cm': '\u25A3',
+        'flat_box_8cm': '\u25AD',
+        'cylinder_5x10': '\u25CB',
+        'cylinder_4x5': '\u25CF',
+      };
+      grid.innerHTML = presets.map(p => `
+        <button class="preset-btn" data-preset="${p.name}" title="${p.label}">
+          <span class="preset-icon">${icons[p.name] || '\u25A1'}</span>
+          <span class="preset-name">${p.label}</span>
+          <span class="preset-size">${this.formatBytes(p.size_bytes)}</span>
+        </button>
+      `).join('');
+      grid.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.addEventListener('click', () => this.selectPreset(btn.dataset.preset, btn));
+      });
+    } catch (e) {
+      // Presets not available - no problem
+    }
+  }
+
+  async selectPreset(name, btnEl) {
+    if (this.isRunning) {
+      this.showNotification('Cannot change object while running', 'warn');
+      return;
+    }
+    // Remove active state from all preset buttons
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    btnEl.classList.add('active');
+
+    this.addLog('info', `Loading preset: ${name}...`);
+    try {
+      const res = await fetch(`/api/v1/upload/preset/${name}`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Failed (${res.status})`);
+      }
+      const data = await res.json();
+
+      // Update state like a normal upload
+      this.cadFileId = data.id;
+      this.cadUploadContent.classList.add('hidden');
+      this.cadFileInfo.classList.remove('hidden');
+      this.cadDropZone.classList.add('uploaded');
+      this.cadFileName.textContent = data.filename;
+      this.cadFileSize.textContent = this.formatBytes(data.size_bytes);
+      this.cadFileType.textContent = 'STL';
+
+      // Load 3D preview from preset file
+      if (window.STLViewer) {
+        const stlRes = await fetch(`/presets/${name}.stl`);
+        const buf = await stlRes.arrayBuffer();
+        this.viewerLoading.classList.remove('hidden');
+        this.viewerPlaceholder.classList.add('hidden');
+        if (this.stlViewer) { this.stlViewer.dispose(); this.stlViewer = null; }
+        this.threeCanvas.classList.remove('hidden');
+        this.simulationFrame.classList.add('hidden');
+        this.resultGif.classList.add('hidden');
+        this.stlViewer = new window.STLViewer(this.threeCanvas);
+        this.stlViewer.loadFromBuffer(buf);
+        this.stlViewer.startAnimation();
+        this.viewerToolbar.classList.remove('hidden');
+        this.viewerLoading.classList.add('hidden');
+        this.stlViewer.addGripper();
+      }
+
+      this.saveSession();
+      this.updateStartButton();
+      this.addLog('success', `Preset loaded: ${data.filename}`);
+      this.showNotification(`Preset "${name}" loaded`, 'success');
+    } catch (err) {
+      btnEl.classList.remove('active');
+      this.addLog('error', `Preset load failed: ${err.message}`);
+      this.showNotification(`Failed to load preset: ${err.message}`, 'error');
+    }
   }
 
   // --- Drag & Drop ---
@@ -446,6 +577,72 @@ class AutoGripApp {
     this._graspPlaying = false;
   }
 
+  // --- Viewer Tab Switching ---
+  switchViewerTab(tab) {
+    this.activeViewerTab = tab;
+
+    // Update tab active states
+    if (this.tab3D) this.tab3D.classList.toggle('active', tab === '3d');
+    if (this.tabLivestream) this.tabLivestream.classList.toggle('active', tab === 'livestream');
+
+    if (tab === 'livestream') {
+      // Show livestream, hide 3D content
+      if (this.livestreamContainer) this.livestreamContainer.classList.remove('hidden');
+      this.viewerPlaceholder.classList.add('hidden');
+      this.threeCanvas.classList.add('hidden');
+      this.viewerToolbar.classList.add('hidden');
+      this.simulationFrame.classList.add('hidden');
+      this.resultGif.classList.add('hidden');
+
+      // Load livestream URL if available
+      if (this.livestreamAvailable && this.livestreamFrame) {
+        this.livestreamFrame.src = `http://${window.location.hostname}:8211/streaming/webrtc-client`;
+        if (this.livestreamOverlay) this.livestreamOverlay.classList.add('hidden');
+      } else {
+        if (this.livestreamOverlay) this.livestreamOverlay.classList.remove('hidden');
+      }
+
+      // Pause Three.js to save resources
+      if (this.stlViewer) this.stlViewer.stopAnimation();
+    } else {
+      // Show 3D content, hide livestream
+      if (this.livestreamContainer) this.livestreamContainer.classList.add('hidden');
+      if (this.livestreamFrame) this.livestreamFrame.src = '';
+
+      // Restore 3D viewer state
+      if (this.stlViewer && this.stlViewer.mesh) {
+        this.threeCanvas.classList.remove('hidden');
+        this.viewerToolbar.classList.remove('hidden');
+        this.stlViewer.startAnimation();
+      } else if (!this.isRunning) {
+        this.viewerPlaceholder.classList.remove('hidden');
+      }
+    }
+  }
+
+  async checkLivestreamStatus() {
+    try {
+      const res = await fetch('/livestream/status', { signal: AbortSignal.timeout(3000) });
+      if (res.ok) {
+        const data = await res.json();
+        this.livestreamAvailable = data.available === true;
+      } else {
+        this.livestreamAvailable = false;
+      }
+    } catch {
+      this.livestreamAvailable = false;
+    }
+
+    // Update tab state
+    if (this.tabLivestream) {
+      this.tabLivestream.disabled = !this.livestreamAvailable;
+      this.tabLivestream.title = this.livestreamAvailable
+        ? 'View live Isaac Sim session'
+        : 'Requires Isaac Sim container';
+      this.tabLivestream.classList.toggle('livestream-available', this.livestreamAvailable);
+    }
+  }
+
   // --- Generation Control ---
   async startGeneration() {
     if (!this.cadFileId) {
@@ -455,12 +652,24 @@ class AutoGripApp {
 
     this.maxIter = parseInt(this.maxIterations.value);
 
+    const mode = this.simMode ? this.simMode.value : 'grasp_only';
+
     const body = {
       cad_file_id: this.cadFileId,
       robot_model: this.robotModel.value,
       max_iterations: this.maxIter,
       success_threshold: parseInt(this.successThreshold.value),
+      mode: mode,
     };
+
+    // Add place_target for pick-and-place mode
+    if (mode === 'pick_and_place') {
+      body.place_target = [
+        parseFloat(this.placeX.value),
+        parseFloat(this.placeY.value),
+        parseFloat(this.placeZ.value),
+      ];
+    }
 
     // Reuse existing server-assigned session if available
     if (this.sessionId) {
@@ -567,10 +776,14 @@ class AutoGripApp {
         if (success) {
           this.addLog('success', `Iteration ${this.currentIteration} succeeded (score: ${score})`);
         } else {
-          this.addLog('warn', `Iteration ${this.currentIteration} failed - ${data.error || 'retrying...'}`);
+          this.addLog('warn', `Iteration ${this.currentIteration} failed - ${data.error_log || data.error || 'retrying...'}`);
         }
-        // Queue gripper animation (backend is faster than the 3D animation)
-        this.queueGraspAnimation(success, this.currentIteration);
+        // Queue simulation replay if replay_data available, else fall back to simple animation
+        if (data.replay_data) {
+          this.queueSimulationReplay(data.replay_data, this.currentIteration);
+        } else {
+          this.queueGraspAnimation(success, this.currentIteration);
+        }
       } catch {
         // ignore
       }
@@ -706,6 +919,7 @@ class AutoGripApp {
     this.cadDropZone.style.pointerEvents = running ? 'none' : '';
     this.manualDropZone.style.pointerEvents = running ? 'none' : '';
     this.robotModel.disabled = running;
+    if (this.simMode) this.simMode.disabled = running;
     this.maxIterations.disabled = running;
     this.successThreshold.disabled = running;
 
@@ -935,9 +1149,16 @@ class AutoGripApp {
     this.showNotification('Generation completed successfully!', 'success');
   }
 
-  // --- Grasp Animation Queue ---
+  // --- Simulation Replay / Grasp Animation Queue ---
   queueGraspAnimation(success, iteration) {
-    this._graspQueue.push({ success, iteration });
+    this._graspQueue.push({ type: 'simple', success, iteration });
+    if (!this._graspPlaying) {
+      this._processGraspQueue();
+    }
+  }
+
+  queueSimulationReplay(replayData, iteration) {
+    this._graspQueue.push({ type: 'replay', replayData, iteration });
     if (!this._graspPlaying) {
       this._processGraspQueue();
     }
@@ -948,9 +1169,13 @@ class AutoGripApp {
     this._graspPlaying = true;
 
     while (this._graspQueue.length > 0) {
-      const { success, iteration } = this._graspQueue.shift();
+      const item = this._graspQueue.shift();
       if (this.stlViewer && this.stlViewer.gripperGroup) {
-        await this.stlViewer.animateGraspAttempt(success, iteration);
+        if (item.type === 'replay' && this.stlViewer.replaySimulation) {
+          await this.stlViewer.replaySimulation(item.replayData);
+        } else {
+          await this.stlViewer.animateGraspAttempt(item.success, item.iteration);
+        }
       }
     }
 

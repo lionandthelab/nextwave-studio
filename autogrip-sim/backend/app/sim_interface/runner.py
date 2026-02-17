@@ -38,6 +38,7 @@ async def run_simulation(
     code: str,
     cad_path: str,
     robot_model: str,
+    place_target: list[float] | None = None,
 ) -> dict:
     """Run a single simulation iteration.
 
@@ -47,7 +48,8 @@ async def run_simulation(
     Args:
         code: Generated Python grasping code.
         cad_path: File path to the uploaded CAD file.
-        robot_model: Robot model identifier (e.g. "unitree_h1").
+        robot_model: Robot model identifier (e.g. "franka_allegro").
+        place_target: Optional [x, y, z] for pick-and-place mode.
 
     Returns:
         Raw simulation result dict from IsaacSimConnector.execute_code().
@@ -57,14 +59,16 @@ async def run_simulation(
     # Ensure simulation is running
     if connector.context is None or not connector.context.running:
         await connector.start_simulation(headless=True)
-        await connector.load_scene()
+        await connector.load_scene(
+            enable_pick_and_place=place_target is not None,
+        )
 
     # Load robot and object for this iteration
     await connector.load_robot(robot_model)
     await connector.load_object(cad_path, position=(0.5, 0.0, 0.05))
 
     # Execute the generated code
-    result = await connector.execute_code(code)
+    result = await connector.execute_code(code, place_target=place_target)
 
     logger.info(
         "Simulation complete: success=%s, duration=%.2fs",

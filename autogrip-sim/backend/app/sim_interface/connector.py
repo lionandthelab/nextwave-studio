@@ -7,6 +7,7 @@ import hashlib
 import io
 import logging
 import math
+import os
 import random
 import struct
 import time
@@ -582,27 +583,39 @@ class IsaacSimConnector:
         logger.info("Simulation started (headless=%s)", headless)
         return True
 
-    async def load_scene(self) -> bool:
+    async def load_scene(
+        self, enable_pick_and_place: bool = False,
+        pick_table_position: list[float] | None = None,
+        place_tray_position: list[float] | None = None,
+    ) -> bool:
         """Set up the basic simulation scene (ground plane, lighting, gravity)."""
         if not self._context:
             raise RuntimeError("Simulation not started")
 
+        body: dict = {}
+        if enable_pick_and_place:
+            body["enable_pick_and_place"] = True
+            if pick_table_position:
+                body["pick_table_position"] = pick_table_position
+            if place_tray_position:
+                body["place_tray_position"] = place_tray_position
+
         client = await self._get_client()
-        resp = await client.post("/scene/load", json={})
+        resp = await client.post("/scene/load", json=body)
         resp.raise_for_status()
 
         self._context.ground_plane = True
         self._context.logs.append(
             "Scene loaded: ground plane, default lighting, gravity=-9.81"
         )
-        logger.info("Scene loaded")
+        logger.info("Scene loaded (pick_and_place=%s)", enable_pick_and_place)
         return True
 
     async def load_robot(self, robot_model: str) -> bool:
         """Load a robot USD model into the scene.
 
         Args:
-            robot_model: Robot model identifier (e.g. 'unitree_h1').
+            robot_model: Robot model identifier (e.g. 'franka_allegro').
 
         Returns:
             True if robot loaded successfully.
@@ -614,22 +627,20 @@ class IsaacSimConnector:
         resp = await client.post("/robot/load", json={"model": robot_model})
         resp.raise_for_status()
 
-        prim_path = f"/World/{robot_model}"
+        prim_path = "/World/Robot"
+        # Franka Panda (7 DOF) + Allegro Hand (16 DOF) joint defaults
+        joint_positions: dict[str, float] = {}
+        for i in range(1, 8):
+            joint_positions[f"panda_joint{i}"] = 0.0
+        for i in range(16):
+            joint_positions[f"joint_{i}"] = 0.0
+
         self._context.robot = RobotState(
             model=robot_model,
             prim_path=prim_path,
-            joint_positions={
-                "joint_0": 0.0,
-                "joint_1": 0.0,
-                "joint_2": 0.0,
-                "joint_3": 0.0,
-                "joint_4": 0.0,
-                "joint_5": 0.0,
-                "gripper_left": 0.05,
-                "gripper_right": -0.05,
-            },
-            gripper_opening=0.1,
-            end_effector_position=Vec3(0.0, 0.0, 0.5),
+            joint_positions=joint_positions,
+            gripper_opening=0.12,
+            end_effector_position=Vec3(0.3, 0.0, 0.5),
         )
         self._context.logs.append(f"Robot loaded: {robot_model} at {prim_path}")
         logger.info("Robot loaded: %s", robot_model)
@@ -650,9 +661,15 @@ class IsaacSimConnector:
         if not self._context:
             raise RuntimeError("Simulation not started")
 
+        # Map backend path to Isaac Sim container path.
+        # Backend stores at uploads/cad/file.stl (/app/uploads/cad/file.stl)
+        # Isaac Sim mounts at /autogrip-sim/cad_files/file.stl
+        filename = os.path.basename(cad_file_path)
+        isaac_sim_path = f"/autogrip-sim/cad_files/{filename}"
+
         client = await self._get_client()
         resp = await client.post("/object/load", json={
-            "cad_file_path": cad_file_path,
+            "cad_file_path": isaac_sim_path,
             "position": list(position),
         })
         resp.raise_for_status()
@@ -673,7 +690,9 @@ class IsaacSimConnector:
         logger.info("Object loaded: %s at %s", cad_file_path, position)
         return True
 
-    async def execute_code(self, code: str) -> dict:
+    async def execute_code(
+        self, code: str, place_target: list[float] | None = None
+    ) -> dict:
         """Execute generated grasping code in the simulation.
 
         Sends the code to the sim_server for execution, decodes base64
@@ -681,6 +700,7 @@ class IsaacSimConnector:
 
         Args:
             code: Python code string to execute.
+            place_target: Optional [x, y, z] for pick-and-place mode.
 
         Returns:
             Execution results with success, duration, frames, and logs.
@@ -690,8 +710,12 @@ class IsaacSimConnector:
 
         self._context.logs.append("Executing generated grasping code...")
 
+        body: dict = {"code": code}
+        if place_target is not None:
+            body["place_target"] = place_target
+
         client = await self._get_client()
-        resp = await client.post("/execute", json={"code": code})
+        resp = await client.post("/execute", json=body)
         resp.raise_for_status()
         result = resp.json()
 
@@ -706,7 +730,7 @@ class IsaacSimConnector:
         self._context.frames.extend(frames)
         self._context.logs.extend(result.get("logs", []))
 
-        return {
+        output = {
             "success": result["success"],
             "duration": result["duration"],
             "frames": frames,
@@ -715,6 +739,16 @@ class IsaacSimConnector:
             "contact_forces": result["contact_forces"],
             "joint_states": result["joint_states"],
         }
+
+        # Forward pick-and-place fields when present
+        if "place_target" in result:
+            output["place_target"] = result["place_target"]
+        if "object_trajectory" in result:
+            output["object_trajectory"] = result["object_trajectory"]
+        if "place_accuracy" in result:
+            output["place_accuracy"] = result["place_accuracy"]
+
+        return output
 
     async def capture_frames(self) -> list[bytes]:
         """Return all captured simulation frames as PNG bytes."""

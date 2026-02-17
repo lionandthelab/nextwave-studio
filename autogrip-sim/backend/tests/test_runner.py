@@ -33,7 +33,7 @@ class TestRunSimulation:
         result = await runner.run_simulation(
             code="torque = 5.0\ngrasp_width = 0.06",
             cad_path="/tmp/test.stl",
-            robot_model="unitree_h1",
+            robot_model="franka_allegro",
         )
         assert isinstance(result, dict)
         assert "success" in result
@@ -152,7 +152,7 @@ class TestRunAndValidateIntegration:
         sim_output = await runner.run_simulation(
             code="torque = 8.0\ngrasp_width = 0.06",
             cad_path="/tmp/test.stl",
-            robot_model="unitree_h1",
+            robot_model="franka_allegro",
         )
 
         checks, error_log = await runner.validate_result(sim_output)

@@ -26,6 +26,8 @@ UPDATABLE_FIELDS: frozenset[str] = frozenset({
     "results",
     "generated_code",
     "task",
+    "mode",
+    "place_target",
 })
 
 
@@ -52,6 +54,8 @@ class _SessionData:
         self.logs: list[dict[str, Any]] = []
         self.generated_code: Optional[str] = None
         self.task: Optional[asyncio.Task[None]] = None
+        self.mode: str = "grasp_only"
+        self.place_target: Optional[list[float]] = None
 
 
 # H4: Immutable snapshot returned outside the lock

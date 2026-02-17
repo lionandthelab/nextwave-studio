@@ -128,7 +128,7 @@ class TestDefaultCodeGeneration:
                 "dimensions": {"x": 0.1, "y": 0.1, "z": 0.1},
                 "volume": 0.001,
             },
-            robot_model="unitree_h1",
+            robot_model="franka_allegro",
         )
         assert "def run_grasp_simulation" in code
         assert "sim_context" in code
@@ -143,12 +143,12 @@ class TestDefaultCodeGeneration:
             cad_metadata={
                 "dimensions": {"x": 0.2, "y": 0.15, "z": 0.3},
             },
-            robot_model="franka",
+            robot_model="franka_allegro",
         )
-        # The largest dimension (0.3) should influence grasp_width
-        assert "grasp_width" in code
-        # Robot model should appear in the code
-        assert "franka" in code
+        # The largest dimension should influence finger_torque
+        assert "finger_torque" in code
+        # Robot model context should appear in the code
+        assert "Franka" in code or "franka" in code
 
     def test_default_code_returns_dict(self):
         """Generated code should have return statements with success key."""

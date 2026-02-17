@@ -260,7 +260,7 @@ class TestWorkspaceCheck:
     def test_workspace_fail_object_too_far_x(self, validator: GraspValidator):
         """Object beyond x_max should fail workspace check."""
         sim = _make_sim_result()
-        sim["object_final_state"]["position"] = [0.8, 0.0, 0.3]
+        sim["object_final_state"]["position"] = [0.90, 0.0, 0.3]
         result = validator.validate(sim)
         assert result.checks["workspace_test"].passed is False
         assert "outside" in result.checks["workspace_test"].message.lower()
@@ -275,15 +275,15 @@ class TestWorkspaceCheck:
     def test_workspace_fail_object_y_out_of_range(self, validator: GraspValidator):
         """Object beyond y limits should fail workspace check."""
         sim = _make_sim_result()
-        sim["object_final_state"]["position"] = [0.4, 0.5, 0.3]
+        sim["object_final_state"]["position"] = [0.4, 0.65, 0.3]
         result = validator.validate(sim)
         assert result.checks["workspace_test"].passed is False
 
     def test_workspace_fail_radius_exceeded(self, validator: GraspValidator):
         """Object beyond radius_max should fail workspace check."""
         sim = _make_sim_result()
-        # (0.5, 0.35) -> radius ~= 0.61 > 0.60
-        sim["object_final_state"]["position"] = [0.5, 0.35, 0.3]
+        # (0.7, 0.5) -> radius ~= 0.86 > 0.855
+        sim["object_final_state"]["position"] = [0.7, 0.5, 0.3]
         result = validator.validate(sim)
         assert result.checks["workspace_test"].passed is False
 

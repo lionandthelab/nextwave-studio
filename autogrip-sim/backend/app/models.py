@@ -29,7 +29,7 @@ class CADMetadata(BaseModel):
 class SessionCreate(BaseModel):
     cad_file_id: str
     manual_file_id: Optional[str] = None
-    robot_model: str = "unitree_h1_hand"
+    robot_model: str = "franka_allegro"
 
 
 class SessionResponse(BaseModel):
@@ -50,6 +50,16 @@ class SimulationResult(BaseModel):
     )
     error_log: Optional[str] = None
     code_diff: Optional[str] = None
+    place_target: Optional[list[float]] = Field(
+        default=None, description="[x, y, z] target position for pick-and-place mode"
+    )
+    place_accuracy: Optional[float] = Field(
+        default=None, description="Distance (m) from object final position to place_target"
+    )
+    replay_data: Optional[dict] = Field(
+        default=None,
+        description="Simulation replay data for 3D viewer animation: phases, trajectory, contacts",
+    )
 
 
 class LoopStatus(BaseModel):

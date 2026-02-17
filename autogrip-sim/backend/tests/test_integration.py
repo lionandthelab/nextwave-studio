@@ -62,7 +62,7 @@ class TestSelfCorrectingLoop:
 
         await connector.start_simulation(headless=True)
         await connector.load_scene()
-        await connector.load_robot("unitree_h1")
+        await connector.load_robot("franka_allegro")
         await connector.load_object("/tmp/test.stl", position=(0.5, 0.0, 0.05))
 
         max_iterations = 15
@@ -109,7 +109,7 @@ class TestSelfCorrectingLoop:
         """Running simulation should produce capturable frames."""
         await connector.start_simulation(headless=True)
         await connector.load_scene()
-        await connector.load_robot("unitree_h1")
+        await connector.load_robot("franka_allegro")
         await connector.load_object("/tmp/test.stl")
 
         await connector.execute_code("torque = 5.0\ngrasp_width = 0.06")
@@ -130,7 +130,7 @@ class TestSelfCorrectingLoop:
 
         await connector.start_simulation(headless=True)
         await connector.load_scene()
-        await connector.load_robot("unitree_h1")
+        await connector.load_robot("franka_allegro")
         await connector.load_object("/tmp/test.stl")
 
         expected_checks = {"hold_test", "contact_test", "stability_test", "force_test", "workspace_test"}
@@ -176,7 +176,7 @@ class TestRunnerIntegration:
         sim_output = await runner.run_simulation(
             code="torque = 5.0\ngrasp_width = 0.06",
             cad_path="/tmp/test.stl",
-            robot_model="unitree_h1",
+            robot_model="franka_allegro",
         )
 
         checks, error_log = await runner.validate_result(sim_output)

@@ -39,9 +39,19 @@
           </h2>
         </div>
         <div class="panel-body">
+          <!-- Preset Objects -->
+          <div class="upload-section">
+            <label class="upload-label">Quick Start: Preset Objects</label>
+            <div class="preset-selector" id="presetSelector">
+              <div class="preset-grid" id="presetGrid">
+                <!-- Populated by JS -->
+              </div>
+            </div>
+          </div>
+
           <!-- CAD Upload -->
           <div class="upload-section">
-            <label class="upload-label">CAD File</label>
+            <label class="upload-label">CAD File <span class="optional-tag">or upload your own</span></label>
             <div class="upload-zone" id="cadDropZone" data-type="cad">
               <div class="upload-zone-content" id="cadUploadContent">
                 <svg class="upload-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="1.5">
@@ -118,13 +128,37 @@
             <label class="form-label" for="robotModel">Robot Model</label>
             <div class="select-wrapper">
               <select id="robotModel" class="form-select">
-                <option value="unitree_h1_hand">Unitree H1 Hand</option>
-                <option value="unitree_z1_gripper">Unitree Z1 Gripper</option>
+                <option value="franka_allegro">Franka Panda + Allegro Hand</option>
+                <option value="franka_2finger">Franka Panda + 2-Finger Gripper</option>
                 <option value="generic_2finger">Generic 2-Finger</option>
               </select>
               <svg class="select-arrow" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
                 <path d="M2 4l4 4 4-4"/>
               </svg>
+            </div>
+          </div>
+
+          <!-- Simulation Mode -->
+          <div class="form-group">
+            <label class="form-label" for="simMode">Simulation Mode</label>
+            <div class="select-wrapper">
+              <select id="simMode" class="form-select">
+                <option value="grasp_only">Grasp &amp; Hold</option>
+                <option value="pick_and_place">Pick &amp; Place</option>
+              </select>
+              <svg class="select-arrow" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+                <path d="M2 4l4 4 4-4"/>
+              </svg>
+            </div>
+          </div>
+
+          <!-- Place Target (shown only in pick_and_place mode) -->
+          <div class="form-group hidden" id="placeTargetGroup">
+            <label class="form-label">Place Target (x, y, z)</label>
+            <div style="display:flex; gap:6px;">
+              <input type="number" id="placeX" class="form-input" value="0.5" step="0.05" style="width:33%">
+              <input type="number" id="placeY" class="form-input" value="0.4" step="0.05" style="width:33%">
+              <input type="number" id="placeZ" class="form-input" value="0.05" step="0.01" style="width:33%">
             </div>
           </div>
 
@@ -184,8 +218,15 @@
               <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
               <circle cx="12" cy="12" r="3" fill="#0d1117"/>
             </svg>
-            3D Viewer
+            Viewer
           </h2>
+          <!-- Viewer Tab Switcher -->
+          <div class="viewer-tabs" id="viewerTabs">
+            <button class="viewer-tab active" data-tab="3d" id="tab3D">3D Preview</button>
+            <button class="viewer-tab" data-tab="livestream" id="tabLivestream" disabled title="Requires Isaac Sim">
+              <span class="livestream-dot"></span>Isaac Sim Live
+            </button>
+          </div>
           <div class="viewer-badges">
             <span class="iteration-badge hidden" id="iterationBadge">Iteration 0</span>
             <span class="status-badge" id="statusBadge">Idle</span>
@@ -213,6 +254,18 @@
             <div class="viewer-loading hidden" id="viewerLoading">
               <div class="loading-spinner"></div>
               <span>Loading 3D model...</span>
+            </div>
+            <!-- Isaac Sim Livestream (WebRTC) -->
+            <div class="livestream-container hidden" id="livestreamContainer">
+              <iframe id="livestreamFrame" class="livestream-frame" src="" allow="autoplay; fullscreen" allowfullscreen></iframe>
+              <div class="livestream-overlay hidden" id="livestreamOverlay">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#58a6ff" stroke-width="1.5">
+                  <circle cx="12" cy="12" r="10"/>
+                  <path d="M12 8v4M12 16h.01"/>
+                </svg>
+                <p class="livestream-message">Isaac Sim is not available</p>
+                <p class="livestream-hint">Start the Isaac Sim container to enable the live view</p>
+              </div>
             </div>
           </div>
           <!-- Viewer toolbar -->

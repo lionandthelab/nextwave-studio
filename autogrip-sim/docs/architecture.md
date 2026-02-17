@@ -159,7 +159,7 @@ autogrip-sim/
 |-------|--------|-------------|
 | **UploadResponse** | `id`, `filename`, `file_type`, `size_bytes` | 파일 업로드 응답 |
 | **CADMetadata** | `filename`, `format`, `dimensions{x,y,z}`, `volume?`, `center_of_mass?` | trimesh로 추출한 CAD 메타데이터 |
-| **SessionCreate** | `cad_file_id`, `manual_file_id?`, `robot_model="unitree_h1_hand"` | 세션 생성 요청 |
+| **SessionCreate** | `cad_file_id`, `manual_file_id?`, `robot_model="franka_allegro"` | 세션 생성 요청 |
 | **SessionResponse** | `session_id`, `status`, `created_at` | 세션 생성 응답 |
 | **GenerateStartRequest** | `cad_file_id`, `manual_file_id?`, `robot_model`, `max_iterations=20`, `success_threshold=3`, `session_id?` | 루프 시작 요청 (세션 자동 생성) |
 | **SimulationResult** | `iteration`, `success`, `checks{name→bool}`, `error_log?`, `code_diff?` | 1회 시뮬레이션 결과 |

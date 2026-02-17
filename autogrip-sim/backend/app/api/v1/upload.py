@@ -170,6 +170,63 @@ async def upload_manual(file: UploadFile) -> UploadResponse:
     )
 
 
+@router.get("/presets/list")
+async def list_presets() -> list[dict]:
+    """List available preset CAD objects for quick testing."""
+    preset_dir = Path(__file__).resolve().parent.parent.parent.parent / "static" / "presets"
+    if not preset_dir.exists():
+        return []
+    presets = []
+    labels = {
+        "box_6cm": "Box 6cm",
+        "flat_box_8cm": "Flat Box 8cm",
+        "cylinder_5x10": "Cylinder 5x10cm",
+        "cylinder_4x5": "Small Cylinder 4x5cm",
+    }
+    for f in sorted(preset_dir.glob("*.stl")):
+        stem = f.stem
+        presets.append({
+            "name": stem,
+            "label": labels.get(stem, stem),
+            "filename": f.name,
+            "size_bytes": f.stat().st_size,
+        })
+    return presets
+
+
+@router.post("/preset/{preset_name}", response_model=UploadResponse)
+async def use_preset(preset_name: str) -> UploadResponse:
+    """Use a preset CAD object (copies it to uploads like a normal upload)."""
+    preset_dir = Path(__file__).resolve().parent.parent.parent.parent / "static" / "presets"
+    preset_path = preset_dir / f"{preset_name}.stl"
+    if not preset_path.exists():
+        raise HTTPException(status_code=404, detail=f"Preset '{preset_name}' not found")
+
+    file_id = uuid4().hex
+    dest_dir = settings.cad_upload_path
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / f"{file_id}.stl"
+
+    import shutil
+    shutil.copy2(str(preset_path), str(dest_path))
+    size = dest_path.stat().st_size
+    filename = f"{preset_name}.stl"
+
+    cad_meta = _extract_cad_metadata(dest_path, filename)
+    await session_manager.store_file_meta(
+        file_id,
+        {
+            "filename": filename,
+            "file_type": "cad",
+            "size_bytes": size,
+            "path": str(dest_path),
+            "cad_metadata": cad_meta.model_dump(),
+        },
+    )
+    logger.info("Preset CAD loaded: %s (id=%s)", filename, file_id)
+    return UploadResponse(id=file_id, filename=filename, file_type="cad", size_bytes=size)
+
+
 @router.get("/{file_id}")
 async def get_file_metadata(file_id: str) -> dict:
     """Return stored metadata for a previously uploaded file."""

@@ -52,7 +52,7 @@ class TestLoadScene:
         """Loading scene, robot, and object should populate context."""
         await connector.start_simulation()
         scene_ok = await connector.load_scene()
-        robot_ok = await connector.load_robot("unitree_h1")
+        robot_ok = await connector.load_robot("franka_allegro")
         obj_ok = await connector.load_object("/tmp/test.stl")
 
         assert scene_ok is True
@@ -61,7 +61,7 @@ class TestLoadScene:
 
         assert connector.context.ground_plane is True
         assert connector.context.robot is not None
-        assert connector.context.robot.model == "unitree_h1"
+        assert connector.context.robot.model == "franka_allegro"
         assert len(connector.context.objects) == 1
 
     async def test_load_scene_without_start_raises(
@@ -87,7 +87,7 @@ class TestExecuteCode:
         """Executing code should return a results dict with expected keys."""
         await connector.start_simulation()
         await connector.load_scene()
-        await connector.load_robot("unitree_h1")
+        await connector.load_robot("franka_allegro")
         await connector.load_object("/tmp/test.stl")
 
         code = 'torque = 5.0\ngrasp_width = 0.06\n'
