@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -74,6 +75,23 @@ app.include_router(monitor.router, prefix="/api/v1")
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/livestream/status")
+async def livestream_status():
+    """Proxy livestream status from Isaac Sim container."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(
+                f"{settings.isaac_sim_endpoint}/livestream/status"
+            )
+            return resp.json()
+    except Exception:
+        return {
+            "available": False,
+            "webrtc_available": False,
+            "isaac_sim_available": False,
+        }
 
 
 # Static files – mounted at "/" with html=True so that index.html is

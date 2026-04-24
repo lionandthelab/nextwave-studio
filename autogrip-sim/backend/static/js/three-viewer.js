@@ -1014,6 +1014,9 @@ class STLViewer {
     this._clearResultLabel();
     this._clearPhaseLabel();
 
+    // Save original object position for reset at end of iteration
+    const objOrigPos = this.mesh ? this.mesh.position.clone() : null;
+
     // Reset gripper position & all finger joints to open
     this.gripperGroup.position.y = g.startY;
     this._fingerJoints.forEach(f => {
@@ -1098,13 +1101,14 @@ class STLViewer {
         }
 
         case 'LIFT':
-          // Lift gripper + object
+          // Lift gripper + object together (same height delta)
           if (this.mesh && success) {
             const origObjY = this.mesh.position.y;
             this._replayObjOrigY = origObjY;
+            const liftDelta = g.liftY - this.gripperGroup.position.y;
             await Promise.all([
               this._tween(this.gripperGroup.position, 'y', g.liftY, dur),
-              this._tween(this.mesh.position, 'y', origObjY + g.maxDim * 0.5, dur),
+              this._tween(this.mesh.position, 'y', origObjY + liftDelta, dur),
             ]);
           } else {
             await this._tween(this.gripperGroup.position, 'y', g.liftY, dur);
@@ -1202,14 +1206,12 @@ class STLViewer {
     });
     await Promise.all(resetPromises);
 
-    // Reset object position if moved during PnP
-    if (this.mesh && mode === 'pick_and_place') {
-      const origCenter = g.objCenter.clone();
-      origCenter.y = this._replayObjOrigY || this.mesh.position.y;
+    // Reset object to original position (prevents drift across iterations)
+    if (this.mesh && objOrigPos) {
       await Promise.all([
-        this._tween(this.mesh.position, 'x', 0, 400),
-        this._tween(this.mesh.position, 'z', 0, 400),
-        this._tween(this.mesh.position, 'y', this._replayObjOrigY || this.mesh.position.y, 400),
+        this._tween(this.mesh.position, 'x', objOrigPos.x, 400),
+        this._tween(this.mesh.position, 'y', objOrigPos.y, 400),
+        this._tween(this.mesh.position, 'z', objOrigPos.z, 400),
       ]);
     }
 

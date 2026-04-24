@@ -596,7 +596,7 @@ class AutoGripApp {
 
       // Load livestream URL if available
       if (this.livestreamAvailable && this.livestreamFrame) {
-        this.livestreamFrame.src = `http://${window.location.hostname}:8211/streaming/webrtc-client`;
+        this.livestreamFrame.src = `http://${window.location.hostname}:8211/streaming/webrtc-client?server=${window.location.hostname}`;
         if (this.livestreamOverlay) this.livestreamOverlay.classList.add('hidden');
       } else {
         if (this.livestreamOverlay) this.livestreamOverlay.classList.remove('hidden');
@@ -625,7 +625,7 @@ class AutoGripApp {
       const res = await fetch('/livestream/status', { signal: AbortSignal.timeout(3000) });
       if (res.ok) {
         const data = await res.json();
-        this.livestreamAvailable = data.available === true;
+        this.livestreamAvailable = (data.available === true || data.webrtc_available === true);
       } else {
         this.livestreamAvailable = false;
       }

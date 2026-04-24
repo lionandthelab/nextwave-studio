@@ -1805,6 +1805,7 @@ async def livestream_status():
     except ImportError:
         pass
     return {
+        "available": webrtc_available,
         "webrtc_available": webrtc_available,
         "signaling_port": 8211,
         "media_port": 49100,
@@ -1832,11 +1833,13 @@ def _start_with_isaac_sim():
 
     from isaacsim import SimulationApp
 
+    isaac_sim_path = os.environ.get("ISAAC_SIM_PATH", "/isaac-sim")
     sim_config = {
         "headless": True,
         "renderer": "RayTracedLighting",
         "width": 1280,
         "height": 720,
+        "experience": f"{isaac_sim_path}/apps/omni.isaac.sim.headless.webrtc.kit",
     }
     _SIMULATION_APP = SimulationApp(sim_config)
     logger.info("SimulationApp initialized (headless=True)")
@@ -1919,13 +1922,14 @@ def _start_with_isaac_sim():
     sim_state["initialized"] = True
     logger.info("World created, assets root: %s", sim_manager._assets_root)
 
-    # Start uvicorn in a background thread
-    server_thread = threading.Thread(
-        target=uvicorn.run,
-        args=(app,),
-        kwargs={"host": "0.0.0.0", "port": 9090, "log_level": "info"},
-        daemon=True,
-    )
+    # Start uvicorn in a background thread with its own event loop
+    def _run_uvicorn():
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        uvicorn.run(app, host="0.0.0.0", port=9090, log_level="info")
+
+    server_thread = threading.Thread(target=_run_uvicorn, daemon=True)
     server_thread.start()
     logger.info("Uvicorn started in background thread")
 

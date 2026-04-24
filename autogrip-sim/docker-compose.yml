@@ -8,7 +8,7 @@ services:
       dockerfile: docker/Dockerfile
     container_name: autogrip-backend
     ports:
-      - "8080:8000"
+      - "9080:8000"
     volumes:
       - ./backend/uploads:/app/uploads
       - ./backend/chroma_db:/app/chroma_db
@@ -44,7 +44,8 @@ services:
     ports:
       - "9090:9090"
       - "8211:8211"     # WebRTC signaling
-      - "49100:49100"   # WebRTC media
+      - "49100:49100"   # WebRTC TCP signaling
+      - "47998:47998/udp"  # WebRTC UDP media
     deploy:
       resources:
         reservations:
@@ -54,10 +55,10 @@ services:
               capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
     restart: unless-stopped
     networks:
       - autogrip-net
@@ -69,7 +70,7 @@ services:
       dockerfile: docker/Dockerfile
     container_name: autogrip-backend-dev
     ports:
-      - "8000:8000"
+      - "9080:8000"
     volumes:
       - ./backend:/app
     environment:

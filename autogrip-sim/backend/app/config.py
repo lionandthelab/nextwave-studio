@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     isaac_sim_endpoint: str = "http://localhost:9090"
 
     # CORS
-    cors_origins: list[str] = ["http://localhost:8000", "http://localhost:3000"]
+    cors_origins: list[str] = ["http://localhost:8000", "http://localhost:9080", "http://localhost:3000"]
 
     # App
     app_host: str = "0.0.0.0"

@@ -30,15 +30,15 @@ WORKDIR /autogrip-sim
 COPY docker/sim_scripts/ /autogrip-sim/sim_scripts/
 RUN chmod +x /autogrip-sim/sim_scripts/entrypoint.sh
 
-# Expose ports: 9090 = sim API, 8211 = WebRTC signaling, 49100 = WebRTC media
-EXPOSE 9090 8211 49100
+# Expose ports: 9090 = sim API, 8211 = WebRTC signaling, 49100 = WebRTC TCP, 47998 = WebRTC UDP media
+EXPOSE 9090 8211 49100 47998/udp
 
 # Health check (python3 not on PATH in Isaac Sim image, use curl)
 HEALTHCHECK --interval=15s --timeout=10s --retries=10 --start-period=120s \
     CMD curl -f http://localhost:9090/health || exit 1
 
-# Enable WebRTC livestream extension
-ENV LIVESTREAM_ENABLED=true
+# Enable WebRTC livestream (mode 2 = local network streaming)
+ENV LIVESTREAM=2
 ENV OMNI_KIT_ALLOW_ROOT=1
 
 # Override base image entrypoint — run sim_server directly with Isaac Sim's Python
