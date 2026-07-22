@@ -127,7 +127,8 @@ UI 프레임워크에 의존하지 않는다(React든 vanilla든 재사용 가�
 
 - **언어**: TypeScript strict 모드. `any` 금지(불가피하면 `// @justify:` 주석).
 - **좌표계**: 내부 표준은 **Y-up**, 미터, 라디안. URDF는 Z-up이 흔하므로
-  로딩 시 축 변환을 `scene-loader`에서 한 번만 처리하고 이후엔 Y-up으로 통일한다.
+  로딩 시 축 변환을 render의 URDF 래퍼(`render/urdf.ts`의 axisFix 그룹) 한 곳에서만
+  처리하고 이후엔 Y-up으로 통일한다 (`core/robot-types.ts` 헤더 계약).
 - **회전 표현**: 쿼터니언 `[x, y, z, w]`. 오일러각은 UI 입력 경계에서만 쓰고 즉시 변환.
 - **핸들 매핑**: `Map<ColliderHandle, EntityId>`, `Map<EntityId, RigidBodyHandle>`를
   `world.ts`가 소유한다. 다른 모듈은 이 매핑을 통해서만 물리 객체에 접근한다.
@@ -221,7 +222,7 @@ Rapier interaction group은 0–15의 16개 그룹만 존재한다. 이 프로�
   ESM WASM) 대신 **`@dimforge/rapier3d-compat`**(WASM base64 내장)를 쓴다. `RAPIER.init()`
   을 반드시 await한다. `vite.config.ts`의 예외 설정을 확인한다.
 - **좌표 축 혼동**: URDF(Z-up)를 로드하고 축 변환을 빼먹으면 로봇이 눕는다.
-  변환은 `scene-loader` 한 곳에서만.
+  변환은 render URDF 래퍼(`render/urdf.ts` axisFix) 한 곳에서만.
 - **터널링**: 빠른 링크가 얇은 사물을 통과하면 `setCcdEnabled(true)`로 CCD를 켠다.
 - **스텝 중 바디 속성 접근**: (react-three-rapier 사용 시) 물리 스텝 콜백 안에서
   `translation()`/`linvel()` 등 rigidbody 속성을 직접 읽지 않는다(Rust aliasing 오류).

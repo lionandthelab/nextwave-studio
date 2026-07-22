@@ -86,6 +86,8 @@ function makeRecordingRenderApi(): { api: RenderSceneApi; nodes: RecordingNode[]
       addGround: makeNode,
       setPose: () => undefined,
       remove: () => undefined,
+      loadRobot: () =>
+        Promise.reject(new Error('이 테스트 씬에는 robot 엔티티가 없어야 합니다')),
     },
   };
 }
@@ -97,12 +99,12 @@ beforeAll(async () => {
 // ── 회귀 테스트 ─────────────────────────────────────────────────────
 
 describe('SceneHandle.reset() — 시각 prev 스냅샷 갱신 (CLAUDE.md §2.1)', () => {
-  it('reset() 직후 apply(0)이 리셋 전 pose가 아니라 초기 pose를 그린다', () => {
+  it('reset() 직후 apply(0)이 리셋 전 pose가 아니라 초기 pose를 그린다', async () => {
     const world = new RapierWorld(SCENE_SPEC.gravity, SCENE_SPEC.timestepHz);
     try {
       const sync = new RenderSync(world);
       const { api, nodes } = makeRecordingRenderApi();
-      const handle = new SceneLoader(world, api, sync).build(SCENE_SPEC);
+      const handle = await new SceneLoader(world, api, sync).build(SCENE_SPEC);
 
       // Engine의 물리 tick 순서를 재현: commit() → world.step() (SIMULATION.md §5)
       for (let i = 0; i < FALL_TICKS; i += 1) {

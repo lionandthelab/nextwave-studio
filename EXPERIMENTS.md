@@ -209,4 +209,136 @@ CLAUDE.md/docs에 반영). 새 항목은 아래에 추가하고 기존 항목은
   src/core/scene-reset-sync.test.ts(reset 후 apply(0)이 초기 pose를 그림) 회귀 테스트 추가
 - 영향받는 파일/문서: src/core/world.ts, src/core/engine.ts, src/core/scene-loader.ts
 
+## [2026-07-23] Phase 3: 로봇 관절 구동 설계 — 관절 진실은 core, FK는 render, kinematic push
+
+- 상태: 결정됨
+- 맥락: URDF 로봇을 "물리가 진실"(CLAUDE.md §2.1) 불변식과 충돌 없이 구동해야 한다.
+  로봇 링크 pose의 원천이 관절값(FK)인데, FK 계산기는 render의 urdf-loader 씬 그래프다.
+- 선택: 관절 상태(joint values)의 유일한 진실은 core의 `RobotBinding`이 소유한다.
+  FK(관절값 → 링크 월드 pose)는 render의 urdf-loader 씬 그래프가 수행하고, core는
+  `RobotFkView` 인터페이스(POJO만 — three 심볼 비노출)로만 읽는다. 매 물리 tick,
+  world.step() "직전"(Engine `preStep` 훅)에 `RobotRegistry.tickAll()`이 FK 링크 pose를
+  kinematicPosition 바디에 `setKinematicPose`(다음 스텝 목표)로 밀어 넣는다. 시각 로봇
+  (urdf Object3D)은 같은 관절 상태에서 직접 갱신된다 — 그 자체가 FK 그래프이므로
+  로봇 링크는 RenderSync에 바인딩하지 않는다. URDF Z-up → 내부 Y-up 변환은 render의
+  URDF 래퍼(axisFix 그룹, rotation.x = -π/2) 한 곳에서만 수행한다(CLAUDE.md §4).
+- §2.1 불변식 해석: kinematic 로봇에서 "물리가 트랜스폼의 진실"은 링크 바디가 관절
+  상태라는 단일 원천에서 유도된 pose를 매 스텝 물리 목표로 받아들인다는 뜻이다.
+  물리(충돌·접촉 상대)가 보는 pose와 시각 pose가 같은 관절 상태에서 유도되므로 진실이
+  갈라지지 않고, three.js 쪽에서 물리와 "어긋나게" 값을 쓰는 역방향 경로도 없다
+  (setJointValues → FK → 물리 push의 단방향 파이프라인).
+- 부속 결정: (1) `readLinkPoses`는 collider 보유 링크만 반환(240Hz 핫 패스에서 소비처
+  없는 pose 산출 회피). (2) urdf-loader 0.12는 collision 프리미티브를 "단위 지오메트리
+  × mesh.scale"로 만들므로 형상 치수 = 지오메트리 파라미터 × |링크-상대 TRS scale|,
+  offset은 position/rotation만 담는다(URDF Z축 실린더의 rotation.x=π/2도 offset에 포함
+  — Rapier 실린더는 Y축 정렬이라 그대로 맞아떨어진다). (3) mimic/planar/floating 관절은
+  구동 대상에서 제외(mimic은 urdf-loader가 자동 추종). (4) `applyHome()`은 home 키만이
+  아니라 전 관절을 fk initial로 되돌린 뒤 home을 적용 — home에 없는 관절도 결정론적으로
+  복원(SIMULATION.md §6). (5) 유효 limits = URDF ∩ jointLimitOverrides 교집합, 빈
+  교집합은 생성 시점 오류. (6) 비유한 관절값은 한국어 오류로 거부 — NaN이 FK/물리
+  경로에 들어가지 않게. (7) `readJoints(names)`는 요청한 이름(논리명 허용) 그대로 키를
+  써서 반환 — player의 moveJoints 시작값 스냅샷 계약(SIMULATION §3)과 맞춘다.
+- 트레이드오프: readLinkPoses가 호출마다 Map/Pose를 새로 할당(240Hz) — 계약에 소유권
+  규정이 없어 안전 우선. GC 압력이 측정되면 robot-types 계약에 버퍼 재사용을 추가 검토.
+  tick()의 Object.fromEntries 할당도 동일 판단(MVP 규모에서 무시 가능). limit 태그 없는
+  revolute는 urdf-loader가 lower=upper=0을 주므로 [0,0]으로 고정된 관절이 된다(URDF
+  명세상 revolute의 limit는 필수 — 오류 대신 명세대로 해석).
+- 영향받는 파일/문서: src/core/robot-types.ts, src/core/robots.ts, src/render/urdf.ts,
+  src/core/engine.ts(preStep 훅 사용), src/core/scene-loader.ts, src/main.ts
+
+## [2026-07-23] Phase 3: linkColliders 'fromVisual'은 URDF <collision> 태그로 해석
+
+- 상태: 결정됨
+- 맥락: RobotSpec.linkColliders 정책(DATA_MODEL §4.1)의 'fromVisual'을 구현해야 한다.
+  이름은 "시각 메시에서 유도"를 시사하지만, URDF는 이미 링크별 <collision> 태그로
+  단순화된 충돌 형상을 별도 제공한다.
+- 선택: 'fromVisual'(기본값)을 "URDF <collision> 태그의 프리미티브(box/sphere/cylinder)
+  사용"으로 해석한다(`loader.parseCollision = true` → `RobotFkView.linkColliders`).
+  'primitive'도 현재 동일 경로다. 'none'은 물리 바디를 아예 만들지 않는다(시각 전용 —
+  로봇은 레지스트리에 등록되어 관절 조작은 가능). collider 없는 링크는 바디도 없다.
+  파일 메시 collision 지오메트리는 MVP 미지원 — 경고 후 건너뜀.
+- 근거: URDF <collision>이 이미 "단순 프리미티브 collider"(CLAUDE.md §2.2)의 규범적
+  원천이다. 시각 메시 AABB/hull 자동 유도는 메시 임포트 파이프라인(Phase 7)과 함께
+  도입해도 늦지 않다.
+- 트레이드오프: <collision>이 없는 URDF는 충돌 감지가 안 된다 — 자체 제작 arm6.urdf는
+  전 링크에 collision을 명시했다. visual-유래 자동 생성이 필요해지면 'fromVisual'과
+  'primitive'를 분화시킨다.
+- 영향받는 파일/문서: src/render/urdf.ts, src/core/scene-loader.ts(robot 브랜치),
+  src/assets/scenes/arm-and-boxes.scene.json, public/assets/robots/arm6/arm6.urdf
+
+## [2026-07-23] Phase 3: selfCollision=false는 그룹 필터로 구현 (인접 쌍 필터링 불필요)
+
+- 상태: 결정됨
+- 맥락: URDF self-collision 기본 비활성(CLAUDE.md §5 "인접 링크 무시") 구현 방법.
+  통상 구현은 인접 링크 쌍별 예외 필터인데, Rapier에서 쌍별 예외는 번거롭다.
+- 선택: 로봇 링크 collider는 전부 ROBOT 그룹 소속이므로, selfCollision=false(기본)면
+  `collidesWith`에서 ROBOT을 제외한다(['ENV','OBJECT']). 필터에 ROBOT이 없으면 링크끼리는
+  broad-phase에서 걸러져 인접이든 아니든 충돌 자체가 없다 — 인접 쌍 열거가 불필요.
+  selfCollision=true면 ['ENV','OBJECT','ROBOT'] — 이때는 인접 링크(관절부에서 형상이
+  겹침)도 충돌 대상이 되므로 주의(현 MVP에 true 사용처 없음). 링크 collider 스펙:
+  emitEvents=true(로봇–사물/환경 충돌 감지가 프로젝트 핵심 — ROADMAP Phase 4), friction 0.8.
+- 트레이드오프: 이 방식은 "비인접 링크 간 self-collision만 감지"가 불가능하다(전부 or
+  전무). 필요해지면 로봇별 예약 그룹(§5 슬롯 4–14) 배정 또는 쌍별 필터 훅으로 확장.
+  다중 로봇도 현재는 서로 같은 ROBOT 그룹이라 selfCollision=false면 로봇 간 충돌도
+  감지되지 않는다 — 로봇 간 충돌 감지가 요구되면 그룹 분리로 해결(백로그).
+- 검증: `npm test` 115개 통과(scene-loader robot 브랜치 — 바디/collider 스펙·registry·
+  reset 재-home 어서션 포함), `node scripts/gate-browser.mjs --expect=arm` ALL PASS
+  (관절 8개, home joint2=-0.6 적용, 링크 y 최대 0.682(기립 — 축 변환 정상), setJoint로
+  링크 바디 x/z 변위 > 0.02), `--expect=falling-boxes` 회귀 ALL PASS.
+- 영향받는 파일/문서: src/core/scene-loader.ts, src/core/scene-loader.test.ts,
+  scripts/gate-browser.mjs, src/main.ts(?scene= 씬 레지스트리·robots 파사드·관절 패널
+  마운트), src/ui/inspector/joint-panel.ts
+
+## [2026-07-23] Phase 3 리뷰 수정: kinematic 쌍 ActiveCollisionTypes 정규화 + 로봇 링크 바디 build/reset 상태 동일성
+
+- 상태: 결정됨
+- 맥락: Phase 3 리뷰 지적 반영. (1) **[major]** Rapier 0.14의 collider 기본
+  ActiveCollisionTypes(DEFAULT=15)는 DYNAMIC_* 쌍만 활성화한다. 로봇 링크는
+  kinematicPosition, 바닥은 fixed이므로 KINEMATIC_FIXED(8704) 쌍이 narrow-phase에서
+  통째로 건너뛰어져 — 그룹 필터·emitEvents가 다 맞아도 — CLAUDE.md §5 핵심 쌍
+  ROBOT×ENV의 접촉 이벤트가 절대 발행되지 않았다(Phase 4 게이트 선제 결함).
+  selfCollision=true(KINEMATIC_KINEMATIC=52224 필요)도 같은 원인의 죽은 옵션이었다.
+  (2) **[major]** 링크 바디가 home 적용 "전" URDF 초기 FK pose로 생성되어 첫 스텝에
+  초기→home 스윕(|Δpose|×240Hz의 가짜 kinematic 속도 — 접촉 사물에 비현실적 임펄스)이
+  생겼고, reset()은 tick()(다음 스텝 목표 지정)만 호출해 다음 스텝까지 물리 pose가
+  리셋 전 상태로 남았다 — fresh load와 reset 후의 "스텝 전 상태"가 달라 결정론적
+  재생(SceneHandle.reset 계약, SIMULATION.md §6)이 깨졌다. (3) [minor] paused/idle 중
+  UI 관절 변경이 다음 물리 tick까지 시각 로봇에 반영되지 않음(Phase 5 재생 컨트롤에서
+  표면화될 잠재 결함). (4) [minor] CLAUDE.md §4/§9·ROADMAP Phase 3이 축 변환 지점을
+  scene-loader로 표기(코드·frozen 계약은 render URDF 래퍼) — 문서 표류.
+- 선택: (1) RapierWorld.createCollider가 부모 바디가 kinematic이면
+  `DEFAULT|KINEMATIC_FIXED|KINEMATIC_KINEMATIC`을 설정한다 — 이 프로젝트에서 "어떤
+  쌍이 상호작용하는가"의 유일한 결정권은 충돌 그룹(ColliderSpec.collidesWith)이고,
+  엔진별 쌍-타입 기본값은 PhysicsWorld 래퍼가 정규화한다(쌍 판정은 두 collider 타입의
+  합집합 — 한쪽만 켜도 활성). selfCollision=false는 여전히 그룹 필터로 걸러진다
+  (kinematic-kinematic 쌍이 켜져도 ROBOT 미포함 필터가 거름 — 회귀 테스트로 확인).
+  (2) buildRobot이 RobotBinding을 먼저 만들어(공유 linkBodies Map, 생성자에서 home
+  적용) tick() 1회로 FK 뷰를 home으로 갱신한 뒤 "home FK pose"에서 링크 바디를
+  생성한다 — 첫 스텝 스윕 0. reset()은 applyHome() 후 새 API
+  `RobotBinding.teleportLinksToFk()`(world.teleport — 리셋 전용 계약)로 링크 바디를
+  home FK로 즉시 정렬하고 tick()으로 다음 스텝 목표를 재지정한다. 결과: fresh load와
+  reset 직후의 스텝 전 물리 상태가 완전 동일(실 Rapier 회귀 테스트로 toStrictEqual 검증).
+  (3) main.ts 글루의 파사드 setJoint/applyHome이 engine.state !== 'playing'일 때
+  binding.tick()으로 시각 FK를 즉시 갱신 — tick은 시각 갱신 + 다음 스텝 목표 지정뿐이라
+  preStep 밖 호출이 무해(다음 preStep이 동일 목표를 재-push, 결정론 영향 없음).
+  (4) CLAUDE.md §4/§9·ROADMAP Phase 3을 "축 변환은 render URDF 래퍼(axisFix) 한 곳"으로
+  정정(§10 규칙 — 코드가 아닌 문서를 결정에 맞춤). main.ts 파사드 주석도
+  sceneHandle.robots를 통한 RobotRegistry 노출이 의도된 것임을 명시하도록 정정
+  (표면 축소 대신 — 게이트/향후 UI가 sceneHandle 공개 API를 쓰기 때문).
+- 트레이드오프: kinematic collider의 쌍 타입 상시 활성화는 넓은 활성 범위지만 실제
+  쌍 생성은 그룹 필터가 게이트하므로 비용 증가는 broad-phase 후보 판정뿐(MVP 규모
+  무시 가능). 링크 바디를 home에서 생성하므로 "URDF 초기 자세의 물리 바디"는 어떤
+  시점에도 존재하지 않는다(소비처 없음 확인). arm-and-boxes에서 ROBOT×ENV가 이제
+  실제 감지되므로 home 자세가 바닥에 닿는 씬은 부팅 직후 start 이벤트가 로그에 남을
+  수 있다 — 정상 동작(감지가 프로젝트 목적).
+- 검증: src/core/world-kinematic-contact.test.ts(kinematic×fixed start/stop,
+  kinematic×kinematic self start, selfCollision=false 필터 무이벤트),
+  src/core/scene-robot-reset.test.ts(build 직후 home FK pose, reset 직후 스텝 전
+  pose = fresh load와 toStrictEqual), scene-loader.test.ts 로봇 브랜치 갱신(바디 생성
+  pose = home FK = kinematic 목표, reset의 teleport 호출 검증). 전체 게이트:
+  typecheck + lint + 전체 테스트 + build + gate-browser --expect=arm ALL PASS.
+- 영향받는 파일/문서: src/core/world.ts, src/core/robots.ts, src/core/scene-loader.ts,
+  src/main.ts, CLAUDE.md §4/§9, docs/ROADMAP.md Phase 3, src/core/scene-loader.test.ts,
+  src/core/world-kinematic-contact.test.ts(신규), src/core/scene-robot-reset.test.ts(신규)
+
 <!-- 이후 결정은 여기에 추가 -->

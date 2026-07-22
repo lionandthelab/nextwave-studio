@@ -67,6 +67,22 @@ const DEFAULT_FRICTION = 0.5;
 const DEFAULT_RESTITUTION = 0.0;
 const IDENTITY_QUAT: Quat = [0, 0, 0, 1];
 
+/**
+ * kinematic 바디에 붙는 collider의 ActiveCollisionTypes.
+ *
+ * Rapier 기본(DEFAULT=15)은 DYNAMIC_* 쌍만 활성화한다 — kinematic↔fixed(ROBOT×ENV),
+ * kinematic↔kinematic(selfCollision, 로봇 간) 쌍은 그룹 필터·emitEvents와 무관하게
+ * narrow-phase에서 통째로 건너뛰어 접촉 이벤트가 절대 나오지 않는다.
+ * 이 프로젝트에서 "어떤 쌍이 상호작용하는가"의 유일한 결정권은 충돌 그룹
+ * (ColliderSpec.group/collidesWith — CLAUDE.md §5)이므로, kinematic 바디 collider에는
+ * 해당 쌍 타입을 켜서 그룹 필터가 유일한 게이트가 되게 정규화한다.
+ * (쌍 판정은 두 collider 타입의 합집합 기준 — 한쪽만 켜도 쌍이 활성화된다.)
+ * 비트 OR 결과는 number로 넓혀지므로 enum 타입으로 되돌리는 캐스트만 수행한다.
+ */
+const KINEMATIC_ACTIVE_COLLISION_TYPES = (RAPIER.ActiveCollisionTypes.DEFAULT |
+  RAPIER.ActiveCollisionTypes.KINEMATIC_FIXED |
+  RAPIER.ActiveCollisionTypes.KINEMATIC_KINEMATIC) as RAPIER.ActiveCollisionTypes;
+
 // ── 내부 변환 헬퍼 ──────────────────────────────────────────────────
 
 function toVector(v: Vec3): { x: number; y: number; z: number } {
@@ -158,6 +174,9 @@ export class RapierWorld implements PhysicsWorld {
       .setRestitution(spec.restitution ?? DEFAULT_RESTITUTION)
       .setSensor(spec.isSensor ?? false)
       .setCollisionGroups(collisionGroupsOf(spec));
+    // kinematic 바디(로봇 링크 등): kinematic↔fixed/kinematic 쌍도 그룹 필터가
+    // 결정하도록 활성화 — 기본값이면 ROBOT×ENV 접촉이 감지되지 않는다 (상수 주석 참조)
+    if (body.isKinematic()) desc.setActiveCollisionTypes(KINEMATIC_ACTIVE_COLLISION_TYPES);
 
     if (spec.offset) {
       const p = spec.offset.position;

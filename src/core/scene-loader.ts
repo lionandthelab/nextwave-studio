@@ -13,9 +13,13 @@
 // - EntitySpec → 물리 바디(PhysicsBodyInit) + collider들 + 프리미티브 시각 메시 생성
 // - 물리 바디 ↔ 시각 노드를 RenderSync에 바인딩 (물리 → 시각 단방향, 불변식 §2.1)
 // - environment.ground → ENV 고정 바닥(collider 상면 y=0) + 바닥 시각 메시
-// - SceneHandle 반환: reset(초기 트랜스폼 텔레포트 — 결정론적 재생), dispose(전체 해제)
-//
-// robot 엔티티(URDF 로딩·링크 바디)는 Phase 3에서 지원한다 — 지금은 명시적 오류.
+// - robot 엔티티(Phase 3): renderApi.loadRobot(비동기 URDF 로드) → 링크별
+//   kinematicPosition 바디 + ROBOT 그룹 collider 생성 → RobotBinding/RobotRegistry 등록.
+//   로봇 링크는 RenderSync에 바인딩하지 않는다 — 시각 로봇(urdf 씬 그래프)은 관절 상태에서
+//   직접 갱신되는 FK 그래프 그 자체이고, 물리 바디는 매 tick 같은 FK 결과를 받는다
+//   (단일 진실 = 관절 상태, core/robot-types.ts 헤더 참조).
+// - SceneHandle 반환: reset(초기 트랜스폼 텔레포트 + 로봇 home 복원 — 결정론적 재생),
+//   dispose(전체 해제, 로봇 핸들 포함)
 
 import type {
   BodyId,
@@ -24,12 +28,17 @@ import type {
   PhysicsWorld,
   Pose,
 } from './types';
+import type { RobotFkView } from './robot-types';
+import { RobotBinding, RobotRegistry } from './robots';
 import type { RenderSync } from './sync';
+import { isRobotSpec } from '../schema/types';
 import type {
+  ColliderGroup,
   ColliderShape,
   ColliderSpec,
   EntitySpec,
   Quat,
+  RobotSpec,
   SceneSpec,
   Vec3,
 } from '../schema/types';
@@ -41,6 +50,24 @@ import type {
  * opaque 별칭. scene-loader는 이 타입의 내부를 들여다보지 않고 그대로 통과시킨다.
  */
 export type VisualNode = Parameters<RenderSync['bind']>[1];
+
+// ── 로봇 핸들 (core 쪽 구조적 계약) ─────────────────────────────────
+// render/urdf.ts의 RobotHandle과 구조적으로 동일하지만, core → render import를 만들지
+// 않기 위해 여기서 독립 선언한다 (계층 의존 방향 ui → core → render, CLAUDE.md §3).
+// render 구현체는 이 타입을 구조적으로 만족하므로 글루(main.ts)가 그대로 넘길 수 있다.
+
+export type RobotHandle = RobotFkView & {
+  /** 엔티티 배치(SceneSpec transform) 반영 — Y-up 월드 기준 루트 pose 설정 */
+  setRootTransform(pose: Pose): void;
+  /** 씬에서 제거하고 렌더 자원을 해제한다. */
+  dispose(): void;
+};
+
+/** renderApi.loadRobot 요청 스펙 (RobotSpec에서 유도 — render는 스키마를 몰라도 된다) */
+export interface RobotLoadRequest {
+  urdfPath: string;
+  packages?: Record<string, string>;
+}
 
 // ── 렌더 계층에 요청하는 좁은 인터페이스 ─────────────────────────────
 // 구현은 render 계층 위에서 조립하는 글루(main.ts)가 제공한다. 헤드리스 테스트에서는
@@ -55,6 +82,8 @@ export interface RenderSceneApi {
   setPose(node: VisualNode, position: Vec3, rotation: Quat): void;
   /** 노드를 씬에서 제거한다. */
   remove(node: VisualNode): void;
+  /** URDF 로봇을 비동기 로드해 씬 루트에 부착하고 FK 뷰 핸들을 돌려준다 (Phase 3). */
+  loadRobot(request: RobotLoadRequest): Promise<RobotHandle>;
 }
 
 // ── 바닥(ground) 규약 상수 (매직넘버 금지 — CLAUDE.md §4) ────────────
@@ -80,33 +109,64 @@ const GROUND_COLLIDER_SPEC: ColliderSpec = {
 
 const IDENTITY_QUAT: Quat = [0, 0, 0, 1];
 
+// ── 로봇 링크 collider 규약 상수 (CLAUDE.md §5, 매직넘버 금지 §4) ────
+
+/** 로봇 링크 collider 마찰 계수 — 파지 이전 MVP에서 사물이 잘 미끄러지지 않게 높게 잡는다 */
+const ROBOT_LINK_FRICTION = 0.8;
+
+/**
+ * selfCollision=false(기본): ROBOT 그룹을 필터에서 아예 제외한다. 링크는 전부 같은
+ * ROBOT 그룹이므로 필터에 ROBOT이 없으면 링크끼리는 narrow-phase에 도달하지 않는다
+ * — URDF 인접 링크 쌍별 필터링이 불필요해진다 (CLAUDE.md §5 "self-collision 기본 비활성").
+ */
+const ROBOT_COLLIDES_WITH: readonly ColliderGroup[] = ['ENV', 'OBJECT'];
+
+/** selfCollision=true: ROBOT 그룹 포함 — 모든 링크 쌍이 충돌 대상이 된다(인접 링크 포함 주의) */
+const ROBOT_COLLIDES_WITH_SELF: readonly ColliderGroup[] = ['ENV', 'OBJECT', 'ROBOT'];
+
+/** RobotSpec.linkColliders 미지정 시 기본 정책 (DATA_MODEL.md §4.1) */
+const DEFAULT_LINK_COLLIDER_POLICY: NonNullable<RobotSpec['linkColliders']> = 'fromVisual';
+
 // ── 반환 핸들 ───────────────────────────────────────────────────────
 
 export interface SceneHandle {
   /** 생성된 엔티티 id 목록 (environment.ground 사용 시 GROUND_ENTITY_ID 포함) */
   readonly entityIds: readonly EntityId[];
+  /** 씬의 로봇 바인딩 보관소 — Engine preStep 훅이 robots.tickAll()을 호출한다. */
+  readonly robots: RobotRegistry;
   /**
    * 모든 바디를 초기 스펙 트랜스폼으로 텔레포트하고 속도를 0으로 만든다
    * — 동일 SceneSpec에서 동일 궤적을 재현하는 결정론적 재생용 (SIMULATION.md §6).
+   * 로봇은 applyHome()으로 생성 시점 관절 포즈를 복원하고, 링크 바디를 home FK
+   * pose로 즉시 teleport + kinematic 목표 재-push한다 — 리셋 직후(스텝 전)의
+   * 물리 상태가 fresh load와 동일하고, 첫 스텝의 스윕 속도가 0이다.
    * 마지막에 sync의 prev 스냅샷도 갱신하므로, 직후 렌더 프레임부터 화면이
    * 리셋된 물리 pose를 비춘다 (stale prev 보간 방지 — CLAUDE.md §2.1).
    */
   reset(): void;
-  /** 물리 바디·시각 노드·sync 바인딩을 전부 해제한다. */
+  /** 물리 바디·시각 노드·sync 바인딩·로봇 핸들을 전부 해제한다. */
   dispose(): void;
 }
 
 // ── 내부 레코드 ─────────────────────────────────────────────────────
 
+interface BuiltRobot {
+  readonly handle: RobotHandle;
+  readonly binding: RobotBinding;
+}
+
 interface BuiltEntity {
   readonly entityId: EntityId;
-  /** 물리 바디가 없는 순수 장식이면 undefined */
+  /** 물리 바디가 없는 순수 장식이면 undefined (로봇은 링크당 바디 — world 매핑이 소유) */
   readonly bodyId?: BodyId;
   /** reset()이 되돌릴 초기 pose (스펙에서 복사 — 이후 스펙 변형과 무관) */
   readonly initialPose?: Pose;
-  readonly node: VisualNode;
-  /** sync.bind 등록 여부 (바닥 시각 메시는 정적이라 바인딩하지 않는다) */
+  /** 프리미티브/바닥 시각 노드. 로봇은 핸들이 시각을 소유하므로 undefined */
+  readonly node?: VisualNode;
+  /** sync.bind 등록 여부 (바닥 시각 메시·로봇 링크는 바인딩하지 않는다) */
   readonly bound: boolean;
+  /** robot 엔티티 전용 레코드 (reset/dispose가 사용) */
+  readonly robot?: BuiltRobot;
 }
 
 function cloneVec3(v: Readonly<Vec3>): Vec3 {
@@ -128,11 +188,13 @@ export class SceneLoader {
 
   /**
    * SceneSpec을 해석해 물리 바디 + 시각 노드를 생성하고 바인딩한다.
+   * robot 엔티티의 URDF 로드가 비동기이므로 build 전체가 async다 (Phase 3).
    * 중간에 실패하면 부분 생성된 자원을 정리한 뒤 오류를 다시 던진다
    * — 반쯤 로드된 씬을 남기지 않는다.
    */
-  build(spec: SceneSpec): SceneHandle {
+  async build(spec: SceneSpec): Promise<SceneHandle> {
     const built: BuiltEntity[] = [];
+    const robots = new RobotRegistry();
     try {
       if (spec.environment?.ground) {
         if (spec.entities.some((e) => e.id === GROUND_ENTITY_ID)) {
@@ -143,7 +205,8 @@ export class SceneLoader {
         built.push(this.buildGround());
       }
       for (const entity of spec.entities) {
-        built.push(this.buildEntity(entity));
+        if (isRobotSpec(entity)) built.push(await this.buildRobot(entity, robots));
+        else built.push(this.buildEntity(entity));
       }
     } catch (err) {
       this.teardown(built);
@@ -153,8 +216,21 @@ export class SceneLoader {
     const entityIds: readonly EntityId[] = built.map((b) => b.entityId);
     return {
       entityIds,
+      robots,
       reset: (): void => {
         for (const b of built) {
+          if (b.robot) {
+            // 관절 상태(단일 진실)를 home으로 복원한 뒤:
+            // 1) teleportLinksToFk — 링크 바디를 home FK pose로 "즉시" 정렬. tick()만
+            //    쓰면 다음 스텝까지 물리 pose가 리셋 전 상태로 남고, 첫 스텝이
+            //    이전 pose → home 스윕이 되어 가짜 kinematic 속도/임펄스가 생긴다.
+            // 2) tick — 다음 스텝 kinematic 목표도 home FK로 지정(스윕 속도 0).
+            // 결과: 리셋 직후(스텝 전) 상태 = fresh load 직후 상태 (결정론적 재생).
+            b.robot.binding.applyHome();
+            b.robot.binding.teleportLinksToFk();
+            b.robot.binding.tick();
+            continue;
+          }
           if (b.bodyId !== undefined && b.initialPose) {
             // teleport는 리셋/편집 전용 API — 시뮬 재생 중 pose 주입에는 쓰지 않는다
             this.world.teleport(b.bodyId, b.initialPose);
@@ -190,13 +266,108 @@ export class SceneLoader {
     };
   }
 
-  private buildEntity(entity: EntitySpec): BuiltEntity {
-    if (entity.type === 'robot') {
-      throw new Error(
-        `scene-loader: robot 엔티티 '${entity.id}'는 아직 지원되지 않습니다 — URDF 로딩·링크 바디 생성은 Phase 3`,
-      );
-    }
+  /**
+   * robot 엔티티 빌더 (Phase 3).
+   *
+   * 순서(설계 — core/robot-types.ts 헤더):
+   *   1. renderApi.loadRobot — URDF 로드(FK 그래프 생성, Z-up→Y-up 변환은 render 몫)
+   *   2. setRootTransform — 엔티티 배치 반영
+   *   3. RobotBinding 생성(관절 상태 진실 소유, 생성자에서 home 적용) + tick() 1회로
+   *      FK 뷰를 home 상태로 갱신 (linkBodies가 아직 비어 물리 push는 없음)
+   *   4. "home FK" 링크 pose를 읽어 collider 보유 링크마다 kinematicPosition 바디 생성
+   *      + URDF <collision> 유래 collider(ROBOT 그룹, emitEvents) 부착
+   *   5. Registry 등록 + tick() 1회 — home FK를 kinematic 목표로 push(생성 pose와
+   *      동일하므로 첫 스텝 이동/스윕 속도 0)
+   *
+   * 바디를 URDF 초기 자세(모든 관절 0)에서 만들면 첫 스텝에 초기→home 스윕이 생겨
+   * |Δpose|/dt의 가짜 kinematic 속도가 잡힌다(접촉 사물에 비현실적 임펄스) — 바디를
+   * 처음부터 home FK pose에서 생성해 fresh load와 reset()의 스텝 전 상태를 동일하게
+   * 만든다(결정론적 재생, SIMULATION.md §6).
+   *
+   * 로봇 링크는 RenderSync에 바인딩하지 않는다 — 시각 로봇은 관절 상태에서 직접
+   * 갱신되는 FK 그래프 그 자체다(파일 헤더 참조).
+   */
+  private async buildRobot(spec: RobotSpec, robots: RobotRegistry): Promise<BuiltEntity> {
+    const handle = await this.renderApi.loadRobot({
+      urdfPath: spec.urdf,
+      packages: spec.urdfPackages,
+    });
+    try {
+      handle.setRootTransform({
+        position: cloneVec3(spec.transform.position),
+        rotation: cloneQuat(spec.transform.rotation ?? IDENTITY_QUAT),
+      });
 
+      // linkBodies는 binding과 공유하는 라이브 Map — binding을 먼저 만들어 home 관절
+      // 상태를 확정한 뒤, 아래에서 home FK pose로 생성한 바디들을 채워 넣는다.
+      const linkBodies = new Map<string, BodyId>();
+      const binding = new RobotBinding({
+        entityId: spec.id,
+        fk: handle,
+        world: this.world,
+        linkBodies,
+        jointMap: spec.jointMap,
+        jointLimitOverrides: spec.jointLimits,
+        home: spec.home,
+      });
+      // FK 뷰(시각 로봇)를 home 관절 상태로 갱신 — linkBodies가 비어 있어 물리 push 없음
+      binding.tick();
+
+      // linkColliders 정책: 'none'이면 물리 바디를 만들지 않는다(시각 전용 로봇).
+      // 'fromVisual'/'primitive'는 현재 동일하게 URDF <collision> 태그 유래 정의를 쓴다
+      // — urdf-loader가 collision 프리미티브를 파싱해 handle.linkColliders로 제공한다.
+      const policy = spec.linkColliders ?? DEFAULT_LINK_COLLIDER_POLICY;
+      if (policy !== 'none') {
+        const homePoses = handle.readLinkPoses();
+        const collidesWith: ColliderGroup[] = [
+          ...(spec.selfCollision ? ROBOT_COLLIDES_WITH_SELF : ROBOT_COLLIDES_WITH),
+        ];
+        for (const [linkName, colliderDefs] of handle.linkColliders) {
+          const pose = homePoses.get(linkName);
+          if (!pose) {
+            throw new Error(
+              `scene-loader: 로봇 '${spec.id}' 링크 '${linkName}'의 FK pose를 읽을 수 없습니다 ` +
+                '— RobotFkView.readLinkPoses는 collider 보유 링크를 모두 포함해야 합니다',
+            );
+          }
+          const bodyId = this.world.createBody(spec.id, {
+            bodyType: 'kinematicPosition',
+            position: cloneVec3(pose.position),
+            rotation: cloneQuat(pose.rotation),
+          });
+          for (const def of colliderDefs) {
+            this.world.createCollider(
+              bodyId,
+              {
+                shape: def.shape,
+                offset: def.offset,
+                group: 'ROBOT',
+                collidesWith,
+                emitEvents: true, // 로봇–사물/환경 충돌 감지가 프로젝트 핵심 (ROADMAP Phase 4)
+                friction: ROBOT_LINK_FRICTION,
+              },
+              spec.id,
+            );
+          }
+          linkBodies.set(linkName, bodyId);
+        }
+      }
+
+      robots.add(binding);
+      // home FK를 kinematic 목표로 push — 링크 바디 생성 pose와 동일하므로
+      // 첫 물리 스텝에서 이동(스윕 속도) 없이 home pose가 유지된다.
+      binding.tick();
+
+      return { entityId: spec.id, bound: false, robot: { handle, binding } };
+    } catch (err) {
+      // 바디/binding 중간 실패 — 이 로봇 몫의 물리·렌더 자원만 되돌리고 재던짐
+      this.world.removeEntity(spec.id);
+      handle.dispose();
+      throw err;
+    }
+  }
+
+  private buildEntity(entity: EntitySpec): BuiltEntity {
     const node = this.buildVisual(entity);
     const physics = entity.physics;
 
@@ -255,22 +426,27 @@ export class SceneLoader {
         }
         return this.renderApi.addPrimitive(visual.primitive, visual.color);
       }
-      case 'mesh':
       case 'urdf':
         throw new Error(
-          `scene-loader: visual.kind '${visual.kind}'(엔티티 '${entity.id}')는 아직 지원되지 않습니다 — 에셋/URDF 로딩은 Phase 3`,
+          `scene-loader: visual.kind 'urdf'는 robot 엔티티 전용입니다 (엔티티 '${entity.id}'의 type: '${entity.type}')`,
+        );
+      case 'mesh':
+        throw new Error(
+          `scene-loader: visual.kind 'mesh'(엔티티 '${entity.id}')는 아직 지원되지 않습니다 — 에셋 임포트는 Phase 7`,
         );
     }
   }
 
-  /** 생성된 자원 해제: sync 바인딩 → 물리 바디 → 시각 노드 순서 */
+  /** 생성된 자원 해제: sync 바인딩 → 물리 바디 → 시각 노드/로봇 핸들 순서 */
   private teardown(built: BuiltEntity[]): void {
     for (const b of built) {
-      if (b.bodyId !== undefined) {
-        if (b.bound) this.sync.unbind(b.bodyId);
+      if (b.bodyId !== undefined || b.robot) {
+        if (b.bound && b.bodyId !== undefined) this.sync.unbind(b.bodyId);
+        // 로봇은 링크당 바디가 여럿이지만 entityId 하나로 전부 제거된다 (world 매핑 소유)
         this.world.removeEntity(b.entityId);
       }
-      this.renderApi.remove(b.node);
+      if (b.node) this.renderApi.remove(b.node);
+      b.robot?.handle.dispose();
     }
     built.length = 0;
   }

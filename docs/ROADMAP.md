@@ -54,7 +54,8 @@
 **목표**: 로봇을 로드하고 관절을 개별 제어.
 
 - [ ] `urdf-loader`로 URDF → three.js, `loader.packages`로 메시 경로 매핑
-- [ ] URDF(Z-up) → 내부 Y-up 축 변환을 `scene-loader` 한 곳에서 처리
+- [ ] URDF(Z-up) → 내부 Y-up 축 변환을 render URDF 래퍼(`render/urdf.ts` axisFix)
+      한 곳에서 처리 (CLAUDE.md §4)
 - [ ] 링크 collider 생성(`fromVisual`/primitive), self-collision 기본 off
 - [ ] 관절 setpoint API(`robots.setJoint`)로 슬라이더 수동 제어(임시 UI)
 - [ ] `home` 관절값으로 초기 포즈 설정
