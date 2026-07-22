@@ -1,0 +1,35 @@
+{
+  "name": "robot-sim-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-native simplified IsaacSim-like robot simulator (Rapier + three.js + urdf-loader)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext .ts,.tsx",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.14.0",
+    "three": "^0.169.0",
+    "urdf-loader": "^0.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/three": "^0.169.0",
+    "@typescript-eslint/eslint-plugin": "^8.8.0",
+    "@typescript-eslint/parser": "^8.8.0",
+    "eslint": "^9.12.0",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "//": "버전은 Phase 0에서 `npm install` 후 최신으로 검증/갱신할 것. 물리 API 사용 전 `await RAPIER.init()` 필수."
+}
