@@ -1,0 +1,144 @@
+{
+  "name": "falling-boxes",
+  "version": 1,
+  "gravity": [0, -9.81, 0],
+  "timestepHz": 240,
+  "environment": { "ground": true, "skyColor": "#1b1e23" },
+  "camera": { "position": [2.2, 1.6, 2.2], "target": [0, 0.3, 0] },
+  "entities": [
+    {
+      "id": "box_red",
+      "type": "object",
+      "transform": { "position": [0, 1.2, 0] },
+      "visual": {
+        "kind": "primitive",
+        "primitive": { "kind": "box", "halfExtents": [0.06, 0.06, 0.06] },
+        "color": "#c0392b"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": { "kind": "box", "halfExtents": [0.06, 0.06, 0.06] },
+            "friction": 0.6,
+            "group": "OBJECT",
+            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "box_blue",
+      "type": "object",
+      "transform": {
+        "position": [0.18, 0.9, 0.12],
+        "rotation": [0, 0, 0.09983341664682815, 0.9950041652780258]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": { "kind": "box", "halfExtents": [0.05, 0.05, 0.05] },
+        "color": "#2980b9"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": { "kind": "box", "halfExtents": [0.05, 0.05, 0.05] },
+            "friction": 0.5,
+            "group": "OBJECT",
+            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "sphere_green",
+      "type": "object",
+      "transform": { "position": [-0.2, 1.0, 0.05] },
+      "visual": {
+        "kind": "primitive",
+        "primitive": { "kind": "sphere", "radius": 0.05 },
+        "color": "#27ae60"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": { "kind": "sphere", "radius": 0.05 },
+            "friction": 0.5,
+            "restitution": 0.35,
+            "group": "OBJECT",
+            "collidesWith": ["ENV", "ROBOT", "OBJECT"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "sphere_amber",
+      "type": "object",
+      "transform": { "position": [0.08, 1.5, -0.12] },
+      "visual": {
+        "kind": "primitive",
+        "primitive": { "kind": "sphere", "radius": 0.04 },
+        "color": "#d4930f"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": { "kind": "sphere", "radius": 0.04 },
+            "friction": 0.5,
+            "restitution": 0.25,
+            "group": "OBJECT",
+            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "capsule_purple",
+      "type": "object",
+      "transform": { "position": [-0.08, 0.55, -0.1] },
+      "visual": {
+        "kind": "primitive",
+        "primitive": { "kind": "capsule", "halfHeight": 0.05, "radius": 0.03 },
+        "color": "#8e44ad"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": { "kind": "capsule", "halfHeight": 0.05, "radius": 0.03 },
+            "friction": 0.7,
+            "group": "OBJECT",
+            "collidesWith": ["ENV", "ROBOT", "OBJECT"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "wall_north",
+      "type": "static",
+      "transform": { "position": [0, 0.15, -0.3] },
+      "visual": {
+        "kind": "primitive",
+        "primitive": { "kind": "box", "halfExtents": [0.35, 0.15, 0.012] },
+        "color": "#7f8c8d"
+      },
+      "physics": {
+        "bodyType": "fixed",
+        "colliders": [
+          {
+            "shape": { "kind": "box", "halfExtents": [0.35, 0.15, 0.012] },
+            "friction": 0.8,
+            "group": "ENV",
+            "collidesWith": ["ROBOT", "OBJECT"]
+          }
+        ]
+      }
+    }
+  ]
+}
