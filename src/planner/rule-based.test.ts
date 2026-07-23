@@ -125,6 +125,17 @@ describe('generateRuleBased — 모호/미지 대상', () => {
     expect(wfc).toMatchObject({ between: ['arm', 'box_b'] });
   });
 
+  it('선택 토큰이 여러 번 누적되면 마지막(최신) 선택이 이긴다', () => {
+    // 재명확화: 첫 자유입력이 틀려 다시 물어본 뒤 올바른 값을 고른 경우
+    const result = generateRuleBased('박스를 집어 [선택: box_a] [선택: box_b]', armCtx);
+    const wfc =
+      result.type === 'sequence'
+        ? result.sequence.steps.find((s) => s.kind === 'waitForCollision')
+        : undefined;
+    expect(result.type).toBe('sequence');
+    expect(wfc).toMatchObject({ between: ['arm', 'box_b'] });
+  });
+
   it('물체가 정확히 1개면 대상 미지정이어도 그것으로 확정한다', () => {
     const oneObjectCtx: SceneContext = {
       ...armCtx,

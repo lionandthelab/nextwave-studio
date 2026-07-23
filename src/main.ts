@@ -2517,6 +2517,12 @@ async function boot(): Promise<void> {
     try {
       const ctx = buildContext(scene.editor.spec, buildLiveSnapshot());
       const result = await plannerService.generate(nl, ctx, scene.editor.spec);
+      // 비동기 생성 중 사용자가 씬을 전환(loadScene)했다면 캡처한 scene은 이미
+      // dispose됐다. 폐기된 씬에 결과를 적용하지 않는다(§2.9와 무관한 견고성 방어).
+      if (active !== scene) {
+        appLog('warn', '생성 결과 폐기: 생성 도중 씬이 전환되었습니다.');
+        return { type: 'error', message: '생성 도중 씬이 전환되어 결과를 취소했습니다.' };
+      }
       handlePlannerResult(result, nl, mode, scene);
       return result;
     } catch (err) {

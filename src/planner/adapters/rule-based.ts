@@ -46,8 +46,12 @@ const HOME_KEYWORDS = ['홈', '원위치', '초기 자세', '초기자세', '처
 const CLAUSE_SEPARATORS =
   /\s*(?:그리고|그다음에|그다음|그 다음에|그 다음|하고서|하고|then|,|;)\s*/gi;
 
-/** 사용자가 clarify 옵션을 고른 뒤 UI가 되돌려 붙이는 토큰: "... [선택: box_a]" */
-const SELECTION_TOKEN = /\[선택:\s*([^\]]+)\]/;
+/**
+ * 사용자가 clarify 옵션을 고른 뒤 UI가 되돌려 붙이는 토큰: "... [선택: box_a]".
+ * 전역 매치 — 여러 라운드에 걸쳐 토큰이 누적되면 "마지막" 선택을 채택하고
+ * 이전 토큰은 모두 제거한다(재명확화 시 최신 답이 이기도록).
+ */
+const SELECTION_TOKEN = /\[선택:\s*([^\]]+)\]/g;
 
 /** 해석 불가 시 사용자에게 보이는 지원 패턴 안내 (한국어) */
 export const UNDERSTAND_ERROR_MESSAGE = [
@@ -341,10 +345,11 @@ function clamp(value: number, lo: number, hi: number): number {
 
 /** "... [선택: box_a]" 토큰을 떼어내 selectedId로 반환하고 본문에서 제거한다 */
 function extractSelection(nl: string): { text: string; selectedId: string | null } {
-  const match = nl.match(SELECTION_TOKEN);
-  if (!match) return { text: nl, selectedId: null };
-  const selectedId = match[1]!.trim();
-  const text = nl.replace(match[0], ' ').trim();
+  const matches = [...nl.matchAll(SELECTION_TOKEN)];
+  if (matches.length === 0) return { text: nl, selectedId: null };
+  // 마지막 토큰이 최신 선택 — 이전 라운드의 (틀린) 선택을 덮어쓴다.
+  const selectedId = matches[matches.length - 1]![1]!.trim();
+  const text = nl.replace(SELECTION_TOKEN, ' ').replace(/\s+/g, ' ').trim();
   return { text, selectedId };
 }
 
