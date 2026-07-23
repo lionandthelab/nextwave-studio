@@ -1,0 +1,43 @@
+{
+  "id": "obstacle-avoidance",
+  "robot": "arm",
+  "loop": false,
+  "steps": [
+    { "kind": "gripper", "state": "open", "durationSec": 0.3 },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint1": 0.405, "joint2": 0.639, "joint3": 1.414, "joint5": 1.089 },
+      "durationSec": 2.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint2": -0.6, "joint3": 1.2, "joint5": -0.6 },
+      "durationSec": 1.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint1": -0.405 },
+      "durationSec": 2.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint2": 0.639, "joint3": 1.414, "joint5": 1.089 },
+      "durationSec": 1.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "setJoints",
+      "targets": { "joint2": 0.683, "joint3": 1.442, "joint5": 1.017 }
+    },
+    { "kind": "waitForCollision", "between": ["arm", "target_box"], "timeoutSec": 6 },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint1": 0, "joint2": -0.6, "joint3": 1.2, "joint5": -0.6 },
+      "durationSec": 2.0,
+      "easing": "easeInOut"
+    }
+  ]
+}

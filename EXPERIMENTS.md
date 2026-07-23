@@ -474,4 +474,234 @@ CLAUDE.md/docs에 반영). 새 항목은 아래에 추가하고 기존 항목은
   src/core/scene-loader.ts, scripts/gate-browser.mjs,
   src/schema/validate.test.ts, src/core/scene-loader.test.ts
 
+## [2026-07-23] Phase 6: 씬 관리 UI — 런타임 씬 전환 라이프사이클 + 커맨드바 통합
+
+- **결정: 씬 전환은 "전체 클린 빌드"** — 프리셋 select/📂 업로드로 씬을 바꿀 때
+  월드·sync·monitor·player·엔진·독 패널을 전부 새로 만들고(이전 것은 dispose),
+  렌더러(three 캔버스)와 상단 커맨드바 셸·JSON 뷰어만 앱 수명으로 유지한다.
+  대안(단일 월드 재사용 + clear)은 timestepHz가 씬마다 다를 수 있어 기각 —
+  Engine/RapierWorld의 고정 dt는 생성 시 결정되므로(§2.3) 씬마다 fresh 인스턴스가
+  결정론적으로 안전하다. main.ts의 부트 3–7단계를 buildScene()으로 추출, loadScene()이
+  [검증 → 이전 씬 dispose → 빌드]를 수행한다. 검증은 teardown보다 먼저 — 무효 씬
+  때문에 잘 돌던 씬을 잃지 않는다. 전환 후 window.__sim은 항상 새 핸들(게이트 계약).
+- **Engine.halt() 추가 (core/engine.ts)**: stop()은 시계만 리셋하고 rAF 루프는 계속
+  돈다(idle 렌더) — 씬 전환 시 이전 엔진 루프가 남으면 이중 draw/onTick 누수.
+  halt()는 running=false로 루프를 완전 종료한다. halted 엔진은 재사용하지 않는다.
+- **Renderer.applySceneOptions() 추가 (render/renderer.ts)**: 캔버스/OrbitControls를
+  유지한 채 씬별 skyColor·카메라 position/target/fov만 재적용. 미지정 옵션은 생성자
+  기본값으로 되돌린다(이전 씬 설정 누수 방지). 기본값 상수를 생성자와 공용화.
+- **커맨드바 셸 (ui/command-bar/scene-controls.ts)**: [좌: 타이틀·씬 select·📂·💾 |
+  중앙: 재생 컨트롤 | 우: {} JSON] 하나의 고정 상단 바(UX_DESIGN §3.1). playback.ts는
+  자체 fixed 오버레이에서 셸 중앙 슬롯의 플렉스 행으로 변경, 씬마다 재마운트해
+  속도 select 등 뷰 상태가 씬을 가로질러 새지 않는다. joint-panel은 바 아래(44px)로.
+- **업로드 형식 규약**: (a) SceneSpec 단독 (b) `{ scene, sequence }` 봉투 — 'scene'
+  키 존재로 판별(SceneSpec에 'scene' 필드가 없어 모호하지 않음). 파싱은
+  scene-controls, 봉투 해석·검증은 main. 실패 시 Console 탭 appLog + 인라인 토스트
+  (한국어), 활성 씬은 유지. 💾 저장은 현재 SceneSpec을 `<name>.scene.json`으로 Blob
+  다운로드(시퀀스는 포함하지 않음 — 씬 파일 왕복 규약 유지).
+- **{} JSON 뷰어 (ui/command-bar/json-viewer.ts)**: 우측 슬라이드 읽기 전용 패널,
+  pretty-print + 복사(클립보드). 열 때마다 + 씬 전환 시 refresh()로 갱신(그래프
+  편집이 생기는 Phase 8에서 구독 훅으로 확장). 시퀀스 없으면 '시퀀스 없음' 빈 상태.
+- **URL 동기화**: 프리셋 전환은 ?scene=을 replaceState로 갱신(딥링크 공유), 업로드
+  씬은 파라미터 제거. 부트 시 ?scene= 해석·오류 동작은 기존과 동일(게이트 계약).
+- 검증: typecheck/lint/vitest(237) 통과 + vite build + gate-browser
+  --expect=arm-sequence/arm/falling-boxes 전 항목 PASS (아래 게이트 실행 기록).
+- 영향 파일: src/main.ts, src/ui/command-bar/scene-controls.ts(신규),
+  src/ui/command-bar/json-viewer.ts(신규), src/ui/command-bar/playback.ts,
+  src/ui/inspector/joint-panel.ts, src/core/engine.ts, src/render/renderer.ts
+
+## 2026-07-23 — Phase 6 샘플 씬 3종 (데이터 전용 저작 — 코드 변경 없음)
+
+- 배경: ROADMAP Phase 6 / PRD §7 "샘플 씬 3종(픽앤플레이스·장애물 회피·충돌 테스트베드)".
+  new-scene.md 절차대로 **순수 데이터**(SceneSpec/ControlSequence JSON)만으로 저작했다 —
+  엔진/로더/스키마 코드 변경 0줄 (불변식 §2.5/§2.6 실증). main.ts는 레지스트리 항목
+  추가만, gate-browser.mjs는 씬별 어서션 블록 추가만.
+- **픽앤플레이스는 "잡아 들기"가 아니라 "밀기(push/drag)"로 정직하게 설계했다**:
+  MVP의 kinematic 링크 + Rapier 접촉으로는 파지-리프트가 물리적으로 신뢰 불가
+  (PRD §6 non-goal, MuJoCo 경로 몫). 대신 kinematic 링크가 dynamic 바디를 미는
+  신뢰 가능한 상호작용만 사용한다. 실측으로 확정한 세부 설계:
+  - **완전 close는 금물**: arm6 그리퍼의 닫힘 간격은 4mm라 5cm 카고를 close하면
+    쥐어짜서 튕겨낸다(1차 실측: close 후 스윕 0.4s 만에 contact stop — 카고 유실).
+    gripper state **0.7**(간격 ≈46mm)로 5cm 카고를 느슨한 케이지로 감싼다.
+  - **joint6(손목 롤)=π/2로 손가락을 진행 방향 앞/뒤에 배치**: 손가락 오프셋 축은
+    joint6=0에서 반경 방향(실측 확인) — π/2 롤로 접선(스윕) 방향으로 돌려 뒤쪽
+    손가락이 카고 뒷면을 **양의 접촉으로 밀게** 한다(마찰 의존 없음).
+  - **배리어 해제는 검증된 hover+즉시 nudge 패턴**: 스트래들 하강(무접촉) 후
+    setJoints로 joint1 +0.03(접선 ~11mm) — 다음 tick에 뒤 손가락이 카고를 눌러
+    waitForCollision(mark 이후) 이벤트로 해제된다. 게이트가 이벤트 경로를 시간
+    상한(done<10s)으로 강제한다(timeout 경로 ≈14.1s와 구분).
+  - IK 산수 실수 교훈: 손끝 목표 y를 0.15m 높게 계산해 1차 시도에서 접촉 0건 —
+    window.__sim.robots 파사드로 링크 pose를 실측(probe)해 교정했다. FK 체인 실측:
+    link5 원점 = 어깨(0.13) + 0.28·u(φ2) + 0.28·u(φ3), 손끝 = link5 + 0.15·u(φ5).
+- **SENSOR_ZONE 페어링은 양쪽 필터 규칙**: Rapier 쌍 필터는 양방향이다 — 센서
+  collider가 collidesWith:[OBJECT]를 선언해도, **OBJECT 쪽 collider가 SENSOR_ZONE을
+  나열하지 않으면 이벤트가 발생하지 않는다**. pick-and-place의 cargo와 testbed의
+  slider만 SENSOR_ZONE을 필터에 추가했다(다른 OBJECT는 센서와 무관 — 불필요한
+  narrow-phase 페어 방지). phase6-scenes.test.ts가 양쪽 모두를 데이터 수준에서 고정.
+- 장애물 회피: 검증된 arm-touch-box 기하를 재사용(target_box=[0.35,0.03,0.15],
+  hover θ2=0.639 → nudge θ2=0.683). 회피 경로는 "접힌(홈) 자세의 최대 반경
+  ≈0.17m ≪ 기둥 반경 0.40m" 성질을 이용 — 측면 A 하강 → 홈 자세로 리프트 →
+  joint1 회전(기둥 위/안쪽 통과) → 측면 B 하강. pillar는 emitEvents:true라
+  "닿았다면 반드시 이력에 남는다" — 게이트의 무접촉 어서션이 공허하지 않다.
+- 충돌 테스트베드(로봇 없음): 반발 0.8 공 바운스(ENV 바닥과 combine avg → 유효
+  0.4), 마찰 0.05 경사 미끄럼 → SENSOR_ZONE 게이트 통과(비행 중 감지), 마찰 0.8
+  경사 구름 공이 3단 스택을 전도. **스택 전도 실측 교훈 2건**: (1) 굴러온 공이
+  바닥 경유로 도달하면 램프 립 착지(반발 0, 마찰 0.8)가 수평 속도를 흡수해 스택이
+  버틴다 — 스택을 램프 출구 비행경로 안(x=−0.68)으로 옮겨 ≈1.3m/s로 직격시켰다.
+  (2) EntitySpec에 초기 속도 필드가 없어 "굴러 들어오는" 연출은 경사로 데이터로만
+  표현 가능(스키마 확장 백로그 후보).
+- 검증: vitest 237개 전부 통과(신규 phase6-scenes.test.ts 12개 — 씬/시퀀스 검증 +
+  그룹/센서 페어링/emitEvents 데이터 고정). 브라우저 게이트 6종 ALL PASS —
+  pick-and-place(arm×cargo start, cargo×drop_zone sensor start@7.36s, done 8.22s),
+  obstacle-avoidance(arm×pillar 0건, arm×target_box start@9.96s, done 9.35s),
+  collision-testbed(접촉 쌍 12종/센서@0.67s/전 바디 y>0 — 스택 3개 전도 후 y≈0.029),
+  회귀 arm-sequence/arm/falling-boxes. 신규 게이트는 2회 연속 실행으로 결정론 확인
+  (동일 PASS 표). 정적 검사: tsc/eslint 경고 0, vite build 성공.
+- 영향 파일: src/assets/scenes/{pick-and-place,obstacle-avoidance,collision-testbed}
+  .scene.json(신규), src/assets/sequences/{pick-and-place,obstacle-avoidance}
+  .sequence.json(신규), src/main.ts(레지스트리 항목만), scripts/gate-browser.mjs
+  (씬별 어서션 3블록 + 공용 playAndAwaitDone), src/core/phase6-scenes.test.ts(신규)
+
+## 2026-07-23 — Phase 6 통합: 씬 전환 teardown 순서 확정 + 인스펙터 배선
+
+- **씬 전환 teardown 순서(ActiveScene.dispose)를 다음으로 고정한다** — 순서가 계약이다:
+  1. `engine.halt()` — rAF 루프 **완전 종료**. `stop()`은 시계만 리셋하고 루프는 계속
+     돌므로, halt 없이는 이전 씬 엔진이 곧 해제될 world를 계속 step/draw한다
+     (Rapier WASM use-after-free 크래시 + 이중 draw 경로). 반드시 가장 먼저.
+  2. 구독 해제(`offTick`/`offStepChange`/`offMonitor`) — 곧 제거될 UI로의 콜백 유입
+     차단. 인스펙터 refresh는 엔진 tick에서만 구동되므로 1–2단계 이후에는 해제된
+     world를 읽는 stale 콜백이 구조적으로 불가능하다.
+  3. UI 제거(playbackBar → inspector → jointPanel → rightStack → 독 패널들 → dock)
+     — 물리/모니터 참조를 가진 뷰를 물리 해제보다 먼저 걷는다.
+  4. `sceneHandle.dispose()` — 물리 바디·시각 노드·로봇 핸들(URDF 씬 그래프) 해제.
+  5. `sync.clear()` — 물리↔시각 바인딩 매핑 정리(바디가 사라진 뒤 남은 참조 제거).
+  6. `world.free()` — Rapier WASM 메모리 반환. 모든 소비자가 사라진 **마지막**에.
+  - `window.__sim` 해제는 "여전히 이 엔진을 가리킬 때만" 수행 — 새 씬이 이미
+    재할당했으면 건드리지 않는다(전환 경쟁 시 새 핸들 오염 방지). 렌더러(three
+    캔버스)·커맨드바 셸·JSON 뷰어는 앱 수명으로 유지, 씬별 카메라/환경 옵션만
+    `Renderer.applySceneOptions`로 재적용.
+- **런타임 전환 게이트 신설**: `gate-browser.mjs --expect=scene-switch` —
+  arm-and-boxes 부트 → **UI select(change 이벤트) 경유** collision-testbed 전환 →
+  spec.name 갱신·엔티티 수(spec.entities+ground) 일치·robots 파사드 빈 목록(누수
+  검출)·sim 전진 → arm-and-boxes 복귀(URDF 재로드 경로) → 동일 검증 + select 표시
+  동기 + 페이지 에러 0건. 전환 중 __sim이 잠시 undefined인 것은 정상(해제→재빌드)
+  이라 폴링으로 흡수한다.
+- **인스펙터(MVP) 배선** (ui/inspector/inspector.ts — 읽기 전용, 물리 불변):
+  - deps는 core 파사드 위 글루 구현: 목록=spec.entities(예약 `__ground` 자연 제외),
+    pose=`world.bodiesOfEntity(id)[0]`→`getPose`(물리가 진실, §2.1), 관절=robots
+    레지스트리(로봇 엔티티만, limits는 URDF ∩ override 유효값).
+  - 갱신 주기(주기 결정권은 통합자): playing 중 engine.onTick에서 **150ms 스로틀**,
+    playing→paused/idle **전이 시 1회**, 선택 변경 시 1회(onSelect), stepOnce 후 1회.
+  - onSelect → `render/highlight.pulseEntity`로 해당 시각 노드 붉은 펄스. inspector의
+    선택 변경 가드 덕에 onSelect 안 refresh 재호출이 루프를 만들지 않는다.
+  - 표시 규약: 오일러(deg, XYZ)는 **표시 전용** 변환이고 원본 쿼터니언은 툴팁 노출
+    (내부 진실은 쿼터니언, CLAUDE.md §4). getJoints의 valueRad 필드는 prismatic이면
+    m — 컬럼 라벨은 일반형 '값'.
+  - 배치: 우측 **패널 스택**(fixed, top 44/right 12/폭 280) — 관절 패널(위, 쓰기
+    경로) + 인스펙터(아래, 읽기 경로), 둘 다 접기 가능. 편입은 각 핸들의 `el`로
+    절대 배치를 스택 흐름(static)으로 전환(모듈 기본값은 standalone 배치 유지).
+    z-index 94 — 독/커맨드바(90) 위, {} JSON 슬라이드 패널(95) 아래(뷰어가 열리면
+    스택을 덮어 읽기 가능). joint-panel.ts에는 접기 헤더와 핸들 `el` 노출만 추가
+    (Phase 7 Scene Builder 인스펙터로 대체 예정인 임시 UI 지위는 그대로).
+- 검증: tsc/eslint 경고 0, vitest 237개 전부 통과, vite build 성공. 브라우저 게이트
+  7종 ALL PASS — falling-boxes/arm/arm-sequence(회귀), pick-and-place(**2회 연속**
+  동일 PASS 표 — done 8.25s/8.18s, 결정론), obstacle-avoidance, collision-testbed,
+  scene-switch(신규).
+- 영향 파일: src/main.ts(인스펙터 배선 + 우측 스택), src/ui/inspector/joint-panel.ts
+  (접기 헤더·el 노출), scripts/gate-browser.mjs(scene-switch 모드), EXPERIMENTS.md
+
 <!-- 이후 결정은 여기에 추가 -->
+
+## [2026-07-23] Phase 6: UI 디자인 폴리시 패스 — 디자인 토큰(ui/theme.ts) + 시각 언어 통일
+
+- **결정: 시각 토큰을 `src/ui/theme.ts` 한 곳으로 중앙화** (ROADMAP Phase 6
+  "frontend-design 스킬 원칙으로 UI 정리"). 기존에는 각 ui 모듈이 색/보더/폰트를
+  인라인으로 하드코딩(#2e5db3 파랑 액센트, #5d6470 muted 등 산발) — 이제 모든
+  패널이 COLOR/FONT/SPACE/RADIUS/SHADOW/Z_INDEX/LAYOUT 토큰만 소비한다.
+  동작·계층 규칙 불변: core/schema 무수정, ui는 여전히 core를 import하지 않는다
+  (theme는 ui 내부 모듈).
+- **액센트를 파랑(#2e5db3) → 주황(#e67e22)으로 교체** — 로봇 팔 링크 색과 일관.
+  적용점: Play 버튼(accent 변형), 재생 중 펄스 점, 활성 독 탭 밑줄, 타임라인 활성
+  마커(주황 배경 + 어두운 텍스트 — 대비 6.4:1), 인스펙터 선택 행, {} JSON 열림
+  상태, 관절 슬라이더 accent-color, 포커스 링.
+- **hover/active/focus-visible/스크롤바/펄스는 클래스로**: 인라인 스타일로는 상태
+  셀렉터가 불가능 — `ensureThemeStyles()`가 `<style id="rsw-theme-styles">` 1장을
+  멱등 주입한다(.ui-btn/.ui-select/.ui-input/.ui-tab/.ui-scroll/.ui-dot/.ui-badge/
+  .rsw-entity-row 등). 모듈 top-level에서는 DOM을 만지지 않아 node 단위 테스트가
+  ui 모듈을 import해도 안전. 상태 표시는 인라인 색 대신 **클래스 토글**로 바꿔
+  hover와 공존시켰다(독 탭 활성, 인스펙터 선택 행, JSON 토글).
+- **레이아웃 정리**: 커맨드바 명시 높이 44px(3존 유지), 바 아래 층은 52px 기준
+  (RIGHT_STACK_TOP_PX 44→52, 토스트 동일, JSON 패널 top 44). 우측 패널 폭 280
+  유지, 패널 radius 8px + 그림자 통일, 접기 셰브론(▾/▴) 규약 유지 + aria-expanded.
+  접기는 display 토글 → max-height/height 트랜지션(0.2s)으로 부드럽게(내용 숨김
+  의미는 동일).
+- **뷰포트 statusline 신설** (`ui/viewport/statusline.ts`, UX_DESIGN §3.3): 좌하단
+  오버레이 "씬 이름 · ● 상태 · simTime · step n/N". pointer-events:none(뷰포트
+  상호작용 무간섭), 씬 수명과 함께 마운트/해제. 글루(main.ts)가 engine.onTick에서
+  update — ui는 POJO만 받는다. 빈 씬(엔티티 0)이면 중앙 안내 문구(UX §7).
+- **충돌 로그 배지 규약**: kind==='sensor'면 파랑 계열, 아니면 phase start=빨강
+  틴트/stop=회색 틴트. 배지 텍스트(phase)와 kind 셀 텍스트가 의미를 전달하고 색은
+  보조(§9 "색만으로 전달 금지"). 빈 상태 안내 추가("아직 충돌 이벤트가 없습니다…").
+  타임라인·JSON 뷰어에도 빈 시퀀스 안내 문구.
+- **접근성**: muted 텍스트 #5d6470(3.1:1) → #8b93a1(5.8:1)로 상향 — 본문 텍스트
+  대비 ≥ 4.5:1. 모든 버튼 aria-label, 토글 aria-pressed/aria-expanded, 슬라이더
+  aria-label(관절명), 토스트 role=alert, :focus-visible 링(주황 2px).
+- **폰트 정책**: UI 텍스트 system-ui 스택 / 수치·로그·JSON은 ui-monospace 스택
+  (simTime·position·관절값·limits·타임라인 리드아웃·콘솔·충돌 시간). 글래스 패널은
+  rgba 반투명만 사용 — backdrop-filter(blur)는 GPU 없는 노트북(PRD §7) 배려로 배제.
+- 검증: tsc/eslint 경고 0, vitest 237개 전부 통과, vite build 성공. 브라우저 게이트
+  7종 ALL PASS — falling-boxes / arm / arm-sequence / pick-and-place /
+  obstacle-avoidance / collision-testbed / scene-switch (동작·testid 계약 무변경).
+  gate-screenshot.png 육안 확인: 44px 상단 바 3존, 주황 액센트 일관, 우측 스택
+  정렬, statusline·빈 시퀀스 안내 표시.
+- 영향 파일: src/ui/theme.ts(신설), src/ui/viewport/statusline.ts(신설),
+  src/ui/command-bar/{scene-controls,playback,json-viewer}.ts,
+  src/ui/dock/{dock,collision-log,console-panel,timeline}.ts,
+  src/ui/inspector/{inspector,joint-panel}.ts, src/main.ts(statusline 배선 +
+  스택 top 52), index.html(베이스 스타일), EXPERIMENTS.md
+
+## [2026-07-23] Phase 6 완료 — 리뷰 반영(파이널라이저) + README 재작성 + 최종 게이트
+
+- **리뷰 findings 반영** (minor 9건 중 8건 적용, 1건 보류 — 사유는 아래):
+  - `renderApi.remove`가 프리미티브/바닥 메시의 geometry/material을 `dispose()`하도록
+    `render/meshes.ts`에 `disposeMeshResources` 신설(URDF `RobotHandle.dispose`와 대칭)
+    — 씬 전환 반복 시 GPU 버퍼가 GC 대기로 쌓이지 않는다.
+  - `buildScene` 조립 가드: SceneLoader.build 이후의 조립(엔진/독/우측 스택/재생 바)을
+    try/catch로 감싸고, 부분 조립 실패 시 이미 만들어진 몫만 **기존 teardown 순서
+    계약(halt → 구독 해제 → UI 제거 → 씬 자원 → sync → world)** 그대로 되감고
+    재던진다. 성공 시 반환되는 `dispose()`와 실패 복구가 같은 함수(`teardownBuilt`)
+    를 쓴다 — 해제 경로는 하나. 실패해도 월드/DOM 패널/Space 키 리스너가 새지 않는다.
+  - 씬 전환 실패 표시 정합: `SceneSwitchResult.sceneLost`(build 단계 실패 = 이전 씬
+    이미 해제됨)를 글루가 전달하고, scene-controls는 이때 select를 죽은 씬 이름으로
+    되돌리는 대신 '씬 없음' 옵션을 표시한다(validate 실패는 기존대로 이전 값 복귀).
+  - 테마 토큰 드리프트 제거: COLOR에 `errorSurface`/`errorBorder`/`successBorder`
+    추가 — scene-controls 오류 토스트와 timeline done 마커의 ad-hoc rgba/hex를 토큰
+    소비로 교체(토스트 텍스트 #ffb3b3 → COLOR.errorText #ff8a80, 시각 차이 미미).
+  - main.ts 우측 스택/오버레이 상수를 `ui/theme`의 LAYOUT/Z_INDEX 토큰에서 유도
+    (52/280/'94'/'9999' 수치 중복 제거 — 테마 변경 시 자동 동기).
+  - {} JSON 슬라이드 패널: 닫힘 상태에 `inert` 적용 — aria-hidden 영역으로 Tab
+    포커스가 들어가던 WAI-ARIA 위반 수정(트랜스폼 애니메이션은 유지).
+  - **보류 1건**: collision-testbed의 동적 collider `collidesWith`에 ROBOT 포함 —
+    로봇 없는 씬에서 해당 비트는 매치되지 않아 무해하고, 로봇 씬과의 템플릿 통일
+    (복사-붙여넣기 저작)을 유지하는 편이 낫다고 판단. 동작 차이 0.
+- **README.md 재작성** (ROADMAP Phase 6 "README 실행법"): 데모 씬 5종 표(내용·게이트
+  어서션), 실행법(dev/build/verify/gate), 조작법(카메라·Space·패널), 아키텍처 한 장
+  요약(계층 다이어그램 + 불변식 3개 + docs 링크), AI-native 하네스 소개(CLAUDE.md
+  헌법·AGENTS.md 리뷰 5역할·EXPERIMENTS.md·검증 게이트), /new-scene 데이터 전용
+  씬 추가법, 한계 명시(파지 물리 없음·kinematic 스윕 CCD 한계·안전 인증 부적합·
+  IK/센서/저작 UI 미구현 — 과장 없이 현재 상태 그대로).
+- **최종 게이트 측정치** (전부 이 커밋 시점 실측):
+  - `tsc --noEmit` 통과, eslint 경고 0, vitest **237/237 통과**, `vite build` 성공
+    (번들 2,807.82 kB / gzip 960.04 kB — Rapier WASM base64 내장 단일 청크).
+  - 브라우저 게이트 7종 **ALL PASS**: falling-boxes(5 바디 정착 y 0.029–0.059) /
+    arm(관절 8, home joint2=-0.6, 링크 max y 0.682) / arm-sequence(arm×box_a
+    start@5.371s, done 6.02s < 9s 이벤트 해제 경로, 충돌 로그 5행) /
+    pick-and-place(arm×cargo start@5.571s, drop_zone sensor@7.483s, done 8.25s) /
+    obstacle-avoidance(arm×pillar 0건, arm×target_box@9.942s, done 9.42s) /
+    collision-testbed(접촉 쌍 12종, sensor@0.67s, 전 바디 y>0 정착) /
+    scene-switch(왕복 전환·로봇 파사드 누수 0·select 동기·페이지 에러 0).
+- 영향 파일: src/main.ts(조립 가드·토큰 유도 상수·remove dispose·sceneLost),
+  src/render/meshes.ts(disposeMeshResources), src/ui/theme.ts(토큰 3종),
+  src/ui/command-bar/scene-controls.ts(씬 없음 상태·토스트 토큰),
+  src/ui/command-bar/json-viewer.ts(inert), src/ui/dock/timeline.ts(successBorder),
+  README.md(재작성), EXPERIMENTS.md

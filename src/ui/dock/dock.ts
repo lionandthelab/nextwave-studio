@@ -5,16 +5,20 @@
 // 탭 콘텐츠(el)는 각 패널 모듈(createTimelinePanel 등)이 만들고, 이 셸은 배치와
 // 탭 전환만 담당한다.
 
-// ── 상수 (매직넘버 금지 — CLAUDE.md §4) ─────────────────────────────
+import {
+  COLOR,
+  FONT,
+  LAYOUT,
+  SPACE,
+  Z_INDEX,
+  ensureThemeStyles,
+  styled,
+} from '../theme';
+
+// ── 상수 (매직넘버 금지 — CLAUDE.md §4, 시각 토큰은 ui/theme.ts) ────
 
 /** 독 본문 높이(px) — UX_DESIGN §3.6 기준 컴팩트 독 */
-const DOCK_BODY_HEIGHT_PX = 180;
-/** 오류 오버레이(z 9999)·관절 패널(z 100)보다 아래, 캔버스보다 위 */
-const DOCK_Z_INDEX = '90';
-
-const TAB_ACTIVE_COLOR = '#e8eaed';
-const TAB_INACTIVE_COLOR = '#7a808a';
-const TAB_ACTIVE_BORDER = '#2e5db3';
+const DOCK_BODY_HEIGHT_PX = LAYOUT.dockBodyHeightPx;
 
 // ── 공개 타입 ───────────────────────────────────────────────────────
 
@@ -32,29 +36,23 @@ export interface DockHandle {
   dispose(): void;
 }
 
-// ── 내부 헬퍼 ───────────────────────────────────────────────────────
-
-function styled<T extends HTMLElement>(el: T, style: Partial<CSSStyleDeclaration>): T {
-  Object.assign(el.style, style);
-  return el;
-}
-
 // ── 마운트 ──────────────────────────────────────────────────────────
 
 /** 독을 host(보통 document.body)에 오버레이로 마운트한다. 첫 탭이 기본 활성. */
 export function mountDock(host: HTMLElement, tabs: readonly DockTab[]): DockHandle {
+  ensureThemeStyles();
   const dock = styled(document.createElement('div'), {
     position: 'fixed',
     left: '0',
     right: '0',
     bottom: '0',
-    zIndex: DOCK_Z_INDEX,
+    zIndex: Z_INDEX.dock,
     display: 'flex',
     flexDirection: 'column',
-    background: 'rgba(16, 18, 22, 0.94)',
-    borderTop: '1px solid #2e3238',
-    color: '#cfd3d9',
-    fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+    background: COLOR.bgBar,
+    borderTop: `1px solid ${COLOR.border}`,
+    color: COLOR.text,
+    fontFamily: FONT.ui,
     fontSize: '12px',
     boxSizing: 'border-box',
     pointerEvents: 'auto',
@@ -72,51 +70,45 @@ export function mountDock(host: HTMLElement, tabs: readonly DockTab[]): DockHand
     display: 'flex',
     alignItems: 'center',
     gap: '2px',
-    padding: '0 6px',
+    padding: `0 ${SPACE.sm}`,
     flexShrink: '0',
-    borderBottom: '1px solid #22252b',
+    borderBottom: `1px solid ${COLOR.borderSoft}`,
   });
 
-  // 본문 (탭 콘텐츠 컨테이너)
+  // 본문 (탭 콘텐츠 컨테이너) — 접기는 height 트랜지션으로 부드럽게 (.ui-collapsible-h)
   const body = styled(document.createElement('div'), {
     height: `${DOCK_BODY_HEIGHT_PX}px`,
     overflow: 'hidden',
   });
+  body.classList.add('ui-collapsible-h');
 
   let collapsed = false;
   let activeLabel = tabs[0]?.label ?? '';
   const tabButtons = new Map<string, HTMLButtonElement>();
 
   const paint = (): void => {
-    body.style.display = collapsed ? 'none' : '';
+    body.style.height = collapsed ? '0px' : `${DOCK_BODY_HEIGHT_PX}px`;
     for (const tab of tabs) {
       const button = tabButtons.get(tab.label);
       const isActive = tab.label === activeLabel;
       if (button) {
-        button.style.color = isActive ? TAB_ACTIVE_COLOR : TAB_INACTIVE_COLOR;
-        button.style.borderBottom = `2px solid ${isActive && !collapsed ? TAB_ACTIVE_BORDER : 'transparent'}`;
+        button.classList.toggle('ui-tab--active', isActive && !collapsed);
+        button.setAttribute('aria-selected', String(isActive));
       }
       tab.content.style.display = isActive ? '' : 'none';
     }
   };
 
   for (const tab of tabs) {
-    const button = styled(document.createElement('button'), {
-      background: 'transparent',
-      color: TAB_INACTIVE_COLOR,
-      border: 'none',
-      borderBottom: '2px solid transparent',
-      padding: '5px 10px',
-      fontFamily: 'inherit',
-      fontSize: '12px',
-      cursor: 'pointer',
-    });
+    const button = document.createElement('button');
     button.type = 'button';
+    button.className = 'ui-tab';
     button.textContent = tab.label;
     button.dataset.testid = `dock-tab-${tab.label.toLowerCase().replace(/\s+/g, '-')}`;
     button.addEventListener('click', () => {
       activeLabel = tab.label;
       if (collapsed) collapsed = false; // 접힌 상태에서 탭 클릭 = 펼치기
+      paintCollapseLabel();
       paint();
     });
     tabBar.appendChild(button);
@@ -125,22 +117,17 @@ export function mountDock(host: HTMLElement, tabs: readonly DockTab[]): DockHand
     body.appendChild(tab.content);
   }
 
-  // 접기/펼치기 토글 (우측 끝)
+  // 접기/펼치기 토글 (우측 끝) — ▾/▴ 셰브론 규약 (joint-panel/inspector와 동일)
   const spacer = styled(document.createElement('span'), { flex: '1' });
   tabBar.appendChild(spacer);
-  const collapseButton = styled(document.createElement('button'), {
-    background: 'transparent',
-    color: TAB_INACTIVE_COLOR,
-    border: 'none',
-    padding: '5px 10px',
-    fontFamily: 'inherit',
-    fontSize: '12px',
-    cursor: 'pointer',
-  });
+  const collapseButton = document.createElement('button');
   collapseButton.type = 'button';
+  collapseButton.className = 'ui-tab';
   collapseButton.dataset.testid = 'dock-collapse';
   const paintCollapseLabel = (): void => {
     collapseButton.textContent = collapsed ? '▴ 펼치기' : '▾ 접기';
+    collapseButton.setAttribute('aria-expanded', String(!collapsed));
+    collapseButton.setAttribute('aria-label', collapsed ? '독 펼치기' : '독 접기');
   };
   collapseButton.addEventListener('click', () => {
     collapsed = !collapsed;

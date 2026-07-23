@@ -14,6 +14,9 @@
 //   --expect=arm-sequence : Phase 4+5 통합 — 시퀀스 무자동재생(human-in-the-loop) 확인 후
 //   파사드 play()로 재생 시작 → arm×box_a 충돌 start 이력 + waitForCollision 통과 +
 //   그리퍼 닫힘 + status done + 충돌 로그 DOM 행 검증.
+//   --expect=scene-switch : Phase 6 런타임 씬 전환 스모크 — arm-and-boxes 부트 →
+//   UI select(change 이벤트)로 collision-testbed 전환 → spec.name/엔티티 수/sim 전진
+//   검증 → arm-and-boxes로 복귀(URDF 재로드) → 동일 검증 + 페이지 에러 0건.
 
 import { spawn, execSync } from 'node:child_process';
 import { chromium } from 'playwright';
@@ -35,6 +38,10 @@ const SCENE_BY_EXPECT = {
   'falling-boxes': 'falling-boxes',
   arm: 'arm-and-boxes',
   'arm-sequence': 'arm-and-boxes',
+  'pick-and-place': 'pick-and-place',
+  'obstacle-avoidance': 'obstacle-avoidance',
+  'collision-testbed': 'collision-testbed',
+  'scene-switch': 'arm-and-boxes', // 런타임 전환 스모크 — arm-and-boxes에서 출발
 };
 
 // --expect=arm 어서션 상수
@@ -56,6 +63,106 @@ const SEQ_POLL_INTERVAL_MS = 100;
 const SEQ_REALTIME_DEADLINE_MS = 30000;   // 폴링 실시간 상한 (행 방지)
 const SEQ_GRIPPER_OPEN_MIN_M = 0.025;     // "열림 관측" 판정 (open=0.03)
 const SEQ_GRIPPER_CLOSED_TOL_M = 2e-3;    // "닫힘(≈0) 관측" 판정 (close=0.0)
+
+// ── Phase 6 샘플 씬 게이트 상수 ─────────────────────────────────────
+// --expect=pick-and-place (pick-and-place.sequence.json 기준, step 9개)
+//   명목 길이 ≈ 0.4+2.0+0.8+0+배리어+0.5+2.0+0.4+2.0 ≈ 8.1s(이벤트 해제) / ≈14.1s(timeout 경로)
+const PNP_STEP_COUNT = 9;
+const PNP_SIM_TIME_BUDGET_SEC = 16;
+const PNP_EVENT_DONE_MAX_SIM_SEC = 10;
+// --expect=obstacle-avoidance (obstacle-avoidance.sequence.json 기준, step 8개)
+//   명목 길이 ≈ 0.3+2.0+1.5+2.0+1.5+0+배리어+2.0 ≈ 9.3s(이벤트 해제) / ≈15.3s(timeout 경로)
+const OA_STEP_COUNT = 8;
+const OA_SIM_TIME_BUDGET_SEC = 18;
+const OA_EVENT_DONE_MAX_SIM_SEC = 12;
+// --expect=collision-testbed (시퀀스 없음 — 씬 자체 물리 쇼케이스)
+const TESTBED_EVENT_WINDOW_SEC = 5;    // 이 sim 시간 안에 접촉/센서 이벤트가 나야 함
+const TESTBED_MIN_CONTACT_PAIRS = 3;   // 서로 다른 contact start 쌍 최소 개수
+const TESTBED_MIN_SENSOR_EVENTS = 1;   // sensor start 최소 개수
+const TESTBED_SETTLE_SIM_SEC = 8;      // 이 시점에 전 동적 바디 y > 0 (정착) 판정
+// 공용: 충돌 이력 조회 상한(모니터 이력 상한 1000과 일치) · 폴링 실시간 상한
+const HISTORY_FETCH_LIMIT = 1000;
+const PHASE6_REALTIME_DEADLINE_MS = 45000;
+// --expect=scene-switch (런타임 씬 전환 스모크 — UI select 경유 왕복 전환)
+const SWITCH_TARGET_SCENE = 'collision-testbed';   // 로봇 없는 씬으로 전환 (이질적 조합)
+const SWITCH_BACK_SCENE = 'arm-and-boxes';         // 로봇 씬으로 복귀 (URDF 재로드 경로)
+const SWITCH_REALTIME_DEADLINE_MS = 20000;         // 전환(URDF 로드 포함) 실시간 상한
+const SWITCH_MIN_SIM_ADVANCE_SEC = 0.5;            // 전환 직후 새 엔진이 이만큼 전진해야 함
+
+/** 두 엔티티 쌍 일치(순서 무관) */
+function isPair(event, idA, idB) {
+  return (event.a === idA && event.b === idB) || (event.a === idB && event.b === idA);
+}
+
+/**
+ * 파사드 play() 호출 후 status 'done'까지 sim 시간 예산 안에서 폴링한다.
+ * (pick-and-place / obstacle-avoidance 공용 — arm-sequence 블록은 기존 계약 유지)
+ */
+async function playAndAwaitDone(page, budgetSimSec) {
+  const startSimTimeSec = await page.evaluate(() => {
+    window.__sim.player.play();
+    return window.__sim.engine.simTimeSec;
+  });
+  const realDeadline = Date.now() + PHASE6_REALTIME_DEADLINE_MS;
+  let last = null;
+  for (;;) {
+    last = await page.evaluate(() => ({
+      status: window.__sim.player.status,
+      index: window.__sim.player.currentStepIndex,
+      simTimeSec: window.__sim.engine.simTimeSec,
+    }));
+    if (last.status === 'done') break;
+    if (last.simTimeSec - startSimTimeSec > budgetSimSec || Date.now() > realDeadline) break;
+    await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+  }
+  return { ...last, elapsedSimSec: last.simTimeSec - startSimTimeSec };
+}
+
+/**
+ * UI 씬 프리셋 select로 씬을 전환하고(사용자 change 이벤트 경로 — scene-controls.ts),
+ * __sim.spec.name이 대상 씬이 될 때까지 폴링한다. 성공/시간초과 모두 마지막 스냅샷을
+ * 돌려준다 (FAIL detail에 사용). 전환 중에는 __sim이 잠시 undefined다(이전 씬 해제
+ * → 새 빌드) — null 스냅샷은 건너뛰고 계속 폴링한다.
+ */
+async function switchSceneViaSelect(page, sceneName) {
+  await page.evaluate((target) => {
+    const select = document.querySelector('[data-testid="scene-select"]');
+    select.value = target;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }, sceneName);
+  const deadline = Date.now() + SWITCH_REALTIME_DEADLINE_MS;
+  let snap = null;
+  for (;;) {
+    snap = await page.evaluate(() => {
+      const s = window.__sim;
+      if (!s) return null;
+      return {
+        name: s.spec.name,
+        simTimeSec: s.engine.simTimeSec,
+        entityIdCount: s.sceneHandle.entityIds.length,
+        specEntityCount: s.spec.entities.length,
+        hasGround: Boolean(s.spec.environment && s.spec.environment.ground),
+        robotIds: s.robots.ids(),
+        selectValue: document.querySelector('[data-testid="scene-select"]')?.value ?? null,
+      };
+    });
+    if (snap && snap.name === sceneName) return snap;
+    if (Date.now() > deadline) return snap;
+    await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+  }
+}
+
+/** 현재 활성 엔진의 sim 시간이 minAdvanceSec만큼 실제 전진하는지 폴링 판정 */
+async function awaitSimAdvance(page, minAdvanceSec) {
+  const fromSec = await page.evaluate(() => window.__sim?.engine.simTimeSec ?? 0);
+  const deadline = Date.now() + SWITCH_REALTIME_DEADLINE_MS;
+  for (;;) {
+    const toSec = await page.evaluate(() => window.__sim?.engine.simTimeSec ?? 0);
+    if (toSec - fromSec >= minAdvanceSec) return { advanced: true, fromSec, toSec };
+    if (Date.now() > deadline) return { advanced: false, fromSec, toSec };
+    await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+  }
+}
 
 function startPreview() {
   const proc = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort'], {
@@ -319,6 +426,267 @@ async function main() {
       if (boxARowCount >= 1) pass('arm-sequence: collision-log DOM has box_a row(s)', `rows=${boxARowCount}`);
       else fail('arm-sequence: collision-log DOM has box_a row(s)', `rows=${boxARowCount}`);
       } // end if (initial) — 파사드 부재 시 상호작용 어서션 건너뜀
+    }
+
+    // ── Phase 6: pick-and-place — 밀기(push) 픽앤플레이스 + SENSOR_ZONE 감지 ──
+    if (expectArg === 'pick-and-place') {
+      const initial = await page.evaluate(() => {
+        const p = window.__sim?.player;
+        return p ? { status: p.status, stepCount: p.stepCount } : null;
+      });
+      if (initial?.status === 'idle' && initial.stepCount === PNP_STEP_COUNT) {
+        pass(`pick-and-place: sequence loaded, no autoplay (idle, ${PNP_STEP_COUNT} steps)`);
+      } else {
+        fail(
+          `pick-and-place: sequence loaded, no autoplay (idle, ${PNP_STEP_COUNT} steps)`,
+          `initial=${JSON.stringify(initial)}`,
+        );
+      }
+
+      if (!initial) {
+        fail('pick-and-place: interaction checks skipped', 'player facade missing');
+      } else {
+        const last = await playAndAwaitDone(page, PNP_SIM_TIME_BUDGET_SEC);
+        const history = await page.evaluate(
+          (limit) => window.__sim.collision.recent(limit),
+          HISTORY_FETCH_LIMIT,
+        );
+
+        // 1) arm×cargo 접촉 start (EventQueue 유래 — CLAUDE.md §2.4)
+        const armCargoStarts = history.filter(
+          (e) => e.phase === 'start' && e.kind === 'contact' && isPair(e, 'arm', 'cargo'),
+        );
+        if (armCargoStarts.length >= 1) {
+          pass('pick-and-place: collision history has arm×cargo contact start',
+            `timeSec=[${armCargoStarts.map((e) => e.timeSec.toFixed(3)).join(', ')}]`);
+        } else {
+          fail('pick-and-place: collision history has arm×cargo contact start',
+            `history=${JSON.stringify(history.slice(-30))}`);
+        }
+
+        // 2) cargo×drop_zone sensor start — 스윕 밀기가 카고를 영역 안으로 옮겼다
+        const sensorStarts = history.filter(
+          (e) => e.phase === 'start' && e.kind === 'sensor' && isPair(e, 'cargo', 'drop_zone'),
+        );
+        if (sensorStarts.length >= 1) {
+          pass('pick-and-place: cargo entered drop_zone (sensor start)',
+            `timeSec=[${sensorStarts.map((e) => e.timeSec.toFixed(3)).join(', ')}]`);
+        } else {
+          fail('pick-and-place: cargo entered drop_zone (sensor start)',
+            `history=${JSON.stringify(history.slice(-30))}`);
+        }
+
+        // 3) done — timeout(6s) 경로가 아니라 실제 충돌 해제 경로의 시간 안에서
+        if (last.status === 'done' && last.elapsedSimSec < PNP_EVENT_DONE_MAX_SIM_SEC) {
+          pass(`pick-and-place: sequence done within ${PNP_EVENT_DONE_MAX_SIM_SEC}s (event-released barrier)`,
+            `elapsed=${last.elapsedSimSec.toFixed(2)}s`);
+        } else {
+          fail(`pick-and-place: sequence done within ${PNP_EVENT_DONE_MAX_SIM_SEC}s (event-released barrier)`,
+            `last=${JSON.stringify(last)}`);
+        }
+      }
+    }
+
+    // ── Phase 6: obstacle-avoidance — 위로 넘어가는 경로, 기둥 무접촉 ──
+    if (expectArg === 'obstacle-avoidance') {
+      const initial = await page.evaluate(() => {
+        const p = window.__sim?.player;
+        return p ? { status: p.status, stepCount: p.stepCount } : null;
+      });
+      if (initial?.status === 'idle' && initial.stepCount === OA_STEP_COUNT) {
+        pass(`obstacle-avoidance: sequence loaded, no autoplay (idle, ${OA_STEP_COUNT} steps)`);
+      } else {
+        fail(
+          `obstacle-avoidance: sequence loaded, no autoplay (idle, ${OA_STEP_COUNT} steps)`,
+          `initial=${JSON.stringify(initial)}`,
+        );
+      }
+
+      if (!initial) {
+        fail('obstacle-avoidance: interaction checks skipped', 'player facade missing');
+      } else {
+        const last = await playAndAwaitDone(page, OA_SIM_TIME_BUDGET_SEC);
+        const history = await page.evaluate(
+          (limit) => window.__sim.collision.recent(limit),
+          HISTORY_FETCH_LIMIT,
+        );
+
+        // 1) arm×pillar 이벤트 0건 — 회피 경로가 기둥을 건드리지 않았다
+        //    (pillar collider는 emitEvents:true — 닿았다면 반드시 이력에 남는다)
+        const armPillarEvents = history.filter((e) => isPair(e, 'arm', 'pillar'));
+        if (armPillarEvents.length === 0) {
+          pass('obstacle-avoidance: NO arm×pillar events (path clears the pillar)');
+        } else {
+          fail('obstacle-avoidance: NO arm×pillar events (path clears the pillar)',
+            `events=${JSON.stringify(armPillarEvents)}`);
+        }
+
+        // 2) arm×target_box 접촉 start — 경로의 종착이 실제 접촉으로 감지됐다
+        const armTargetStarts = history.filter(
+          (e) => e.phase === 'start' && e.kind === 'contact' && isPair(e, 'arm', 'target_box'),
+        );
+        if (armTargetStarts.length >= 1) {
+          pass('obstacle-avoidance: collision history has arm×target_box start',
+            `timeSec=[${armTargetStarts.map((e) => e.timeSec.toFixed(3)).join(', ')}]`);
+        } else {
+          fail('obstacle-avoidance: collision history has arm×target_box start',
+            `history=${JSON.stringify(history.slice(-30))}`);
+        }
+
+        // 3) done — 이벤트 해제 경로의 시간 안에서
+        if (last.status === 'done' && last.elapsedSimSec < OA_EVENT_DONE_MAX_SIM_SEC) {
+          pass(`obstacle-avoidance: sequence done within ${OA_EVENT_DONE_MAX_SIM_SEC}s (event-released barrier)`,
+            `elapsed=${last.elapsedSimSec.toFixed(2)}s`);
+        } else {
+          fail(`obstacle-avoidance: sequence done within ${OA_EVENT_DONE_MAX_SIM_SEC}s (event-released barrier)`,
+            `last=${JSON.stringify(last)}`);
+        }
+      }
+    }
+
+    // ── Phase 6: collision-testbed — 로봇 없는 낙하/미끄럼/전도 쇼케이스 ──
+    if (expectArg === 'collision-testbed') {
+      // 물리 루프는 부팅 직후 자동 재생 — TESTBED_SETTLE_SIM_SEC까지 폴링 대기
+      const realDeadline = Date.now() + PHASE6_REALTIME_DEADLINE_MS;
+      let simTimeSec = 0;
+      for (;;) {
+        simTimeSec = await page.evaluate(() => window.__sim?.engine.simTimeSec ?? 0);
+        if (simTimeSec >= TESTBED_SETTLE_SIM_SEC || Date.now() > realDeadline) break;
+        await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+      }
+      if (simTimeSec >= TESTBED_SETTLE_SIM_SEC) {
+        pass(`collision-testbed: sim advanced to ${TESTBED_SETTLE_SIM_SEC}s`, `simTimeSec=${simTimeSec.toFixed(2)}`);
+      } else {
+        fail(`collision-testbed: sim advanced to ${TESTBED_SETTLE_SIM_SEC}s`, `simTimeSec=${simTimeSec}`);
+      }
+
+      const snapshot = await page.evaluate((limit) => {
+        const s = window.__sim;
+        const dynamicYById = {};
+        for (const entity of s.spec.entities) {
+          if (entity.physics?.bodyType !== 'dynamic') continue;
+          const bodies = s.world.bodiesOfEntity(entity.id);
+          dynamicYById[entity.id] =
+            bodies.length > 0 ? s.world.getPose(bodies[0]).position[1] : null;
+        }
+        return { history: s.collision.recent(limit), dynamicYById };
+      }, HISTORY_FETCH_LIMIT);
+
+      // 1) TESTBED_EVENT_WINDOW_SEC 안에 서로 다른 contact start 쌍 ≥ 3
+      const contactPairs = new Set(
+        snapshot.history
+          .filter((e) => e.phase === 'start' && e.kind === 'contact' && e.timeSec <= TESTBED_EVENT_WINDOW_SEC)
+          .map((e) => [e.a, e.b].sort().join('×')),
+      );
+      if (contactPairs.size >= TESTBED_MIN_CONTACT_PAIRS) {
+        pass(`collision-testbed: ≥${TESTBED_MIN_CONTACT_PAIRS} distinct contact start pairs within ${TESTBED_EVENT_WINDOW_SEC}s`,
+          `pairs=[${[...contactPairs].join(', ')}]`);
+      } else {
+        fail(`collision-testbed: ≥${TESTBED_MIN_CONTACT_PAIRS} distinct contact start pairs within ${TESTBED_EVENT_WINDOW_SEC}s`,
+          `pairs=[${[...contactPairs].join(', ')}]`);
+      }
+
+      // 2) sensor start ≥ 1 (slider가 slide_gate 통과 — 물리 반응 없는 감지)
+      const sensorStarts = snapshot.history.filter(
+        (e) => e.phase === 'start' && e.kind === 'sensor' && e.timeSec <= TESTBED_EVENT_WINDOW_SEC,
+      );
+      if (sensorStarts.length >= TESTBED_MIN_SENSOR_EVENTS) {
+        pass(`collision-testbed: ≥${TESTBED_MIN_SENSOR_EVENTS} sensor start within ${TESTBED_EVENT_WINDOW_SEC}s`,
+          `events=[${sensorStarts.map((e) => `${e.a}×${e.b}@${e.timeSec.toFixed(2)}`).join(', ')}]`);
+      } else {
+        fail(`collision-testbed: ≥${TESTBED_MIN_SENSOR_EVENTS} sensor start within ${TESTBED_EVENT_WINDOW_SEC}s`,
+          `history=${JSON.stringify(snapshot.history.slice(0, 30))}`);
+      }
+
+      // 3) 전 동적 바디가 바닥 위(y > 0)에 정착 — 관통/이탈 없음
+      const entries = Object.entries(snapshot.dynamicYById);
+      const sunk = entries.filter(([, y]) => typeof y !== 'number' || y <= 0);
+      if (entries.length > 0 && sunk.length === 0) {
+        pass('collision-testbed: all dynamic bodies settled above ground (y > 0)',
+          JSON.stringify(Object.fromEntries(entries.map(([id, y]) => [id, y.toFixed(3)]))));
+      } else {
+        fail('collision-testbed: all dynamic bodies settled above ground (y > 0)',
+          JSON.stringify(snapshot.dynamicYById));
+      }
+    }
+
+    // ── Phase 6: scene-switch — 런타임 씬 전환 스모크 (UI select 경유 왕복) ──
+    if (expectArg === 'scene-switch') {
+      // 0) 부트 씬 확인 (arm-and-boxes + 로봇) — 전환 전 기준 상태
+      const boot = await page.evaluate(() => ({
+        name: window.__sim?.spec.name ?? null,
+        robotIds: window.__sim?.robots.ids() ?? [],
+      }));
+      if (boot.name === SWITCH_BACK_SCENE && boot.robotIds.includes('arm')) {
+        pass(`scene-switch: boot scene is ${SWITCH_BACK_SCENE} with robot arm`);
+      } else {
+        fail(`scene-switch: boot scene is ${SWITCH_BACK_SCENE} with robot arm`, JSON.stringify(boot));
+      }
+
+      // 1) UI select로 collision-testbed 전환 → __sim.spec.name 갱신 (게이트 계약:
+      //    전환 후 __sim은 항상 새 씬의 새 인스턴스들을 가리킨다)
+      const toTarget = await switchSceneViaSelect(page, SWITCH_TARGET_SCENE);
+      if (toTarget?.name === SWITCH_TARGET_SCENE) {
+        pass(`scene-switch: switched to ${SWITCH_TARGET_SCENE} via UI select (spec.name updated)`);
+      } else {
+        fail(`scene-switch: switched to ${SWITCH_TARGET_SCENE} via UI select (spec.name updated)`, JSON.stringify(toTarget));
+      }
+
+      if (toTarget) {
+        // 2) 엔티티 수 일치: sceneHandle.entityIds = spec.entities + ground 예약 엔티티
+        const expectedCount = toTarget.specEntityCount + (toTarget.hasGround ? 1 : 0);
+        if (toTarget.entityIdCount === expectedCount) {
+          pass('scene-switch: entity count matches spec after switch',
+            `${toTarget.entityIdCount} = ${toTarget.specEntityCount} entities + ${toTarget.hasGround ? 1 : 0} ground`);
+        } else {
+          fail('scene-switch: entity count matches spec after switch', JSON.stringify(toTarget));
+        }
+        // 로봇 없는 씬 — robots 파사드가 빈 목록인지 (이전 씬 상태 누수 검출)
+        if (toTarget.robotIds.length === 0) {
+          pass('scene-switch: robots facade empty in robot-less scene (no leak from previous scene)');
+        } else {
+          fail('scene-switch: robots facade empty in robot-less scene (no leak from previous scene)',
+            `robotIds=${JSON.stringify(toTarget.robotIds)}`);
+        }
+      }
+
+      // 3) 전환 직후 새 엔진의 sim 시간이 실제 전진 (물리 루프 자동 시작 정책)
+      const advanceAfterSwitch = await awaitSimAdvance(page, SWITCH_MIN_SIM_ADVANCE_SEC);
+      if (advanceAfterSwitch.advanced) {
+        pass('scene-switch: sim advances after switch',
+          `${advanceAfterSwitch.fromSec.toFixed(2)}s → ${advanceAfterSwitch.toSec.toFixed(2)}s`);
+      } else {
+        fail('scene-switch: sim advances after switch', JSON.stringify(advanceAfterSwitch));
+      }
+
+      // 4) 되돌아오기 (arm-and-boxes) — URDF 재로드 경로 포함 왕복 전환
+      const backHome = await switchSceneViaSelect(page, SWITCH_BACK_SCENE);
+      if (backHome?.name === SWITCH_BACK_SCENE) {
+        pass(`scene-switch: switched back to ${SWITCH_BACK_SCENE} (spec.name updated)`);
+      } else {
+        fail(`scene-switch: switched back to ${SWITCH_BACK_SCENE} (spec.name updated)`, JSON.stringify(backHome));
+      }
+      if (backHome) {
+        const expectedBackCount = backHome.specEntityCount + (backHome.hasGround ? 1 : 0);
+        if (backHome.entityIdCount === expectedBackCount && backHome.robotIds.includes('arm')) {
+          pass('scene-switch: entity count + robot arm restored after switch-back',
+            `entities=${backHome.entityIdCount}, robots=[${backHome.robotIds.join(', ')}]`);
+        } else {
+          fail('scene-switch: entity count + robot arm restored after switch-back', JSON.stringify(backHome));
+        }
+        if (backHome.selectValue === SWITCH_BACK_SCENE) {
+          pass('scene-switch: UI select reflects active scene');
+        } else {
+          fail('scene-switch: UI select reflects active scene', `selectValue=${backHome.selectValue}`);
+        }
+      }
+      const advanceAfterBack = await awaitSimAdvance(page, SWITCH_MIN_SIM_ADVANCE_SEC);
+      if (advanceAfterBack.advanced) {
+        pass('scene-switch: sim advances after switch-back',
+          `${advanceAfterBack.fromSec.toFixed(2)}s → ${advanceAfterBack.toSec.toFixed(2)}s`);
+      } else {
+        fail('scene-switch: sim advances after switch-back', JSON.stringify(advanceAfterBack));
+      }
     }
 
     // 페이지 에러는 씬별 상호작용까지 끝난 뒤 마지막에 판정한다

@@ -8,9 +8,21 @@
 //
 // Phase 6 인스펙터로 대체될 임시 UI다 — 스타일은 인라인 최소 구성(다크·모노스페이스).
 
+import {
+  COLOR,
+  FONT,
+  LAYOUT,
+  RADIUS,
+  SHADOW,
+  SPACE,
+  Z_INDEX,
+  ensureThemeStyles,
+  makeButton,
+  styled,
+} from '../theme';
 import type { JointInfo } from '../../core/robot-types';
 
-// ── 상수 (매직넘버 금지 — CLAUDE.md §4) ─────────────────────────────
+// ── 상수 (매직넘버 금지 — CLAUDE.md §4, 시각 토큰은 ui/theme.ts) ────
 
 /** limits 없는 revolute/continuous 관절의 슬라이더 폴백 범위 (±π 근사, rad) */
 const FALLBACK_REVOLUTE_LIMIT_RAD = 3.1416;
@@ -20,8 +32,8 @@ const FALLBACK_PRISMATIC_RANGE_M: readonly [number, number] = [0, 0.05];
 const SLIDER_STEP = 0.001;
 /** 값 표시 소수 자릿수 */
 const READOUT_DECIMALS = 3;
-/** 오류 오버레이(z 9999)보다는 아래, 캔버스보다는 위 */
-const PANEL_Z_INDEX = '100';
+/** 상단 커맨드바 아래에 배치 (단독 마운트 기본값 — 스택 편입 시 통합자가 덮는다) */
+const PANEL_TOP_PX = LAYOUT.belowBarTopPx;
 
 // ── 공개 타입 ───────────────────────────────────────────────────────
 
@@ -40,6 +52,8 @@ export interface JointPanelApi {
 }
 
 export interface JointPanelHandle {
+  /** 패널 루트 — 글루(main.ts)가 우측 스택 등으로 재배치할 때 사용 (inspector.ts와 동일 규약) */
+  readonly el: HTMLElement;
   /** 패널 DOM 제거 (씬 재로드 시) */
   dispose(): void;
 }
@@ -57,11 +71,6 @@ function formatValue(value: number): string {
   return value.toFixed(READOUT_DECIMALS);
 }
 
-function styled<T extends HTMLElement>(el: T, style: Partial<CSSStyleDeclaration>): T {
-  Object.assign(el.style, style);
-  return el;
-}
-
 // ── 마운트 ──────────────────────────────────────────────────────────
 
 /**
@@ -74,25 +83,28 @@ export function mountJointPanel(
   robots: readonly JointPanelRobot[],
   api: JointPanelApi,
 ): JointPanelHandle {
+  ensureThemeStyles();
   const panel = styled(document.createElement('div'), {
     position: 'absolute',
-    top: '12px',
+    top: `${PANEL_TOP_PX}px`,
     right: '12px',
-    zIndex: PANEL_Z_INDEX,
-    maxHeight: 'calc(100vh - 24px)',
-    overflowY: 'auto',
-    background: 'rgba(16, 18, 22, 0.92)',
-    border: '1px solid #2e3238',
-    borderRadius: '6px',
-    padding: '10px 12px',
-    color: '#cfd3d9',
-    fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+    zIndex: Z_INDEX.panel,
+    maxHeight: `calc(100vh - ${PANEL_TOP_PX + 12}px)`,
+    display: 'flex',
+    flexDirection: 'column',
+    background: COLOR.bgPanel,
+    border: `1px solid ${COLOR.border}`,
+    borderRadius: RADIUS.md,
+    boxShadow: SHADOW.panel,
+    color: COLOR.text,
+    fontFamily: FONT.ui,
     fontSize: '12px',
     lineHeight: '1.5',
     minWidth: '240px',
     boxSizing: 'border-box',
     userSelect: 'none',
   });
+  panel.dataset.testid = 'joint-panel';
   // 패널 위 상호작용이 뷰포트(OrbitControls)로 전파되지 않게 차단
   for (const type of ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'contextmenu']) {
     panel.addEventListener(type, (e) => {
@@ -100,12 +112,62 @@ export function mountJointPanel(
     });
   }
 
+  // 헤더: 타이틀 + 접기 토글 (inspector.ts/dock과 동일한 ▾/▴ 규약)
+  const header = styled(document.createElement('div'), {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: SPACE.md,
+    padding: `${SPACE.sm} 10px`,
+    borderBottom: `1px solid ${COLOR.borderSoft}`,
+    flexShrink: '0',
+  });
+  const panelTitle = styled(document.createElement('strong'), {
+    color: COLOR.textStrong,
+    fontSize: '13px',
+  });
+  panelTitle.textContent = '관절 제어';
+  header.appendChild(panelTitle);
+
+  const collapseButton = makeButton('▾ 접기', '패널 접기/펼치기', 'joint-panel-collapse', 'ghost');
+  styled(collapseButton, { padding: '0 4px' });
+  header.appendChild(collapseButton);
+  panel.appendChild(header);
+
+  // 본문 (스크롤 영역): 로봇별 관절 섹션 — 접기는 max-height 트랜지션 (.ui-collapsible)
+  const body = styled(document.createElement('div'), {
+    overflowY: 'auto',
+    minHeight: '0',
+    maxHeight: '70vh',
+    opacity: '1',
+    padding: '8px 12px 10px 12px',
+  });
+  body.classList.add('ui-scroll', 'ui-collapsible');
+  panel.appendChild(body);
+
+  let collapsed = false;
+  const paintCollapse = (): void => {
+    body.style.maxHeight = collapsed ? '0' : '70vh';
+    body.style.opacity = collapsed ? '0' : '1';
+    body.style.paddingTop = collapsed ? '0' : '8px';
+    body.style.paddingBottom = collapsed ? '0' : '10px';
+    body.style.overflowY = collapsed ? 'hidden' : 'auto';
+    collapseButton.textContent = collapsed ? '▴ 펼치기' : '▾ 접기';
+    collapseButton.setAttribute('aria-expanded', String(!collapsed));
+  };
+  collapseButton.addEventListener('click', () => {
+    collapsed = !collapsed;
+    paintCollapse();
+  });
+  paintCollapse();
+
   for (const robot of robots) {
-    panel.appendChild(buildRobotSection(robot, api));
+    body.appendChild(buildRobotSection(robot, api));
   }
 
   host.appendChild(panel);
   return {
+    el: panel,
     dispose: (): void => {
       panel.remove();
     },
@@ -119,11 +181,11 @@ function buildRobotSection(robot: JointPanelRobot, api: JointPanelApi): HTMLElem
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: '8px',
+    gap: SPACE.md,
     margin: '0 0 6px 0',
   });
   const title = styled(document.createElement('strong'), {
-    color: '#e8eaed',
+    color: COLOR.textStrong,
     fontSize: '13px',
   });
   title.textContent = robot.id;
@@ -132,18 +194,7 @@ function buildRobotSection(robot: JointPanelRobot, api: JointPanelApi): HTMLElem
   /** Home 후 슬라이더/표시를 core 진실(readJoints)로 되맞추는 갱신 훅 목록 */
   const refreshers: Array<() => void> = [];
 
-  const homeButton = styled(document.createElement('button'), {
-    background: '#2a2e35',
-    color: '#cfd3d9',
-    border: '1px solid #3a3f47',
-    borderRadius: '4px',
-    padding: '2px 10px',
-    fontFamily: 'inherit',
-    fontSize: '12px',
-    cursor: 'pointer',
-  });
-  homeButton.type = 'button';
-  homeButton.textContent = 'Home';
+  const homeButton = makeButton('Home', `'${robot.id}' home 포즈 재적용`, `joint-home-${robot.id}`);
   homeButton.addEventListener('click', () => {
     api.applyHome(robot.id);
     for (const refresh of refreshers) refresh();
@@ -176,22 +227,34 @@ function buildJointRow(
     margin: '2px 0',
   });
 
-  const label = styled(document.createElement('span'), { color: '#9aa0a8' });
+  const label = styled(document.createElement('span'), {
+    color: COLOR.label,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  });
   label.textContent = joint.name;
+  label.title = joint.name;
 
   const readout = styled(document.createElement('span'), {
-    color: '#e8eaed',
+    color: COLOR.textStrong,
+    fontFamily: FONT.mono,
     textAlign: 'right',
     minWidth: '56px',
   });
   readout.textContent = formatValue(initialValue);
 
-  const slider = styled(document.createElement('input'), { width: '100%', gridColumn: '1 / 3' });
+  const slider = styled(document.createElement('input'), {
+    width: '100%',
+    gridColumn: '1 / 3',
+    accentColor: COLOR.accent, // 네이티브 range 트랙/썸을 액센트로
+  });
   slider.type = 'range';
   slider.min = String(minValue);
   slider.max = String(maxValue);
   slider.step = String(SLIDER_STEP);
   slider.value = String(initialValue);
+  slider.setAttribute('aria-label', `${robotId} ${joint.name} 관절 목표값`);
   slider.addEventListener('input', () => {
     const value = Number(slider.value);
     api.setJoint(robotId, joint.name, value);

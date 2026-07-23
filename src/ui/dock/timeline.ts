@@ -7,15 +7,18 @@
 // 계층 규칙: POJO(step kind 문자열 목록)만 받는다 — core/schema를 import하지 않는다.
 // 데이터 공급(player.onStepChange / engine.onTick)은 글루(main.ts)가 중계한다.
 
-// ── 상수 (매직넘버 금지 — CLAUDE.md §4) ─────────────────────────────
+import { COLOR, FONT, SPACE, ensureThemeStyles, styled } from '../theme';
+
+// ── 상수 (매직넘버 금지 — CLAUDE.md §4, 시각 토큰은 ui/theme.ts) ────
 
 /** simTime 표시 소수 자릿수 */
 const SIM_TIME_DECIMALS = 2;
 
-const MARKER_BG = '#22252b';
-const MARKER_BG_ACTIVE = '#2e5db3';
-const MARKER_BG_DONE = '#274a2c';
-const MARKER_BORDER = '#2e3238';
+const MARKER_BG = COLOR.bgRaised;
+/** 활성 마커: 액센트 배경 + 어두운 텍스트 (대비 ≥ 4.5:1) + bold — 색 외 채널 병행 */
+const MARKER_BG_ACTIVE = COLOR.accent;
+const MARKER_BG_DONE = COLOR.successSoft;
+const MARKER_BORDER = COLOR.border;
 
 // ── 공개 타입 ───────────────────────────────────────────────────────
 
@@ -33,16 +36,10 @@ export interface TimelinePanel {
   dispose(): void;
 }
 
-// ── 내부 헬퍼 ───────────────────────────────────────────────────────
-
-function styled<T extends HTMLElement>(el: T, style: Partial<CSSStyleDeclaration>): T {
-  Object.assign(el.style, style);
-  return el;
-}
-
 // ── 패널 ────────────────────────────────────────────────────────────
 
 export function createTimelinePanel(): TimelinePanel {
+  ensureThemeStyles();
   const el = styled(document.createElement('div'), {
     height: '100%',
     display: 'flex',
@@ -55,15 +52,21 @@ export function createTimelinePanel(): TimelinePanel {
   const readoutRow = styled(document.createElement('div'), {
     display: 'flex',
     alignItems: 'center',
-    gap: '12px',
-    padding: '4px 8px',
-    borderBottom: '1px solid #2e3238',
+    gap: SPACE.lg,
+    padding: `${SPACE.xs} ${SPACE.md}`,
+    borderBottom: `1px solid ${COLOR.border}`,
     flexShrink: '0',
     fontSize: '11px',
   });
-  const progressReadout = styled(document.createElement('span'), { color: '#e8eaed' });
+  const progressReadout = styled(document.createElement('span'), {
+    color: COLOR.textStrong,
+    fontFamily: FONT.mono,
+  });
   progressReadout.dataset.testid = 'timeline-progress';
-  const timeReadout = styled(document.createElement('span'), { color: '#9aa0a8' });
+  const timeReadout = styled(document.createElement('span'), {
+    color: COLOR.label,
+    fontFamily: FONT.mono,
+  });
   readoutRow.appendChild(progressReadout);
   readoutRow.appendChild(timeReadout);
   el.appendChild(readoutRow);
@@ -73,11 +76,21 @@ export function createTimelinePanel(): TimelinePanel {
     flex: '1',
     display: 'flex',
     alignItems: 'center',
-    gap: '4px',
-    padding: '6px 8px',
+    gap: SPACE.xs,
+    padding: `${SPACE.sm} ${SPACE.md}`,
     overflowX: 'auto',
   });
+  markerRow.classList.add('ui-scroll');
   el.appendChild(markerRow);
+
+  // 빈 시퀀스 안내 (UX_DESIGN §7 "빈 플로우") — setSequence가 마커로 대체한다
+  const emptyHint = styled(document.createElement('span'), {
+    color: COLOR.muted,
+  });
+  emptyHint.textContent =
+    '이 씬에는 시퀀스가 없습니다 — {scene, sequence} 봉투 JSON을 업로드하면 재생할 수 있습니다';
+  emptyHint.dataset.testid = 'timeline-empty';
+  markerRow.appendChild(emptyHint);
 
   let markers: HTMLElement[] = [];
   let stepCount = 0;
@@ -88,7 +101,18 @@ export function createTimelinePanel(): TimelinePanel {
       const isActive = i === activeIndex;
       const isDone = activeIndex > i || activeIndex >= stepCount;
       marker.style.background = isActive ? MARKER_BG_ACTIVE : isDone ? MARKER_BG_DONE : MARKER_BG;
-      marker.style.color = isActive ? '#fff' : isDone ? '#8fbc8f' : '#9aa0a8';
+      marker.style.color = isActive
+        ? COLOR.onAccent
+        : isDone
+          ? COLOR.successText
+          : COLOR.label;
+      // 색 외 채널 병행 (UX §9): 활성은 bold + 액센트 테두리, 완료는 초록 테두리
+      marker.style.fontWeight = isActive ? '700' : '400';
+      marker.style.borderColor = isActive
+        ? COLOR.accent
+        : isDone
+          ? COLOR.successBorder
+          : MARKER_BORDER;
     });
   };
 
@@ -102,22 +126,26 @@ export function createTimelinePanel(): TimelinePanel {
     progressReadout.textContent = `${shown}/총 ${stepCount}${doneSuffix}`;
   };
 
+  paintProgress(); // 초기 상태 표기 (시퀀스 없으면 "시퀀스 없음")
+
   return {
     el,
     setSequence: (stepKinds): void => {
       markerRow.replaceChildren();
+      if (stepKinds.length === 0) markerRow.appendChild(emptyHint);
       markers = stepKinds.map((kind, i) => {
         const marker = styled(document.createElement('button'), {
           background: MARKER_BG,
-          color: '#9aa0a8',
+          color: COLOR.label,
           border: `1px solid ${MARKER_BORDER}`,
           borderRadius: '3px',
           padding: '2px 8px',
-          fontFamily: 'inherit',
+          fontFamily: FONT.mono,
           fontSize: '10px',
           whiteSpace: 'nowrap',
           cursor: 'default',
           flexShrink: '0',
+          transition: 'background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease',
         });
         marker.type = 'button';
         marker.dataset.testid = 'timeline-marker';

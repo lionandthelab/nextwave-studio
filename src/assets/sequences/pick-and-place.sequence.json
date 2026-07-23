@@ -1,0 +1,39 @@
+{
+  "id": "pick-and-place",
+  "robot": "arm",
+  "loop": false,
+  "steps": [
+    { "kind": "gripper", "state": "open", "durationSec": 0.4 },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint1": -0.405, "joint2": 0.459, "joint3": 1.519, "joint5": 1.163, "joint6": 1.5708 },
+      "durationSec": 2.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint2": 0.638, "joint3": 1.63, "joint5": 0.873 },
+      "durationSec": 0.8,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "setJoints",
+      "targets": { "joint1": -0.375 }
+    },
+    { "kind": "waitForCollision", "between": ["arm", "cargo"], "timeoutSec": 6 },
+    { "kind": "gripper", "state": 0.7, "durationSec": 0.5 },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint1": 0.3 },
+      "durationSec": 2.0,
+      "easing": "easeInOut"
+    },
+    { "kind": "gripper", "state": "open", "durationSec": 0.4 },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint1": 0, "joint2": -0.6, "joint3": 1.2, "joint5": -0.6, "joint6": 0 },
+      "durationSec": 2.0,
+      "easing": "easeInOut"
+    }
+  ]
+}

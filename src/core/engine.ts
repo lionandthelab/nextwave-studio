@@ -215,6 +215,18 @@ export class Engine {
     this.lastAlpha = ALPHA_LATEST;
   }
 
+  /**
+   * rAF 루프 완전 종료 — 씬 전환/앱 해제 전용 (stop()은 시계 리셋 후에도 렌더 루프가
+   * 계속 도는 것과 달리, halt() 이후 이 엔진은 어떤 프레임도 처리하지 않는다).
+   * 씬을 런타임에 교체할 때 이전 엔진 루프가 남아 이중 draw/tick을 만드는 것을
+   * 막는다 (Phase 6 씬 전환 라이프사이클). halt된 엔진은 재사용하지 않는다 —
+   * 새 씬은 새 Engine 인스턴스로 만든다 (결정론: 씬마다 fresh 시계/accumulator).
+   */
+  halt(): void {
+    this.running = false;
+    this._state = 'idle';
+  }
+
   /** 일시정지/idle 상태에서 물리 1스텝만 진행(디버깅). playing 중에는 no-op. */
   stepOnce(): void {
     if (this._state === 'playing') return;

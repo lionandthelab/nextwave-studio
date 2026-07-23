@@ -114,6 +114,29 @@ export function groundMesh(sizeM: number = DEFAULT_GROUND_SIZE_M): THREE.Mesh {
   return mesh;
 }
 
+/**
+ * 씬에서 제거된 시각 노드의 GPU 자원(geometry/material)을 해제한다.
+ * primitiveMesh/groundMesh는 메시마다 독립 geometry/material을 만들므로 공유 자원
+ * 이중 해제 위험이 없다. 로봇 URDF 메시는 RobotHandle.dispose(render/urdf.ts)가
+ * 동일한 방식으로 자기 몫을 해제한다 — 이 함수는 비로봇 노드용 대칭 짝이다.
+ */
+export function disposeMeshResources(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    if (!isMesh(obj)) return;
+    obj.geometry.dispose();
+    const material = obj.material;
+    if (Array.isArray(material)) {
+      for (const m of material) m.dispose();
+    } else {
+      material.dispose();
+    }
+  });
+}
+
+function isMesh(obj: THREE.Object3D): obj is THREE.Mesh {
+  return (obj as Partial<THREE.Mesh>).isMesh === true;
+}
+
 function buildMesh(geometry: THREE.BufferGeometry, colorHex: string, kind: string): THREE.Mesh {
   const material = new THREE.MeshStandardMaterial({
     color: colorHex,

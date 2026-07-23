@@ -8,17 +8,20 @@
 // 패널이 마운트되기 전에 발생한 로그도 잃지 않도록 유계 버퍼에 보관하고,
 // 패널 생성 시 버퍼를 재생(replay)한다.
 
-// ── 상수 (매직넘버 금지 — CLAUDE.md §4) ─────────────────────────────
+import { COLOR, FONT, SPACE, ensureThemeStyles, styled } from '../theme';
+
+// ── 상수 (매직넘버 금지 — CLAUDE.md §4, 시각 토큰은 ui/theme.ts) ────
 
 /** 보관/표시할 최대 로그 줄 수 — 초과 시 가장 오래된 줄부터 버린다 */
 const MAX_LOG_LINES = 300;
 /** 자동 스크롤 판정: 바닥에서 이 px 이내면 "바닥에 붙어 있음"으로 본다 */
 const AUTOSCROLL_THRESHOLD_PX = 8;
 
+/** 레벨별 색 — 라벨 태그([INFO]/[WARN]/[ERR])가 병행되므로 색은 보조 채널 (UX §9) */
 const LEVEL_COLORS: Readonly<Record<AppLogLevel, string>> = {
-  info: '#9aa0a8',
-  warn: '#e2b93d',
-  error: '#ff6b6b',
+  info: COLOR.label,
+  warn: COLOR.warn,
+  error: COLOR.error,
 };
 
 const LEVEL_TAGS: Readonly<Record<AppLogLevel, string>> = {
@@ -70,11 +73,6 @@ export interface ConsolePanel {
   dispose(): void;
 }
 
-function styled<T extends HTMLElement>(el: T, style: Partial<CSSStyleDeclaration>): T {
-  Object.assign(el.style, style);
-  return el;
-}
-
 function formatClock(atMs: number): string {
   const d = new Date(atMs);
   const hh = String(d.getHours()).padStart(2, '0');
@@ -85,15 +83,18 @@ function formatClock(atMs: number): string {
 
 /** Console 탭 콘텐츠 생성. dock이 el을 탭 콘텐츠로 마운트한다. */
 export function createConsolePanel(): ConsolePanel {
+  ensureThemeStyles();
   const el = styled(document.createElement('div'), {
     height: '100%',
     overflowY: 'auto',
-    padding: '4px 8px',
+    padding: `${SPACE.xs} ${SPACE.md}`,
     boxSizing: 'border-box',
+    fontFamily: FONT.mono,
     fontSize: '11px',
     lineHeight: '1.6',
   });
   el.dataset.testid = 'console-panel';
+  el.classList.add('ui-scroll');
 
   const append = (entry: AppLogEntry): void => {
     const stick =

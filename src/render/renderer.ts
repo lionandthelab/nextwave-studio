@@ -13,6 +13,13 @@ export interface RendererOptions {
   cameraFov?: number;
 }
 
+// ── 씬별 옵션 기본값 (생성자·applySceneOptions 공용 — 매직넘버 금지, CLAUDE.md §4) ──
+
+const DEFAULT_SKY_COLOR = '#1b1e23';
+const DEFAULT_CAMERA_POSITION: [number, number, number] = [1.8, 1.4, 1.8];
+const DEFAULT_CAMERA_TARGET: [number, number, number] = [0, 0.3, 0];
+const DEFAULT_CAMERA_FOV = 50;
+
 export class Renderer {
   readonly scene: THREE.Scene;
   readonly camera: THREE.PerspectiveCamera;
@@ -25,15 +32,15 @@ export class Renderer {
     this.host = host;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(opts.skyColor ?? '#1b1e23');
+    this.scene.background = new THREE.Color(opts.skyColor ?? DEFAULT_SKY_COLOR);
 
     this.camera = new THREE.PerspectiveCamera(
-      opts.cameraFov ?? 50,
+      opts.cameraFov ?? DEFAULT_CAMERA_FOV,
       host.clientWidth / Math.max(host.clientHeight, 1),
       0.01,
       100,
     );
-    const camPos = opts.cameraPosition ?? [1.8, 1.4, 1.8];
+    const camPos = opts.cameraPosition ?? DEFAULT_CAMERA_POSITION;
     this.camera.position.set(...camPos);
 
     this.webgl = new THREE.WebGLRenderer({ antialias: true });
@@ -44,7 +51,7 @@ export class Renderer {
     host.appendChild(this.webgl.domElement);
 
     this.controls = new OrbitControls(this.camera, this.webgl.domElement);
-    const target = opts.cameraTarget ?? [0, 0.3, 0];
+    const target = opts.cameraTarget ?? DEFAULT_CAMERA_TARGET;
     this.controls.target.set(...target);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
@@ -76,6 +83,22 @@ export class Renderer {
       this.webgl.setSize(w, h);
     };
     window.addEventListener('resize', this.onResize);
+  }
+
+  /**
+   * 씬 전환 시 새 SceneSpec의 카메라/환경 설정을 기존 렌더러에 재적용한다
+   * (Phase 6 씬 전환 — 렌더러/캔버스는 씬을 가로질러 유지되고, 씬별 옵션만 갱신).
+   * 미지정 옵션은 생성자와 동일한 기본값으로 되돌린다 — 이전 씬 설정이 새지 않는다.
+   */
+  applySceneOptions(opts: RendererOptions = {}): void {
+    this.scene.background = new THREE.Color(opts.skyColor ?? DEFAULT_SKY_COLOR);
+    const camPos = opts.cameraPosition ?? DEFAULT_CAMERA_POSITION;
+    this.camera.position.set(...camPos);
+    this.camera.fov = opts.cameraFov ?? DEFAULT_CAMERA_FOV;
+    this.camera.updateProjectionMatrix();
+    const target = opts.cameraTarget ?? DEFAULT_CAMERA_TARGET;
+    this.controls.target.set(...target);
+    this.controls.update();
   }
 
   /** 매 프레임 호출 (Engine 루프의 마지막 단계) */

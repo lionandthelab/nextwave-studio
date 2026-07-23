@@ -1,0 +1,88 @@
+{
+  "name": "obstacle-avoidance",
+  "version": 1,
+  "gravity": [0, -9.81, 0],
+  "timestepHz": 240,
+  "environment": { "ground": true, "skyColor": "#16211d" },
+  "camera": { "position": [1.5, 1.05, 1.5], "target": [0.25, 0.3, 0] },
+  "entities": [
+    {
+      "id": "arm",
+      "type": "robot",
+      "transform": { "position": [0, 0, 0] },
+      "visual": { "kind": "urdf", "ref": "assets/robots/arm6/arm6.urdf" },
+      "urdf": "assets/robots/arm6/arm6.urdf",
+      "controller": "sequence",
+      "linkColliders": "fromVisual",
+      "selfCollision": false,
+      "home": { "joint1": 0.0, "joint2": -0.6, "joint3": 1.2, "joint5": -0.6 },
+      "gripper": { "joints": ["finger_left_joint", "finger_right_joint"], "open": 0.03, "close": 0.0 }
+    },
+    {
+      "id": "pillar",
+      "type": "static",
+      "transform": { "position": [0.4, 0.325, 0] },
+      "visual": {
+        "kind": "primitive",
+        "primitive": { "kind": "box", "halfExtents": [0.02, 0.325, 0.02] },
+        "color": "#7f8c8d"
+      },
+      "physics": {
+        "bodyType": "fixed",
+        "colliders": [
+          {
+            "shape": { "kind": "box", "halfExtents": [0.02, 0.325, 0.02] },
+            "friction": 0.7,
+            "group": "ENV",
+            "collidesWith": ["ROBOT", "OBJECT"],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "waypoint_box",
+      "type": "object",
+      "transform": { "position": [0.35, 0.03, -0.15] },
+      "visual": {
+        "kind": "primitive",
+        "primitive": { "kind": "box", "halfExtents": [0.03, 0.03, 0.03] },
+        "color": "#2980b9"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": { "kind": "box", "halfExtents": [0.03, 0.03, 0.03] },
+            "friction": 0.6,
+            "group": "OBJECT",
+            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "target_box",
+      "type": "object",
+      "transform": { "position": [0.35, 0.03, 0.15] },
+      "visual": {
+        "kind": "primitive",
+        "primitive": { "kind": "box", "halfExtents": [0.03, 0.03, 0.03] },
+        "color": "#c0392b"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": { "kind": "box", "halfExtents": [0.03, 0.03, 0.03] },
+            "friction": 0.6,
+            "group": "OBJECT",
+            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "emitEvents": true
+          }
+        ]
+      }
+    }
+  ]
+}

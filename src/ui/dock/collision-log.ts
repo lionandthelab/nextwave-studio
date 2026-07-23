@@ -8,9 +8,10 @@
 // 계층 규칙: schema의 CollisionEvent POJO만 안다. 이벤트 공급(모니터 구독)은
 // 글루(main.ts)가 addEvent 호출로 중계한다 — 이 모듈은 core를 import하지 않는다.
 
+import { COLOR, FONT, SPACE, ensureThemeStyles, styled } from '../theme';
 import type { CollisionEvent } from '../../schema/types';
 
-// ── 상수 (매직넘버 금지 — CLAUDE.md §4) ─────────────────────────────
+// ── 상수 (매직넘버 금지 — CLAUDE.md §4, 시각 토큰은 ui/theme.ts) ────
 
 /** DOM에 유지할 최대 행 수 — 초과 시 가장 오래된 행부터 제거 */
 const MAX_ROWS = 500;
@@ -19,10 +20,14 @@ const AUTOSCROLL_THRESHOLD_PX = 8;
 /** 시간 표시 소수 자릿수 (s.mmm) */
 const TIME_DECIMALS = 3;
 
-const PHASE_COLORS: Readonly<Record<CollisionEvent['phase'], string>> = {
-  start: '#e74c3c',
-  stop: '#5d6470',
-};
+/**
+ * phase/kind → 배지 클래스 (텍스트가 의미를 전달하고 색은 보조 — UX_DESIGN §9).
+ * sensor 이벤트는 phase와 무관하게 파랑 계열로 구분한다(감지 전용 — 물리 반응 없음).
+ */
+function badgeClassOf(e: CollisionEvent): string {
+  if (e.kind === 'sensor') return 'ui-badge ui-badge--sensor';
+  return e.phase === 'start' ? 'ui-badge ui-badge--start' : 'ui-badge ui-badge--stop';
+}
 
 // ── 공개 타입 ───────────────────────────────────────────────────────
 
@@ -42,11 +47,6 @@ export interface CollisionLogPanel {
 
 // ── 내부 헬퍼 ───────────────────────────────────────────────────────
 
-function styled<T extends HTMLElement>(el: T, style: Partial<CSSStyleDeclaration>): T {
-  Object.assign(el.style, style);
-  return el;
-}
-
 /** 필터 문자열이 이벤트의 a/b 엔티티 id에 부분 일치하는가 (대소문자 무시) */
 function matchesFilter(a: string, b: string, filter: string): boolean {
   if (filter === '') return true;
@@ -57,6 +57,7 @@ function matchesFilter(a: string, b: string, filter: string): boolean {
 // ── 패널 ────────────────────────────────────────────────────────────
 
 export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLogPanel {
+  ensureThemeStyles();
   const el = styled(document.createElement('div'), {
     height: '100%',
     display: 'flex',
@@ -69,26 +70,26 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
   const filterRow = styled(document.createElement('div'), {
     display: 'flex',
     alignItems: 'center',
-    gap: '6px',
-    padding: '4px 8px',
-    borderBottom: '1px solid #2e3238',
+    gap: SPACE.sm,
+    padding: `${SPACE.xs} ${SPACE.md}`,
+    borderBottom: `1px solid ${COLOR.border}`,
     flexShrink: '0',
   });
-  const filterLabel = styled(document.createElement('span'), { color: '#5d6470', fontSize: '11px' });
+  const filterLabel = styled(document.createElement('span'), {
+    color: COLOR.muted,
+    fontSize: '11px',
+  });
   filterLabel.textContent = '필터';
   const filterInput = styled(document.createElement('input'), {
-    background: '#101216',
-    color: '#cfd3d9',
-    border: '1px solid #2e3238',
-    borderRadius: '3px',
     padding: '1px 6px',
-    fontFamily: 'inherit',
     fontSize: '11px',
     width: '140px',
   });
+  filterInput.className = 'ui-input';
   filterInput.type = 'text';
   filterInput.placeholder = '엔티티 id…';
   filterInput.dataset.testid = 'collision-filter';
+  filterInput.setAttribute('aria-label', '충돌 로그 엔티티 필터');
   filterRow.appendChild(filterLabel);
   filterRow.appendChild(filterInput);
   el.appendChild(filterRow);
@@ -97,8 +98,9 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
   const scroller = styled(document.createElement('div'), {
     flex: '1',
     overflowY: 'auto',
-    padding: '0 4px',
+    padding: `0 ${SPACE.xs}`,
   });
+  scroller.classList.add('ui-scroll');
   const table = styled(document.createElement('table'), {
     width: '100%',
     borderCollapse: 'collapse',
@@ -108,6 +110,21 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
   table.appendChild(tbody);
   scroller.appendChild(table);
   el.appendChild(scroller);
+
+  // 빈 상태 안내 (UX_DESIGN §7) — 행이 생기면 숨긴다
+  const emptyState = styled(document.createElement('div'), {
+    padding: `${SPACE.lg} ${SPACE.md}`,
+    color: COLOR.muted,
+    textAlign: 'center',
+    lineHeight: '1.8',
+  });
+  emptyState.textContent = '아직 충돌 이벤트가 없습니다 — ▶ Play 후 감지 즉시 여기 기록됩니다';
+  emptyState.dataset.testid = 'collision-empty';
+  scroller.appendChild(emptyState);
+
+  const paintEmptyState = (): void => {
+    emptyState.style.display = tbody.childElementCount === 0 ? '' : 'none';
+  };
 
   /** 행 표시/숨김을 현재 필터로 갱신 */
   const applyFilter = (): void => {
@@ -131,10 +148,12 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
     row.dataset.testid = 'collision-row';
     row.dataset.entityA = e.a;
     row.dataset.entityB = e.b;
-    styled(row, { cursor: 'pointer', borderBottom: '1px solid #22252b' });
+    row.classList.add('rsw-hover-row');
+    styled(row, { cursor: 'pointer', borderBottom: `1px solid ${COLOR.borderSoft}` });
 
     const timeCell = styled(document.createElement('td'), {
-      color: '#5d6470',
+      color: COLOR.muted,
+      fontFamily: FONT.mono,
       padding: '2px 8px 2px 4px',
       whiteSpace: 'nowrap',
       width: '1%',
@@ -142,24 +161,20 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
     timeCell.textContent = e.timeSec.toFixed(TIME_DECIMALS);
 
     const pairCell = styled(document.createElement('td'), {
-      color: '#cfd3d9',
+      color: COLOR.text,
       padding: '2px 8px',
     });
     pairCell.textContent = `${e.a} × ${e.b}`;
 
     const phaseCell = styled(document.createElement('td'), { padding: '2px 8px', width: '1%' });
-    const badge = styled(document.createElement('span'), {
-      color: '#fff',
-      background: PHASE_COLORS[e.phase],
-      borderRadius: '3px',
-      padding: '0 6px',
-      fontSize: '10px',
-    });
+    const badge = document.createElement('span');
+    // 배지 텍스트가 의미(phase)를 전달하고 색(kind/phase)은 보조 — sensor는 파랑 계열
+    badge.className = badgeClassOf(e);
     badge.textContent = e.phase;
     phaseCell.appendChild(badge);
 
     const kindCell = styled(document.createElement('td'), {
-      color: '#9aa0a8',
+      color: e.kind === 'sensor' ? COLOR.info : COLOR.label,
       padding: '2px 4px',
       width: '1%',
       whiteSpace: 'nowrap',
@@ -183,6 +198,7 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
 
     tbody.appendChild(row);
     while (tbody.childElementCount > MAX_ROWS) tbody.firstElementChild?.remove();
+    paintEmptyState();
     if (stick) scroller.scrollTop = scroller.scrollHeight;
   };
 
@@ -191,6 +207,7 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
     addEvent,
     clear: (): void => {
       tbody.replaceChildren();
+      paintEmptyState();
     },
     dispose: (): void => {
       el.remove();
