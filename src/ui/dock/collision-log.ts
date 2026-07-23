@@ -1,9 +1,10 @@
 // ui/dock/collision-log.ts — 충돌 로그 패널 (UX_DESIGN §3.6 "Collision Log")
 //
-// 표 형식: 시간(s.mmm) · a × b · phase 배지 · kind. 최신이 아래(자동 스크롤 —
-// 사용자가 위로 스크롤해 두면 자동 스크롤을 멈춘다). 엔티티 텍스트 필터 입력,
-// 행 클릭 → onFocusEntity(id) 콜백(하이라이트 + 콘솔 노트 — 카메라 포커스는
-// Phase 10 "행 클릭→오브젝트 포커스+당시 노드 강조"에서 확장, ROADMAP).
+// 표 형식: 시간(s.mmm) · a × b · phase 배지 · kind · 🔗(링크 어포던스). 최신이 아래
+// (자동 스크롤 — 사용자가 위로 스크롤해 두면 자동 스크롤을 멈춘다). 엔티티 텍스트 필터
+// 입력. 행 클릭/Enter/Space → onFocusEntity(id)(하이라이트) + onRowClick({a,b,timeSec})
+// (Phase 10 "행 클릭→오브젝트 포커스+당시 활성 노드 강조" — timeSec으로 통합자가 그
+// 시점 활성 노드를 강조, ROADMAP §3.6). 행은 키보드 포커스 가능(role=button, tabindex).
 //
 // 계층 규칙: schema의 CollisionEvent POJO만 안다. 이벤트 공급(모니터 구독)은
 // 글루(main.ts)가 addEvent 호출로 중계한다 — 이 모듈은 core를 import하지 않는다.
@@ -20,6 +21,30 @@ const AUTOSCROLL_THRESHOLD_PX = 8;
 /** 시간 표시 소수 자릿수 (s.mmm) */
 const TIME_DECIMALS = 3;
 
+// ── 로그 전용 스타일 (hover/focus 링크 어포던스 — 토큰만 소비, 1회 주입) ──
+// theme.ts를 건드리지 않고 이 패널 몫의 인터랙션(:hover / :focus-visible)만 주입한다
+// (canvas.ts의 ensureCanvasStyles와 같은 국소 스타일 패턴). 색은 theme 토큰만 쓴다.
+
+const COLLISION_LOG_STYLE_ID = 'rsw-collision-log-styles';
+
+function ensureCollisionLogStyles(): void {
+  if (document.getElementById(COLLISION_LOG_STYLE_ID) !== null) return;
+  const style = document.createElement('style');
+  style.id = COLLISION_LOG_STYLE_ID;
+  style.textContent = `
+.rsw-clog-row { cursor: pointer; }
+.rsw-clog-link {
+  color: ${COLOR.muted};
+  opacity: 0.45;
+  transition: color 0.1s ease, opacity 0.1s ease;
+}
+.rsw-clog-row:hover .rsw-clog-link,
+.rsw-clog-row:focus-visible .rsw-clog-link { color: ${COLOR.accentText}; opacity: 1; }
+.rsw-clog-row:focus-visible { outline: 2px solid ${COLOR.accent}; outline-offset: -2px; }
+`;
+  document.head.appendChild(style);
+}
+
 /**
  * phase/kind → 배지 클래스 (텍스트가 의미를 전달하고 색은 보조 — UX_DESIGN §9).
  * sensor 이벤트는 phase와 무관하게 파랑 계열로 구분한다(감지 전용 — 물리 반응 없음).
@@ -34,6 +59,12 @@ function badgeClassOf(e: CollisionEvent): string {
 export interface CollisionLogOptions {
   /** 행/엔티티 클릭 → 관련 오브젝트 포커스 요청 (하이라이트 등 — 글루가 구현) */
   onFocusEntity(entityId: string): void;
+  /**
+   * 행 클릭 → 충돌 이벤트 좌표 통지 (Phase 10, §3.6 "당시 활성 노드 강조"). onFocusEntity와
+   * 함께 호출된다(엔티티 포커스와 노드 강조는 별개 관심사). timeSec으로 통합자가 그 시점의
+   * 활성 노드를 찾아 강조한다(예: run-overlay.timeSecToNodeIndex). 선택 — 미주입이면 무시.
+   */
+  onRowClick?(info: { a: string; b: string; timeSec: number }): void;
 }
 
 export interface CollisionLogPanel {
@@ -58,6 +89,7 @@ function matchesFilter(a: string, b: string, filter: string): boolean {
 
 export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLogPanel {
   ensureThemeStyles();
+  ensureCollisionLogStyles();
   const el = styled(document.createElement('div'), {
     height: '100%',
     display: 'flex',
@@ -148,8 +180,17 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
     row.dataset.testid = 'collision-row';
     row.dataset.entityA = e.a;
     row.dataset.entityB = e.b;
-    row.classList.add('rsw-hover-row');
+    row.classList.add('rsw-hover-row', 'rsw-clog-row');
     styled(row, { cursor: 'pointer', borderBottom: `1px solid ${COLOR.borderSoft}` });
+    // 키보드 포커스 가능 + 클릭 의미 노출 (UX §9) — 색만으로 링크를 전달하지 않는다
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.setAttribute(
+      'aria-label',
+      `충돌 ${e.timeSec.toFixed(TIME_DECIMALS)}초 · ${e.a} × ${e.b} · ${e.phase} · ${e.kind}` +
+        ' — 클릭하여 오브젝트 포커스 및 당시 노드 강조',
+    );
+    row.title = '클릭 → 오브젝트 포커스 + 당시 활성 노드 강조';
 
     const timeCell = styled(document.createElement('td'), {
       color: COLOR.muted,
@@ -181,16 +222,39 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
     });
     kindCell.textContent = e.kind;
 
+    // 링크 어포던스: 이 행이 뷰포트/노드와 연동됨을 알리는 🔗 (hover/focus 시 강조 —
+    // ensureCollisionLogStyles). aria는 행 aria-label이 이미 전달하므로 glyph는 숨긴다.
+    const linkCell = styled(document.createElement('td'), {
+      padding: '2px 4px 2px 2px',
+      width: '1%',
+      textAlign: 'right',
+    });
+    const linkGlyph = styled(document.createElement('span'), { fontSize: '10px' });
+    linkGlyph.className = 'rsw-clog-link';
+    linkGlyph.textContent = '🔗';
+    linkGlyph.setAttribute('aria-hidden', 'true');
+    linkCell.appendChild(linkGlyph);
+
     row.appendChild(timeCell);
     row.appendChild(pairCell);
     row.appendChild(phaseCell);
     row.appendChild(kindCell);
+    row.appendChild(linkCell);
 
-    // 행 클릭 → 관련 오브젝트 포커스. 바닥 같은 예약 엔티티('__' 접두)보다
-    // 사용자 엔티티를 우선한다 (하이라이트 대상으로 의미가 있는 쪽).
-    row.addEventListener('click', () => {
+    // 행 활성화(클릭/Enter/Space) → 관련 오브젝트 포커스 + 이벤트 좌표 통지(§3.6).
+    // 포커스 대상은 바닥 같은 예약 엔티티('__' 접두)보다 사용자 엔티티를 우선한다
+    // (하이라이트 대상으로 의미가 있는 쪽). timeSec은 통합자가 당시 노드 강조에 쓴다.
+    const activate = (): void => {
       const preferred = e.a.startsWith('__') && !e.b.startsWith('__') ? e.b : e.a;
       opts.onFocusEntity(preferred);
+      opts.onRowClick?.({ a: e.a, b: e.b, timeSec: e.timeSec });
+    };
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault(); // Space 스크롤 방지 + 활성화
+        activate();
+      }
     });
 
     // 현재 필터 즉시 적용

@@ -12,7 +12,15 @@
     "lint": "eslint . --ext .ts,.tsx",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify": "npm run typecheck && npm run lint && npm run test"
+    "verify": "npm run typecheck && npm run lint && npm run test",
+    "gate:build": "vite build",
+    "gate:orchestration": "node scripts/gate-browser.mjs --expect=orchestration",
+    "gate:planner": "node scripts/gate-browser.mjs --expect=planner",
+    "gate:flow-graph": "node scripts/gate-browser.mjs --expect=flow-graph",
+    "gate:arm-sequence": "node scripts/gate-browser.mjs --expect=arm-sequence",
+    "gate:scene-builder": "node scripts/gate-browser.mjs --expect=scene-builder",
+    "gate:scene-switch": "node scripts/gate-browser.mjs --expect=scene-switch",
+    "gate": "npm run gate:build && npm run gate:orchestration && npm run gate:planner && npm run gate:flow-graph && npm run gate:arm-sequence && npm run gate:scene-builder && npm run gate:scene-switch"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.113.0",

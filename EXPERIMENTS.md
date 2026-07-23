@@ -1173,3 +1173,93 @@ Phase 8 통합의 "알려진 한계"였던 "씬 편집이 라이브 시퀀스 �
 - 영향 파일: src/planner/scene-context.ts(robotJointNames + docstring),
   src/planner/scene-context.test.ts(joints 배열 기대치 갱신 + 그라운딩⇄검증 정렬
   회귀 테스트 2건 추가: validateSequence 통과/거부).
+
+## [2026-07-23] Phase 10 실행 오케스트레이션 — Orchestrator를 Engine/Player 위에 배선
+
+- 상태: 결정됨 (게이트 통과)
+- 맥락: Phase 8이 배선한 `player.onStepChange → canvas.setStatuses`를 UX_DESIGN §5의
+  일급 오케스트레이션(노드 경계 제어·트라이페인 동기·충돌 인지 정지·결정론적 재실행)으로
+  심화한다. 코어(Engine/ControlPlayer/CollisionMonitor)는 손대지 않고, `ui/orchestrator.ts`
+  Orchestrator를 그 위에 얇게 감싸 main.ts 글루가 재생 컨트롤·상태·재실행을 통과시킨다.
+
+### 결정 1 — 노드 단위 제어를 코어 위 표현 계층으로 (진실은 player 커서)
+- Orchestrator는 player를 직접 tick하지 않는다. player는 Engine preStep 훅이 구동하고,
+  Orchestrator는 `player.onStepChange` 커서 통지를 관찰해 **표현 상태**(노드 상태 맵·활성
+  노드)만 파생·방출한다. 재생 제어는 `engine.play/pause/stop/setSpeed`로만 한다.
+- ⏸/⏭는 "노드 경계" 단위다: PausePolicy(none/atNext/stepOne/runTo)를 순수 함수로 두고
+  다음 onStepChange 경계에서 `engine.pause()`를 결정한다. ⏭ Step은 "물리 1 tick"이 아니라
+  "노드 1개"다 — 물리-tick 프레임 스텝(engine.stepOnce)은 UI에서 내렸다(디버그용으로 코어엔 잔존).
+- 트라이페인 소스: **player step 인덱스가 유일한 진실**. 그래프 활성 노드(캔버스 아웃라인+
+  active 점) ↔ 뷰포트 run-overlay 'node k/n'+활성 라벨 ↔ Timeline 커서 마커가 모두 이 인덱스
+  에서 파생된다. Timeline 활성/오류 마커는 상태 맵에서 역산한다(active→커서, error→오류 마커,
+  전부 done→끝). 게이트가 세 뷰가 같은 노드를 가리키는지 한 순간에 대조해 검증한다(PASS).
+
+### 결정 2 — 재실행(runFromNode) 결정론: per-node 스냅샷 없이 "처음부터 되감아 빨리감기"
+- per-node 씬 스냅샷이 없으므로 재실행은 **항상 resetScene로 처음으로 되감고** 목표 앞 노드를
+  4×로 재생 후 목표 경계에서 정지(+속도 복원)한다. 같은 시퀀스는 같은 setJoints 로그를 낸다
+  (ControlPlayer.load/reset 계약 — 결정론).
+- 한계(정직한 MVP): Engine 프레임 루프가 한 프레임 안 물리 tick 사이에 pause를 재검사하지
+  않아 목표 노드가 "실행 직전"이 아니라 "경계 ±1 tick"에서 멈춘다. ⏭ Step의 <1프레임 노드
+  오버스텝도 같은 계열이다. 정밀 재개점은 per-node 스냅샷 도입 시 개선(백로그).
+- resetScene는 매 되감기마다 `armFromStart`(validateSequence→player.load)로 **재검증 후
+  재장전**한다. player.load의 커서 통지는 Orchestrator의 resetting 가드(withReset) 안에서
+  무시되고, 이후 명시적 recompute가 상태를 그린다. 편집으로 unarm되는 케이스는 stop이 아닌
+  `resetForEdit`(엔진/씬 무영향, 표현만 pending)로 분리했다 — edit-during-play 정책 유지.
+
+### 결정 3 — "예기치 않은 충돌" 판정 휴리스틱 (보수적 — 오검출로 정상 실행을 물들이지 않음)
+- 승격 조건을 좁혔다: start phase의 로봇×비로봇 접촉 중 (a) 바닥이 아니고, (b) 어떤
+  waitForCollision 배리어 대상 쌍도 아니며, (c) 상대가 **동적 사물이 아닐** 때만 예기치 않음.
+  즉 robot × 정적 환경(벽·기둥)의 비의도 접촉만 오류로 승격한다.
+- 근거: 로봇이 바닥에 서 있는 접촉·동적 사물 조작(밀기/파지)·배리어 대상 접촉은 전부 정상이다.
+  이를 오류로 물들이면 완주 시퀀스가 "전부 done"이 아니게 되어 재생이 오해를 부른다. 비활성
+  배리어의 쌍도 "조작 대상"으로 포함해(enabled 무관) 배리어를 꺼도 그 접촉을 오류로 보지 않는다.
+- 자동 정지 토글('충돌 시 자동 정지', 기본 off, 재생 바 옆 체크박스): 켜면 위 판정에서 자동 ⏸.
+  결정적으로 강제하기 어려워(정적 벽이 있는 씬 필요) 게이트는 토글이 facade+체크박스에 반영되는
+  배선만 검증한다(§5 문구대로 "at minimum assert the toggle flips a facade-visible flag").
+
+### 결정 4 — run-overlay가 statusline의 상태 라인을 대체(빈 씬 중앙 안내는 유지)
+- 뷰포트 좌하단 실행 오버레이를 `mountRunOverlay`로 교체하되, 기존 statusline은 "빈 씬 중앙
+  안내"만 담당하도록 상태 라인 el만 숨겨 남긴다(setEmptyHintVisible 연동 유지 — 회귀 없음).
+- 오버레이 engineState는 **시퀀스 실행 상태**를 비춘다: 물리만 도는 대기(미arm/done)는 'Idle',
+  armed+running이면 엔진 상태(playing/paused). 물리 자동재생 씬에서 부트 오버레이가 'Running'으로
+  오인되지 않게 한 선택 — 실행 오케스트레이션 배지의 의미와 정합.
+
+### 검증 (전부 실측 — PowerShell, Windows 드라이브레터 케이싱 이슈 회피)
+- `tsc --noEmit` 통과 · eslint 경고 0 · vitest **724/724 통과** · `vite build` 성공.
+- 브라우저 게이트 **11종 ALL PASS**: orchestration(신규 — 초기 pending·상태 진행·arm×box_a·
+  트라이페인 일관·완주 done·stepNode 1노드·autoPause 토글·runFromNode) · flow-graph ·
+  arm-sequence · planner · pick-and-place · scene-builder · scene-switch · obstacle-avoidance ·
+  falling-boxes · arm · collision-testbed.
+- 영향 파일: src/ui/orchestrator.ts(resetForEdit 추가 — 편집 unarm 표현 리셋), src/main.ts
+  (Orchestrator 배선: armFromStart/resetScene/playbackControls를 orchestrator 경유 · onNodeStatus/
+  onActiveNode/unexpectedCollision · run-overlay 스왑 · 충돌 로그 onRowClick 노드 강조 · Timeline
+  onMarkerClick 재실행 · __sim.orchestrator 파사드), scripts/gate-browser.mjs(--expect=orchestration),
+  README.md(Flow 1 워크스루 + Phase 0–10 완료), EXPERIMENTS.md(이 항목).
+
+### 결정 5 — 뷰포트 오버레이를 rAF가 아니라 **동기 진실**에서 갱신 (Phase 10 사후 수정)
+- 문제(자기비판 리뷰): run-overlay의 `lastOverlayState`가 `engine.onTick`(rAF cadence)에서만
+  재계산됐다. 반면 그래프 active dot·Timeline 커서·__sim 파사드는 `orchestrator.onActiveNode/
+  onNodeStatus`로 **동기적으로** active가 된다(▶ Play가 player를 arm하는 그 순간). 결과적으로
+  뷰포트 오버레이가 나머지 두 페인보다 **최대 1 rAF 늦어**, §5 "항상 일치"가 Play 순간에는
+  문자 그대로 성립하지 않았다. orchestration 게이트가 이를 결정론적 red로 노출했다("Idle ·
+  simTime …"를 running 오버레이로 캡처).
+- 수정: 오버레이 계산을 순수 헬퍼 `computeOverlayState(engineState, simTime)`로 뽑고,
+  `refreshOverlay()`를 (a) onTick(연속 simTime), (b) `onActiveNode`(노드 경계 — 그래프/타임라인과
+  같은 동기 지점), (c) 재생 컨트롤 play/pause/stop/step **직후**(engine.state 전이는 동기적 —
+  engine.ts 확인)에서 호출한다. 이제 오버레이의 Running/Paused/node-progress 전이가 세 페인과
+  한 프레임도 어긋나지 않는다. `activeIndex`(재생 진실)는 여전히 player 커서가 유일 소유 —
+  오버레이는 그 파생 뷰일 뿐이다(불변식 유지).
+- 게이트 정직성(자기비판 후속): (1) `runningOverlay`를 매 폴에서 재래치해 1프레임 지연에
+  영구 실패하지 않게 하고, (2) 트라이페인 등식에 **오버레이 파싱 노드('node k/n'→id)를 독립
+  항으로 추가**해 "graph == overlay == timeline == facade"가 라벨대로 실제 4항을 대조하게 했다
+  (이전엔 오버레이가 등식에서 빠져 있었다). 3회 연속 결정론 PASS 확인.
+- 부수 정리: OrchestratorEngine 주입 계약에서 미사용 `stepOnce()` 제거(표면 최소화 — 노드
+  경계 러너는 play()+PausePolicy로 구동, engine.stepOnce는 코어에 디버그용으로 잔존).
+  edit-during-play 토스트를 '시퀀스를 처음부터 …(씬은 유지 · 완전 되감기는 ⏹ Stop)'로 명확화
+  (씬 물리는 리셋 안 됨 — resetForEdit 스코프 정직화). package.json에 `gate*`/`gate` 스크립트
+  추가(브라우저 DoD 게이트 재현 가능·강제 가능).
+- 검증: tsc·eslint·vitest 724/724 통과, vite build 성공, 게이트 [orchestration·planner·
+  flow-graph·arm-sequence·scene-builder·scene-switch] ALL PASS(orchestration 3회 결정론).
+- 영향 파일: src/main.ts(computeOverlayState/refreshOverlay + 배선), src/ui/orchestrator.ts
+  (stepOnce 제거), src/ui/orchestrator.test.ts(목 정리), scripts/gate-browser.mjs(오버레이 재래치
+  + 트라이페인 오버레이 항), package.json(gate 스크립트), EXPERIMENTS.md(이 항목).

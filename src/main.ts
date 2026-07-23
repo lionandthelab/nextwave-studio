@@ -108,7 +108,14 @@ import { mountJsonViewer } from './ui/command-bar/json-viewer';
 import { mountPlaybackBar } from './ui/command-bar/playback';
 import { mountFlowCanvas } from './ui/flow-graph/canvas';
 import type { FlowCanvasOpResult } from './ui/flow-graph/canvas';
+import { kindMeta } from './ui/flow-graph/node-render';
 import type { NodeRunStatus } from './ui/flow-graph/node-render';
+import { Orchestrator } from './ui/orchestrator';
+import type {
+  OrchestratorDeps,
+  OrchestratorEngine,
+  OrchestratorPlayer,
+} from './ui/orchestrator';
 import { mountNodeEditor } from './ui/inspector/node-editor';
 import {
   mountCommandBarShell,
@@ -128,6 +135,12 @@ import { mountImportDialog } from './ui/library/import-dialog';
 import { mountLibrary, TEMPLATE_MIME } from './ui/library/library';
 import { templateByKey } from './ui/library/templates';
 import { mountViewportStatus } from './ui/viewport/statusline';
+import {
+  mountRunOverlay,
+  overlaySummary,
+  timeSecToNodeIndex,
+} from './ui/viewport/run-overlay';
+import type { RunOverlayState } from './ui/viewport/run-overlay';
 import { mountWorkspace } from './ui/workspace';
 import { mountNlInput } from './ui/command-bar/nl-input';
 import type { GenerateMode, NlInputHandle } from './ui/command-bar/nl-input';
@@ -351,6 +364,34 @@ export interface SimPlannerFacade {
   playerStatus(): string;
 }
 
+/**
+ * 실행 오케스트레이션 파사드 (Phase 10 — 게이트/자동화용). 노드 단위 재생·상태·재실행을
+ * 노출한다. 재생 컨트롤은 playbackControls(=UI 재생 바)와 동일한 orchestrator 경로를 탄다 —
+ * 파사드와 사람 조작이 같은 진실(§5 동기 강조)을 본다.
+ */
+export interface SimOrchestratorFacade {
+  /** ▶ 연속 재생 (필요 시 시퀀스 arm 후) */
+  play(): void;
+  /** ⏸ 즉시 일시정지 */
+  pause(): void;
+  /** ⏹ 정지 + 결정론적 재생 준비 (씬/player/충돌 이력 리셋) */
+  stop(): void;
+  /** ⏭ 노드 1개 전진 (물리 1 tick이 아니라 — §5) */
+  stepNode(): void;
+  /** '예기치 않은 충돌 시 자동 정지' 토글 (§5, 기본 off) */
+  setAutoPause(enabled: boolean): void;
+  /** 자동 정지 토글 현재 상태 */
+  autoPause(): boolean;
+  /** 현재 활성(실행 중) 노드 id, 없으면 null (트라이페인 진실) */
+  activeNodeId(): string | null;
+  /** 노드 실행 상태 맵 스냅샷 (nodeId → pending|active|done|error) */
+  statuses(): Record<string, string>;
+  /** 노드/타임라인 마커에서 결정론적 재실행 (처음부터 되감아 빨리감기 — §5) */
+  runFromNode(nodeId: string): void;
+  /** 실행 오버레이 요약 텍스트 (뷰포트 배지와 동일 — 게이트 트라이페인 검증용) */
+  overlayText(): string;
+}
+
 /** window.__sim으로 노출되는 시뮬 핸들. Rapier 타입은 새지 않는다(PhysicsWorld 경계). */
 export interface SimHandle {
   readonly engine: Engine;
@@ -363,6 +404,7 @@ export interface SimHandle {
   readonly history: SimHistoryFacade;
   readonly flowGraph: SimFlowGraphFacade;
   readonly planner: SimPlannerFacade;
+  readonly orchestrator: SimOrchestratorFacade;
   readonly player?: SimPlayerFacade;
 }
 
@@ -942,8 +984,10 @@ async function boot(): Promise<void> {
       dock?: ReturnType<typeof mountDock>;
       offMonitor?: () => void;
       playbackBar?: ReturnType<typeof mountPlaybackBar>;
+      autoPauseControl?: HTMLElement;
       viewportStatus?: ReturnType<typeof mountViewportStatus>;
-      offStepChange?: () => void;
+      runOverlay?: ReturnType<typeof mountRunOverlay>;
+      orchestrator?: Orchestrator;
       offTick?: () => void;
       offEditorChange?: () => void;
       rightStack?: HTMLDivElement;
@@ -962,14 +1006,16 @@ async function boot(): Promise<void> {
     const teardownBuilt = (): void => {
       built.engine?.halt();
       built.offTick?.();
-      built.offStepChange?.();
+      built.orchestrator?.dispose(); // player.onStepChange + monitor 구독 해제 (Phase 10)
       built.offMonitor?.();
       built.offEditorChange?.();
       history.cancelPending(); // 해제될 editor를 캡처하는 pending 스냅샷 폐기
       built.interaction?.dispose(); // 씬 노드가 살아있는 동안 emissive 원복 + 기즈모 분리
       built.gizmoBar?.remove();
       built.playbackBar?.dispose();
+      built.autoPauseControl?.remove();
       built.viewportStatus?.dispose();
+      built.runOverlay?.dispose();
       // flow 캔버스는 앱 수명 페인(workspace.slots.flowGraph) 안에 산다 — 씬 몫만 제거
       built.flowCanvas?.dispose();
       built.flowPaneHost?.remove();
@@ -1052,10 +1098,22 @@ async function boot(): Promise<void> {
         ? fromSequence(validSequence, { origin: 'manual' })
         : { nodes: [], edges: [], robot: sceneHandle.robots.ids()[0] ?? '' };
       let lastFlowValidation: 'ok' | string[] = 'ok';
-      /** 캔버스 실행 상태 (nodeId → 상태) — player 커서 통지가 다시 그린다 */
+      /** 캔버스 실행 상태 (nodeId → 상태) — Orchestrator onNodeStatus가 다시 그린다 (Phase 10) */
       let flowStatuses: Record<string, NodeRunStatus> = {};
       /** 이번 재생 런에서 active로 표시된 노드 (게이트의 스킵 검증용 — arm 시 리셋) */
       const flowEverActiveNodeIds = new Set<string>();
+      /**
+       * 현재 활성(실행 중) 노드 id 캐시 — Orchestrator onActiveNode에서 파생한다(트라이페인
+       * 진실: 그래프 활성 노드 ↔ 뷰포트 배지 ↔ Timeline 커서의 단일 소스). unexpectedCollision
+       * 판정·run-overlay 활성 라벨이 이 값을 읽는다.
+       */
+      let activeFlowNodeId: string | null = null;
+      /**
+       * 노드가 active가 된 시점의 simTime(체인 인덱스별) — Collision Log 행 클릭 시
+       * timeSec → 당시 활성 노드 강조(§3.6)에 쓴다. arm 시 비우고 노드 활성 통지마다 기록한다.
+       * loop 시퀀스는 나중 활성이 이전 값을 덮으므로 근사다(run-overlay.timeSecToNodeIndex 계약).
+       */
+      const nodeActiveStartSimSec: number[] = [];
 
       const engine = new Engine(
         {
@@ -1245,8 +1303,21 @@ async function boot(): Promise<void> {
         onFocusEntity: (entityId) => {
           const node = visualNodeOf(entityId);
           if (node && entityId !== GROUND_ENTITY_ID) pulseEntity(node);
-          // 카메라 포커스/당시 노드 강조는 Phase 10 (ROADMAP "Collision Log 연동")
-          appLog('info', `충돌 로그: '${entityId}' 하이라이트 (카메라 포커스는 Phase 10)`);
+          appLog('info', `충돌 로그: '${entityId}' 하이라이트`);
+        },
+        // 행 클릭 → 그 충돌 시점(timeSec)에 active였던 노드를 강조 (§3.6, Phase 10).
+        // 기록된 노드 활성 시작 simTime 경계로 timeSec을 노드 인덱스로 접는다(근사 — loop 주석).
+        // 주의: 이는 **읽기 전용 과거-시점 조사 하이라이트**다 — Orchestrator의 activeIndex(재생
+        // 상태의 단일 진실)를 바꾸지 않으며, 다음 onNodeStatus/onActiveNode 방출에서 진실로
+        // 되돌아간다. 재생 상태의 두 번째 소스가 아니다(정지/일시정지 중 일시적 조사 강조).
+        onRowClick: ({ timeSec }) => {
+          const idx = timeSecToNodeIndex(timeSec, nodeActiveStartSimSec);
+          if (idx < 0 || idx >= flowGraph.nodes.length) return;
+          const node = flowGraph.nodes[idx];
+          if (node === undefined) return;
+          flowCanvas.selectNode(node.id); // 캔버스 아웃라인 강조 (onSelectNode 에코 없음)
+          timelinePanel.setActiveIndex(idx); // Timeline 커서도 그 노드로 (트라이페인 정합)
+          appLog('info', `충돌 @${timeSec.toFixed(3)}s → 당시 노드 '${node.id}' (${node.kind}) 강조`);
         },
       });
       built.collisionPanel = collisionPanel;
@@ -1283,68 +1354,79 @@ async function boot(): Promise<void> {
       let inspectorLastRefreshMs = 0;
       let inspectorLastEngineState: EngineState = 'idle';
 
-      // 시퀀스 arm(최초 Play 시 player 로드) — 파일 헤더의 human-in-the-loop 정책.
-      // Phase 8: 그래프 편집이 unarm하므로, 다음 Play가 "현재" 시퀀스를 새로 로드한다.
-      const armSequenceIfAvailable = (): void => {
-        if (!currentSequence || sequenceArmed) return;
-        // 실행 직전 재검증 (§2.9 "검증 통과본만 실행"): 마지막 커밋 이후의 씬 편집
-        // (로봇 rename/제거 등)으로 참조가 깨진 시퀀스를 arm하면 엔진 preStep의
-        // RobotRegistry.get이 던져 tick 루프가 죽는다 — arm을 거부하고 한국어 오류를
-        // 표면화한다. 엔진 재생(씬 물리)은 시퀀스와 무관하게 그대로 진행된다.
+      // ── 시퀀스 arm + 결정론적 되감기 (Phase 10 Orchestrator가 재생을 제어) ──
+      // 실행 직전 재검증 (§2.9 "검증 통과본만 실행"): 마지막 커밋 이후의 씬 편집(로봇
+      // rename/제거 등)으로 참조가 깨진 시퀀스를 arm하면 엔진 preStep의 RobotRegistry.get이
+      // 던져 tick 루프가 죽는다 — arm을 거부하고 한국어 오류를 표면화한다. 엔진 재생(씬
+      // 물리)은 시퀀스와 무관하게 진행된다.
+      const armFromStart = (): boolean => {
+        if (!currentSequence) {
+          sequenceArmed = false;
+          return false;
+        }
         const revalidation = validateSequence(currentSequence, editor.spec);
         if (!revalidation.ok) {
           const detail = revalidation.errors.join('\n');
           appLog('error', `시퀀스 재검증 실패 — 재생을 거부합니다:\n${detail}`);
           showToast(`시퀀스가 현재 씬과 맞지 않아 재생할 수 없습니다:\n${detail}`, 'warn');
-          return;
+          sequenceArmed = false;
+          return false;
         }
-        // 새 재생 런 — 이전 런의 상태 점/active 이력을 리셋 (load 통지가 다시 그린다)
-        flowStatuses = {};
+        // 새 재생 런 — 이전 런의 active 이력·노드 시작 시각을 리셋 (load 통지가 상태를 다시 그린다)
         flowEverActiveNodeIds.clear();
+        nodeActiveStartSimSec.length = 0;
         player.load(currentSequence);
         sequenceArmed = true;
-        appLog(
-          'info',
-          `시퀀스 '${currentSequence.id}' 재생 시작 (${currentSequence.steps.length}개 step)`,
-        );
+        return true;
       };
 
+      // ▶ Play용: 이미 armed(재개)면 no-op — 처음부터 재로드하지 않는다(mid-run 재개).
+      // Phase 8: 그래프 편집이 unarm하므로, 다음 Play가 "현재" 시퀀스를 새로 로드한다.
+      const armSequenceIfAvailable = (): void => {
+        if (sequenceArmed || !currentSequence) return;
+        const seqId = currentSequence.id;
+        const count = currentSequence.steps.length;
+        if (armFromStart()) appLog('info', `시퀀스 '${seqId}' 재생 시작 (${count}개 step)`);
+      };
+
+      // Orchestrator resetScene 훅 — 결정론적 되감기: 씬 pose → 충돌 이력 → player 커서.
+      // orchestrator.stop()/runFromNode()가 자신의 resetting 가드(withReset) 안에서 호출하므로
+      // armFromStart의 player.load 커서 통지는 무시되고, 이후 명시적 recompute가 상태를 그린다.
+      // 매 되감기마다 재검증(armFromStart)하므로 stop 이후의 편집도 여기서 걸러진다.
+      const resetScene = (): void => {
+        sceneHandle.reset();
+        monitor.clear();
+        collisionPanel.clear();
+        armFromStart();
+      };
+
+      // 재생 컨트롤은 Orchestrator를 경유한다(§5): Play/Pause/Stop/Step/속도가 모두 노드 단위
+      // 오케스트레이션 계층을 통과해 파사드·사람 조작이 같은 진실을 본다. ⏭ Step은 물리 1
+      // tick이 아니라 "노드 1개"다(§5) — 물리-tick 프레임 스텝(engine.stepOnce)은 UI에서 내린다.
       const playbackControls = {
         play: (): void => {
           armSequenceIfAvailable();
-          engine.play();
+          orchestrator.play();
+          refreshOverlay(); // engine.play() 직후 동기 갱신 — rAF 지연 없이 'Running · node k/n' 전이 (§5)
         },
         pause: (): void => {
-          engine.pause();
+          orchestrator.pause();
+          refreshOverlay(); // 'Paused' 전이를 즉시 반영 (정지에는 onActiveNode 방출이 없다)
         },
-        // 정지 = 결정론적 재생 준비: 엔진 시계 → 씬 pose → player 커서 → 충돌 이력 순.
-        // monitor.clear()로 이전 mark가 모두 무효화되지만 player.reset()이 활성 런타임을
-        // 폐기하므로 stale mark 소비자는 남지 않는다 (collision.ts clear 계약).
         stop: (): void => {
-          engine.stop();
-          sceneHandle.reset();
-          if (sequenceArmed) player.reset();
-          // Stop은 unarm한다 — 다음 ▶ Play가 armSequenceIfAvailable에서 재검증→재로드
-          // 하며 상태 점/everActive 리셋 경로가 한 곳으로 모인다 (같은 시퀀스의 load는
-          // 결정론적 재생과 동치 — ControlPlayer.load 계약).
-          sequenceArmed = false;
-          monitor.clear();
-          collisionPanel.clear();
-          // player.reset() 통지가 남긴 'active(0)' 점과 이전 런의 'error' 마킹을 지운다
-          // — 엔진 idle 동안 캔버스는 전부 pending (재생 바 '대기 (▶ Play)' 표기와 일관,
-          // everActiveNodeIds 파사드 계약 "이번 재생 런" 유지).
-          flowStatuses = {};
-          flowEverActiveNodeIds.clear();
-          flowCanvas.setStatuses({});
+          orchestrator.stop();
+          refreshOverlay(); // 'Idle' 전이를 즉시 반영
         },
         stepOnce: (): void => {
-          engine.stepOnce();
-          // 단일 스텝 결과를 인스펙터에 즉시 반영 (paused/idle 중 유일한 pose 변화 경로)
+          armSequenceIfAvailable(); // 시퀀스 arm 없이는 노드 경계가 없어 무한 재생 → 먼저 arm
+          orchestrator.step();
+          refreshOverlay(); // 노드 스텝 재생 전이를 즉시 반영 (경계 정지는 onTick이 뒤따라 반영)
+          // 노드 스텝은 엔진을 잠시 재생 후 경계에서 멈춘다 — 인스펙터는 onTick 상태 전이로 갱신됨
           inspectorRef?.refresh();
         },
         setSpeed: (speedMult: number): void => {
           // select 옵션은 ENGINE_SPEED_OPTIONS에서 생성되므로 항상 유효하다
-          engine.setSpeed(speedMult as EngineSpeed);
+          orchestrator.setSpeed(speedMult as EngineSpeed);
         },
       };
 
@@ -1357,13 +1439,99 @@ async function boot(): Promise<void> {
       );
       built.playbackBar = playbackBar;
 
-      // 뷰포트 좌하단 실행 오버레이 (UX_DESIGN §3.3) — 뷰포트 슬롯 안 absolute 배치.
-      // 표시 전용(pointer-events 없음), 씬 수명과 함께 마운트/해제된다.
+      // ⚙ '충돌 시 자동 정지' 토글 (§5 "예기치 않은 충돌 시 자동 ⏸") — 재생 바 옆, 기본 off.
+      // 켜면 로봇–환경/사물의 비의도 충돌(waitForCollision 대상이 아닌 로봇 접촉)에서 자동
+      // 일시정지 + 해당 노드 강조. 파사드 setAutoPause가 이 체크박스를 동기화한다(게이트 가시 플래그).
+      const autoPauseLabel = document.createElement('label');
+      Object.assign(autoPauseLabel.style, {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: SPACE.xs,
+        marginLeft: '10px',
+        color: COLOR.label,
+        fontFamily: FONT.ui,
+        fontSize: '11px',
+        whiteSpace: 'nowrap',
+        cursor: 'pointer',
+        userSelect: 'none',
+      } satisfies Partial<CSSStyleDeclaration>);
+      const autoPauseCheckbox = document.createElement('input');
+      autoPauseCheckbox.type = 'checkbox';
+      autoPauseCheckbox.dataset.testid = 'autopause-toggle';
+      autoPauseCheckbox.setAttribute('aria-label', '충돌 시 자동 정지');
+      autoPauseCheckbox.addEventListener('change', () => {
+        orchestrator.setAutoPauseOnCollision(autoPauseCheckbox.checked);
+      });
+      const autoPauseText = document.createElement('span');
+      autoPauseText.textContent = '충돌 시 자동 정지';
+      autoPauseLabel.appendChild(autoPauseCheckbox);
+      autoPauseLabel.appendChild(autoPauseText);
+      autoPauseLabel.title = '예기치 않은 로봇 충돌에서 자동 ⏸ + 해당 노드 강조 (§5)';
+      commandBar.center.appendChild(autoPauseLabel);
+      built.autoPauseControl = autoPauseLabel;
+
+      // 뷰포트 좌하단 실행 오버레이 (UX_DESIGN §3.3/§5) — Phase 10 오케스트레이션 배지가
+      // 기존 statusline의 상태 라인을 대체한다. statusline은 "빈 씬 중앙 안내"만 담당하도록
+      // 상태 라인 el을 숨겨 남긴다(중앙 안내는 setEmptyHintVisible로 씬 편집과 계속 연동).
       const viewportStatus = mountViewportStatus(workspace.slots.viewport, {
         sceneName: spec.name,
         emptyScene: spec.entities.length === 0,
       });
+      viewportStatus.el.style.display = 'none'; // run-overlay가 상태 라인을 대체 (중앙 빈 씬 안내만 유지)
       built.viewportStatus = viewportStatus;
+
+      const runOverlay = mountRunOverlay(workspace.slots.viewport);
+      built.runOverlay = runOverlay;
+      /** 마지막 오버레이 스냅샷 — 파사드 overlayText()가 순수 요약(run-overlay.overlaySummary)으로 그린다. */
+      let lastOverlayState: RunOverlayState = {
+        engineState: 'idle',
+        simTimeSec: 0,
+        activeNodeLabel: null,
+        nodeIndex: null,
+        nodeCount: null,
+        sceneName: spec.name,
+      };
+
+      /**
+       * 오버레이 1틱 스냅샷 계산 (순수 — run-overlay.overlaySummary가 그린다). 시퀀스 실행
+       * 상태를 반영한다: 물리만 도는 대기(미arm/done)는 'Idle', armed+running이면 엔진 상태
+       * (playing/paused)를 비춘다. 노드 진행(node k/n)은 armed일 때만, 활성 라벨은 Orchestrator
+       * 활성 노드(activeFlowNodeId)에서 파생한다.
+       */
+      const computeOverlayState = (
+        engineStateStr: string,
+        simTimeSec: number,
+      ): RunOverlayState => {
+        const seqRunning = sequenceArmed && player.status === 'running';
+        const activeNode =
+          activeFlowNodeId !== null
+            ? flowGraph.nodes.find((n) => n.id === activeFlowNodeId)
+            : undefined;
+        return {
+          engineState: seqRunning ? engineStateStr : 'idle',
+          simTimeSec,
+          activeNodeLabel: activeNode ? kindMeta(activeNode.kind).label : null,
+          nodeIndex: sequenceArmed && currentSequence ? player.currentStepIndex : null,
+          nodeCount: sequenceArmed && currentSequence ? player.stepCount : null,
+          sceneName: spec.name,
+        };
+      };
+
+      /**
+       * 뷰포트 오버레이를 현재 진실(엔진 상태·시계)로 다시 그린다. rAF onTick 외에도
+       * Orchestrator 방출(onActiveNode)·재생 컨트롤(play/pause/stop/step) **직후** 호출해,
+       * 오버레이의 Running/Paused/node-progress 전이가 그래프 active dot·Timeline 커서와
+       * **같은 동기 지점**에서 일어나게 한다 — §5 "활성 노드 ↔ 로봇 동작 ↔ Timeline 커서
+       * 항상 일치"의 뷰포트 축을 rAF 한 프레임 지연 없이 잠근다 (Phase 10). 인자 생략 시
+       * engine 라이브 값을 읽는다(engine.play/pause/stop이 상태를 동기적으로 전이시킨 뒤).
+       */
+      const refreshOverlay = (
+        engineStateStr: string = engine.state,
+        simTimeSec: number = engine.simTimeSec,
+      ): void => {
+        lastOverlayState = computeOverlayState(engineStateStr, simTimeSec);
+        runOverlay.setState(lastOverlayState);
+      };
 
       // 타임라인: 검증된 시퀀스의 step 마커 (player 커서 연동은 flow 섹션의
       // onStepChange 구독이 타임라인 + 캔버스 상태를 함께 갱신한다 — Phase 8)
@@ -1394,16 +1562,11 @@ async function boot(): Promise<void> {
             : undefined,
         });
         timelinePanel.setSimTime(info.simTimeSec);
-        viewportStatus.update({
-          engineState: info.state,
-          simTimeSec: info.simTimeSec,
-          sequence: currentSequence
-            ? {
-                stepIndex: player.currentStepIndex,
-                stepCount: sequenceArmed ? player.stepCount : currentSequence.steps.length,
-              }
-            : undefined,
-        });
+        // 실행 오버레이 (§5 트라이페인 뷰포트 축): rAF마다 simTime을 흘려보낸다. 재생 상태·
+        // 노드 진행 전이는 refreshOverlay(=computeOverlayState)가 Orchestrator 방출(onActiveNode)·
+        // 재생 컨트롤(play/pause/stop/step)과 같은 동기 지점에서도 밀어넣으므로, 뷰포트 오버레이가
+        // 그래프 active dot·Timeline 커서와 한 프레임도 어긋나지 않는다(Play 순간 포함 — Phase 10).
+        refreshOverlay(info.state, info.simTimeSec);
 
         // 인스펙터 값 갱신 정책: playing 중 ~150ms 스로틀 + 상태 전이(pause/stop) 시 1회
         // — 멈춘 화면이 항상 최신 물리 진실을 비추고, 재생 중 rAF마다 DOM을 다시 만들지
@@ -1714,14 +1877,17 @@ async function boot(): Promise<void> {
         currentSequence = seq;
         if (wasArmed) {
           sequenceArmed = false; // preStep 게이트 — 로드된 이전 시퀀스는 더 진행하지 않음
-          player.reset(); // 커서/goto 카운터 0 (다음 arm의 load가 어차피 재초기화)
-          showToast('시퀀스 수정됨 — 처음부터 재생됩니다', 'info');
+          // 런 표현 초기화(엔진/씬 무영향): player 커서 되감기(resetting 가드로 통지 무시) +
+          // 상태 전부 pending. 엔진(씬 물리)은 계속 돈다 — 다음 ▶ Play가 편집본을 처음부터.
+          orchestrator.resetForEdit();
+          // 문구 계약: '시퀀스를' 처음부터 — 씬 물리 pose는 리셋되지 않는다(편집 정책, resetForEdit
+          // 주석). 완전 결정론적 재생을 원하면 ⏹ Stop이 씬까지 되감는다. (toast honesty — §5)
+          showToast('시퀀스 수정됨 — 시퀀스를 처음부터 재생합니다 (씬은 유지 · 완전 되감기는 ⏹ Stop)', 'info');
         }
-        // player.reset()의 커서 통지(위)가 남긴 상태 점까지 리셋 — 캔버스에도 반영
-        flowStatuses = {};
         flowEverActiveNodeIds.clear();
-        flowCanvas.setStatuses({});
         timelinePanel.setSequence(seq.steps.map((step) => step.kind));
+        // 새 노드 집합으로 상태 맵/타임라인 재동기 (idle이면 전부 pending — orchestrator 진실)
+        orchestrator.refresh();
         jsonViewer.refresh();
       };
 
@@ -1930,36 +2096,187 @@ async function boot(): Promise<void> {
       const hasGeneratedNodes = (): boolean =>
         flowGraph.nodes.some((node) => node.origin === 'generated');
 
+      // ── 실행 오케스트레이터 배선 (Phase 10, UX_DESIGN §5 — THE NORM) ──────────
+      // Phase 8이 배선한 player.onStepChange → 캔버스 상태를 일급 오케스트레이션으로 심화한다:
+      // 노드 경계 컨트롤(Play/Pause/Stop/Step) · 트라이페인 동기(활성 노드 ↔ 뷰포트 배지 ↔
+      // Timeline 커서) · 충돌 인지 정지 · 결정론적 재실행. player 커서가 유일한 진실이고,
+      // 오케스트레이터는 그것을 관찰해 표현 상태(노드 상태 맵·활성 노드)만 파생·방출한다.
+
       /**
-       * player 커서 → 캔버스 상태 점 (기본 동기 — Phase 10이 심화): 커서 앞 done ·
-       * 현재 active · 뒤 pending. 비활성 노드는 active로 표시하지 않는다(스킵은 같은
-       * tick에 통과 — "없는 것처럼" 시맨틱, player 계약). timeout 'error' 마킹은 보존.
+       * 상태 맵 → Timeline 커서/오류 마커 (트라이페인 정합): active 인덱스에 커서, done
+       * 노드는 완료색, error 노드는 오류 마커. active가 없고 전부 done이면 커서를 끝(노드
+       * 수)에 둔다(모두 done 표기), 그 외 active 없음은 -1(대기).
        */
-      const paintFlowStatuses = (index: number): void => {
-        const next: Record<string, NodeRunStatus> = {};
-        flowGraph.nodes.forEach((node, i) => {
-          if (i < index) next[node.id] = 'done';
-          else if (i === index && node.enabled) {
-            next[node.id] = 'active';
-            flowEverActiveNodeIds.add(node.id);
-          } else next[node.id] = 'pending';
+      const paintTimelineFromStatuses = (map: Record<string, NodeRunStatus>): void => {
+        const nodes = flowGraph.nodes;
+        let activeIdx = -1;
+        let allDone = nodes.length > 0;
+        const errorIdx: number[] = [];
+        nodes.forEach((node, i) => {
+          const status = map[node.id] ?? 'pending';
+          if (status === 'active') activeIdx = i;
+          else if (status === 'error') errorIdx.push(i);
+          if (status !== 'done') allDone = false;
         });
-        for (const [id, status] of Object.entries(flowStatuses)) {
-          if (status === 'error' && id in next) next[id] = 'error';
-        }
-        flowStatuses = next;
-        flowCanvas.setStatuses(next);
+        timelinePanel.setActiveIndex(activeIdx >= 0 ? activeIdx : allDone ? nodes.length : -1);
+        timelinePanel.setErrorIndices(errorIdx);
       };
 
-      // player 커서 통지 → 타임라인 + 캔버스 상태 (둘 다 같은 step 인덱스를 비춘다)
-      built.offStepChange = player.onStepChange((index) => {
-        timelinePanel.setActiveIndex(index);
-        paintFlowStatuses(index);
+      /** 현재 그래프의 waitForCollision 배리어 쌍 목록 (비활성 배리어도 "조작 대상"으로 포함). */
+      const awaitedCollisionPairs = (): Array<readonly [string, string]> => {
+        const pairs: Array<readonly [string, string]> = [];
+        for (const node of flowGraph.nodes) {
+          if (node.kind !== 'waitForCollision') continue;
+          const between = node.params['between'];
+          if (
+            Array.isArray(between) &&
+            typeof between[0] === 'string' &&
+            typeof between[1] === 'string'
+          ) {
+            pairs.push([between[0], between[1]]);
+          }
+        }
+        return pairs;
+      };
+
+      const collisionPairMatches = (e: CollisionEvent, x: string, y: string): boolean =>
+        (e.a === x && e.b === y) || (e.a === y && e.b === x);
+
+      /**
+       * "예기치 않은" 충돌 판정 (§5 충돌 인지 정지). 오검출로 정상 실행을 오류로 물들이지
+       * 않도록 보수적으로 좁힌다(EXPERIMENTS 기록) — start phase의 로봇×비로봇 접촉 중
+       * 다음을 모두 만족할 때만 true:
+       *  - 바닥이 아님 (로봇이 서 있는 정상 접촉 제외),
+       *  - 어떤 waitForCollision 배리어의 대상 쌍도 아님 (조작 대상 접촉 제외),
+       *  - 상대가 동적 사물이 아님 (동적 사물과의 접촉은 정상 조작 — 밀기/파지).
+       * 즉 robot × 정적 환경(벽·기둥 등)의 비의도 접촉만 오류로 승격한다.
+       */
+      const unexpectedCollision = (e: CollisionEvent): boolean => {
+        if (e.phase !== 'start') return false;
+        const robotIds = new Set(sceneHandle.robots.ids());
+        const aIsRobot = robotIds.has(e.a);
+        const bIsRobot = robotIds.has(e.b);
+        if (aIsRobot === bIsRobot) return false; // 로봇 미관여 or 로봇×로봇(self) — 대상 아님
+        const other = aIsRobot ? e.b : e.a;
+        if (other === GROUND_ENTITY_ID) return false; // 바닥은 정상 (로봇이 서 있음)
+        for (const [x, y] of awaitedCollisionPairs()) {
+          if (collisionPairMatches(e, x, y)) return false; // 조작 대상 — 정상 접촉
+        }
+        // 동적 사물과의 접촉은 정상 조작(밀기/파지) — 정적 환경과의 비의도 접촉만 승격
+        const otherEntity = editor.spec.entities.find((en) => en.id === other);
+        const otherIsDynamic =
+          otherEntity !== undefined &&
+          !isRobotSpec(otherEntity) &&
+          otherEntity.physics?.bodyType === 'dynamic';
+        if (otherIsDynamic) return false;
+        return true;
+      };
+
+      // core Engine/Player를 오케스트레이터의 좁은 표면으로 감싼다 (Rapier/three 비노출).
+      // onTick의 state 타입 완화(EngineState → string), setSpeed 배율 검증은 engine이 수행.
+      const orchEngine: OrchestratorEngine = {
+        play: () => engine.play(),
+        pause: () => engine.pause(),
+        stop: () => engine.stop(),
+        setSpeed: (mult) => engine.setSpeed(mult as EngineSpeed),
+        get state() {
+          return engine.state;
+        },
+        get simTimeSec() {
+          return engine.simTimeSec;
+        },
+        onTick: (fn) =>
+          engine.onTick((info) => fn({ state: info.state, simTimeSec: info.simTimeSec })),
+      };
+      const orchPlayer: OrchestratorPlayer = {
+        load: () => {}, // 실 arm은 armFromStart가 담당 — 오케스트레이터는 커서만 관찰한다
+        reset: () => player.reset(),
+        get status() {
+          return player.status;
+        },
+        get currentStepIndex() {
+          return player.currentStepIndex;
+        },
+        // 노드 맵은 항상 현재 그래프와 1:1 — 미arm이어도 전체 노드가 표현된다(전부 pending)
+        get stepCount() {
+          return flowGraph.nodes.length;
+        },
+        onStepChange: (fn) => player.onStepChange((index) => fn(index, null)),
+      };
+
+      const orchestratorDeps: OrchestratorDeps = {
+        engine: orchEngine,
+        player: orchPlayer,
+        monitor,
+        // 상태 맵 방출 → 캔버스 상태 점 + Timeline 마커 (트라이페인 동기 ①)
+        onNodeStatus: (map) => {
+          flowStatuses = map;
+          flowCanvas.setStatuses(map);
+          paintTimelineFromStatuses(map);
+        },
+        // 활성 노드 방출 → 캔버스 아웃라인 강조 + 뷰포트 배지 라벨(캐시) (트라이페인 동기 ②)
+        onActiveNode: (nodeId) => {
+          activeFlowNodeId = nodeId;
+          flowCanvas.selectNode(nodeId); // 외부 주도 선택 — onSelectNode 에코 없음(노드 폼 미개방)
+          if (nodeId !== null) {
+            flowEverActiveNodeIds.add(nodeId);
+            const idx = flowGraph.nodes.findIndex((n) => n.id === nodeId);
+            if (idx >= 0) nodeActiveStartSimSec[idx] = engine.simTimeSec; // 충돌 로그 연동 경계
+          }
+          // 뷰포트 오버레이(node k/n·활성 라벨)를 그래프 active dot·Timeline 커서와 같은
+          // 동기 지점에서 잠근다 — 노드 경계에서 세 뷰가 한 프레임도 어긋나지 않는다 (§5).
+          refreshOverlay();
+        },
+        resetScene,
+        nodeIdByStepIndex: (index) => flowGraph.nodes[index]?.id ?? null,
+        stepIndexByNodeId: (id) => {
+          const i = flowGraph.nodes.findIndex((n) => n.id === id);
+          return i >= 0 ? i : null;
+        },
+        enabledStepIndices: () =>
+          flowGraph.nodes.reduce<number[]>((acc, node, i) => {
+            if (node.enabled) acc.push(i);
+            return acc;
+          }, []),
+        unexpectedCollision,
+      };
+
+      const orchestrator = new Orchestrator(orchestratorDeps);
+      built.orchestrator = orchestrator;
+
+      // 오류 이벤트 → 콘솔 (예기치 않은 충돌만 — waitForCollision 타임아웃은 player.warn이
+      // 이미 콘솔에 로그하고, 아래 handlePlayerWarn이 markError로 라우팅한다)
+      orchestrator.onError((e) => {
+        if (e.reason !== 'collision') return;
+        const pair = e.collision ? ` (${e.collision.a}×${e.collision.b})` : '';
+        appLog(
+          'warn',
+          `예기치 않은 충돌${pair} — 노드 '${e.nodeId}' 오류 표시` +
+            (orchestrator.autoPauseOnCollision ? ' + 자동 정지' : ''),
+        );
       });
 
-      // waitForCollision timeout 경고 → 해당 노드 'error' (문구 계약: steps.ts가 상수로
-      // 고정 — WAIT_FOR_COLLISION_WARN_TAG/TIMEOUT_MARKER. 발행측 리워딩이 이 매칭을
-      // 조용히 끊지 못하도록 공유 상수로만 매칭한다. steps.test.ts가 문구를 핀한다.)
+      /** 노드/마커에서 결정론적 재실행 (§5) — 처음부터 되감아 목표 노드 경계까지 빨리감기. */
+      const runFromNodeWithToast = (nodeId: string): void => {
+        const node = flowGraph.nodes.find((n) => n.id === nodeId);
+        if (node === undefined) return;
+        showToast(
+          `'${kindMeta(node.kind).label}' 노드부터 다시 재생합니다 (처음부터 되감아 빨리감기)`,
+          'info',
+        );
+        orchestrator.runFromNode(nodeId);
+      };
+
+      // Timeline 마커 클릭 → 그 노드부터 재실행 (§5 "마커/노드 클릭 → 재실행")
+      timelinePanel.onMarkerClick((index) => {
+        const node = flowGraph.nodes[index];
+        if (node !== undefined) runFromNodeWithToast(node.id);
+      });
+
+      // waitForCollision timeout 경고 → 해당 노드 markError (문구 계약: steps.ts가 상수로
+      // 고정 — WAIT_FOR_COLLISION_WARN_TAG/TIMEOUT_MARKER. 발행측 리워딩이 이 매칭을 조용히
+      // 끊지 못하도록 공유 상수로만 매칭한다. steps.test.ts가 문구를 핀한다.) markError는
+      // onNodeStatus로 캔버스+타임라인에 error를 그리고 오류 이벤트를 방출한다.
       handlePlayerWarn = (msg): void => {
         if (
           !msg.includes(WAIT_FOR_COLLISION_WARN_TAG) ||
@@ -1969,9 +2286,11 @@ async function boot(): Promise<void> {
         }
         const node = flowGraph.nodes[player.currentStepIndex];
         if (node === undefined) return;
-        flowStatuses = { ...flowStatuses, [node.id]: 'error' };
-        flowCanvas.setStatuses(flowStatuses);
+        orchestrator.markError(node.id);
       };
+
+      // 초기 페인트 — 전부 pending을 캔버스/타임라인에 그린다 (부트 시 커서 통지가 아직 없다)
+      orchestrator.refresh();
 
       // 페인 표시 정책: 시퀀스 있는 씬 = 자동 표시, 없는 씬 = 숨김('플로우' 토글로 열기)
       setFlowPaneVisible(validSequence !== null);
@@ -2094,6 +2413,25 @@ async function boot(): Promise<void> {
         playerStatus: () => player.status,
       };
 
+      // 실행 오케스트레이션 파사드 (Phase 10) — 재생/노드 상태/재실행을 UI와 같은 경로로 노출.
+      // 재생 컨트롤은 playbackControls(=UI 재생 바)를 위임 호출해 파사드/사람 조작이 동일한
+      // orchestrator 진실을 본다 (§5 동기 강조).
+      const orchestratorFacade: SimOrchestratorFacade = {
+        play: () => playbackControls.play(),
+        pause: () => playbackControls.pause(),
+        stop: () => playbackControls.stop(),
+        stepNode: () => playbackControls.stepOnce(),
+        setAutoPause: (enabled) => {
+          orchestrator.setAutoPauseOnCollision(enabled);
+          autoPauseCheckbox.checked = enabled; // UI 토글과 동기 (게이트 가시 플래그)
+        },
+        autoPause: () => orchestrator.autoPauseOnCollision,
+        activeNodeId: () => orchestrator.activeNodeId,
+        statuses: () => ({ ...orchestrator.statuses }),
+        runFromNode: (nodeId) => runFromNodeWithToast(nodeId),
+        overlayText: () => overlaySummary(lastOverlayState),
+      };
+
       // 씬 전환 후 게이트/자동화가 보는 핸들은 항상 "이" 씬의 새 인스턴스들이다
       window.__sim = {
         engine,
@@ -2106,6 +2444,7 @@ async function boot(): Promise<void> {
         history: historyFacade,
         flowGraph: flowFacade,
         planner: plannerFacade,
+        orchestrator: orchestratorFacade,
         ...(playerFacade ? { player: playerFacade } : {}),
       };
 

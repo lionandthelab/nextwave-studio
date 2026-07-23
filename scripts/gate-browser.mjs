@@ -59,6 +59,7 @@ const SCENE_BY_EXPECT = {
   'scene-builder': 'arm-and-boxes', // Phase 7 씬 편집 — 로봇+박스 씬 위에서 편집 검증
   'flow-graph': 'arm-and-boxes', // Phase 8 Flow Graph — 시퀀스 있는 씬 위에서 그래프 편집 검증
   planner: 'arm-and-boxes', // Phase 9 NL Planner — 규칙 기반(오프라인) 백엔드로 결정론 검증
+  orchestration: 'arm-and-boxes', // Phase 10 실행 오케스트레이션 — arm-touch-box 시퀀스 위에서 트라이페인 동기 검증
 };
 
 // --expect=arm 어서션 상수
@@ -128,6 +129,12 @@ const FG_SKIP_SIM_BUDGET_SEC = 13;                 // 폴링 sim 예산 (timeout
 const PLANNER_BOXA_STEP_COUNT = 7;
 const PLANNER_SIM_BUDGET_SEC = 12;                 // Play→done sim 예산
 const PLANNER_EVENT_DONE_MAX_SIM_SEC = 9;          // 이벤트 해제 경로(≈6.7s) vs timeout(≈12s) 구분
+
+// ── Phase 10: orchestration 게이트 상수 (arm-and-boxes + arm-touch-box, 7 step) ──
+const ORCH_NODE_COUNT = 7;                         // arm-touch-box.sequence.json step 수
+const ORCH_SIM_BUDGET_SEC = 12;                    // Play→done sim 예산 (배리어 이벤트 해제 경로)
+const ORCH_REALTIME_DEADLINE_MS = 45000;           // 폴링 실시간 상한 (fast-forward/행 방지)
+const ORCH_STEP_MAX_SIM_SEC = 4;                   // stepNode 1개 노드의 sim 상한 (전체 ~8s의 일부)
 
 /** 두 엔티티 쌍 일치(순서 무관) */
 function isPair(event, idA, idB) {
@@ -1220,6 +1227,221 @@ async function main() {
       } else {
         fail('planner: gibberish → error with readable message (Console)', JSON.stringify(robustD));
       }
+    }
+
+    // ── Phase 10: orchestration — 노드 단위 실행 · 트라이페인 동기 · 재실행 (UX_DESIGN §5) ──
+    if (expectArg === 'orchestration') {
+      const orchStop = () => page.evaluate(() => window.__sim.orchestrator.stop());
+
+      // (a) 초기: 전 노드 pending · 활성 노드 없음 · player idle(무자동재생) · 오버레이 Idle
+      const init = await page.evaluate(() => {
+        const o = window.__sim.orchestrator;
+        const statuses = o.statuses();
+        return {
+          vals: Object.values(statuses),
+          count: Object.keys(statuses).length,
+          activeNodeId: o.activeNodeId(),
+          overlayText: o.overlayText(),
+          playerStatus: window.__sim.player.status,
+        };
+      });
+      const allPending = init.count === ORCH_NODE_COUNT && init.vals.every((s) => s === 'pending');
+      if (allPending && init.activeNodeId === null && init.playerStatus === 'idle'
+          && init.overlayText.includes('Idle')) {
+        pass('orchestration: initial all-pending, no active node, player idle, overlay Idle',
+          `overlay="${init.overlayText}"`);
+      } else {
+        fail('orchestration: initial all-pending, no active node, player idle, overlay Idle',
+          JSON.stringify(init));
+      }
+
+      // (b/c) Play → 상태 진행 + 충돌 + activeNodeId 추적 + 오버레이 running + 트라이페인 일관
+      const startSim = await page.evaluate(() => {
+        window.__sim.orchestrator.play();
+        return window.__sim.engine.simTimeSec;
+      });
+      const realDeadline = Date.now() + ORCH_REALTIME_DEADLINE_MS;
+      let sawActive = false, sawDone = false, runningOverlay = null, triPane = null, last = null;
+      for (;;) {
+        last = await page.evaluate(() => {
+          const o = window.__sim.orchestrator;
+          const vals = Object.values(o.statuses());
+          return {
+            status: window.__sim.player.status,
+            simTimeSec: window.__sim.engine.simTimeSec,
+            anyActive: vals.includes('active'),
+            anyDone: vals.includes('done'),
+            overlayText: o.overlayText(),
+            activeNodeId: o.activeNodeId(),
+          };
+        });
+        if (last.anyActive) sawActive = true;
+        if (last.anyDone) sawDone = true;
+        // 재생 중 관측되는 running 오버레이를 매 폴에서 최신값으로 잡는다 — 한 프레임 지연에
+        // 영구 실패하지 않도록(제품 수정으로 Play 순간부터 이미 'Running'이지만 방어적으로 갱신).
+        if (last.status === 'running' && last.anyActive) {
+          runningOverlay = last.overlayText;
+        }
+        // 트라이페인 스냅샷 — 활성 노드가 있는 한 순간에 그래프/오버레이/타임라인/facade 정합 확인
+        if (triPane === null && last.activeNodeId !== null && last.anyActive) {
+          triPane = await page.evaluate(() => {
+            const o = window.__sim.orchestrator;
+            const activeNodeId = o.activeNodeId();
+            const statuses = o.statuses();
+            const statusActiveId = Object.keys(statuses).find((k) => statuses[k] === 'active') ?? null;
+            const nodeIds = window.__sim.flowGraph.nodeIds();
+            const markers = [...document.querySelectorAll('[data-testid="timeline-marker"]')];
+            const tlIdx = markers.findIndex((m) => m.getAttribute('aria-current') === 'step');
+            const el = document.querySelector(`[data-fg-node="${activeNodeId}"]`);
+            // 뷰포트 오버레이 'node k/n'을 파싱해 노드 id로 되돌린다 — 오버레이를 트라이페인
+            // 등식의 독립 항으로 넣어 "graph == overlay == timeline == facade"를 실제로 검증한다.
+            const om = o.overlayText().match(/node (\d+)\/(\d+)/);
+            const overlayNodeId = om ? (nodeIds[Number(om[1]) - 1] ?? null) : null;
+            return {
+              activeNodeId,
+              statusActiveId,
+              tlNodeId: tlIdx >= 0 ? (nodeIds[tlIdx] ?? null) : null,
+              overlayNodeId,
+              hasSelected: el ? el.classList.contains('rsw-fg-node--selected') : false,
+              hasActiveDot: el ? el.querySelector('.rsw-fg-dot--active') !== null : false,
+            };
+          });
+        }
+        if (last.status === 'done') break;
+        if (last.simTimeSec - startSim > ORCH_SIM_BUDGET_SEC || Date.now() > realDeadline) break;
+        await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+      }
+
+      // (b) 상태 진행 (active → done 관측)
+      if (sawActive && sawDone) pass('orchestration: node statuses progress (active then done)');
+      else fail('orchestration: node statuses progress (active then done)', `sawActive=${sawActive} sawDone=${sawDone}`);
+
+      // (b) 충돌 arm×box_a start 이력 (배리어 대상 접촉 — 실제 접근)
+      const history = await page.evaluate((limit) => window.__sim.collision.recent(limit), HISTORY_FETCH_LIMIT);
+      const armBoxA = history.filter((e) => e.phase === 'start' && isPair(e, 'arm', 'box_a'));
+      if (armBoxA.length >= 1) {
+        pass('orchestration: collision history has arm×box_a start', `timeSec=[${armBoxA.map((e) => e.timeSec.toFixed(3)).join(', ')}]`);
+      } else {
+        fail('orchestration: collision history has arm×box_a start', `history=${JSON.stringify(history.slice(-20))}`);
+      }
+
+      // (b) activeNodeId 추적 + 오버레이 running 지시자 + 캔버스 활성 클래스(DOM)
+      if (triPane !== null && (triPane.hasSelected || triPane.hasActiveDot)) {
+        pass('orchestration: activeNodeId tracked + canvas active class present',
+          `active=${triPane.activeNodeId} selected=${triPane.hasSelected} dot=${triPane.hasActiveDot}`);
+      } else {
+        fail('orchestration: activeNodeId tracked + canvas active class present', JSON.stringify(triPane));
+      }
+      if (runningOverlay && runningOverlay.includes('node') && runningOverlay.includes('Running')) {
+        pass('orchestration: overlay shows running + node progress', `overlay="${runningOverlay}"`);
+      } else {
+        fail('orchestration: overlay shows running + node progress', `overlay="${runningOverlay}"`);
+      }
+
+      // (c) 트라이페인 일관: facade 활성 == 상태맵 active == 뷰포트 오버레이 node == Timeline
+      // 활성 마커가 모두 같은 노드 (네 항 모두 등식에 포함 — 오버레이는 독립 파싱 항이다)
+      if (triPane && triPane.activeNodeId !== null
+          && triPane.activeNodeId === triPane.statusActiveId
+          && triPane.activeNodeId === triPane.overlayNodeId
+          && triPane.activeNodeId === triPane.tlNodeId) {
+        pass('orchestration: tri-pane consistent (facade == statusmap == overlay node == timeline marker)',
+          `node=${triPane.activeNodeId}`);
+      } else {
+        fail('orchestration: tri-pane consistent (facade == statusmap == overlay node == timeline marker)', JSON.stringify(triPane));
+      }
+
+      // (d) 완주 → 전 노드 done · 오버레이 Idle (시퀀스 미실행 상태로 접힘)
+      const final = await page.evaluate(() => {
+        const o = window.__sim.orchestrator;
+        const statuses = o.statuses();
+        return {
+          vals: Object.values(statuses),
+          count: Object.keys(statuses).length,
+          overlayText: o.overlayText(),
+          playerStatus: window.__sim.player.status,
+        };
+      });
+      const allDone = final.count === ORCH_NODE_COUNT && final.vals.every((s) => s === 'done');
+      if (last?.status === 'done' && allDone && final.overlayText.includes('Idle')) {
+        pass('orchestration: sequence completes → all done, overlay Idle',
+          `elapsed=${(last.simTimeSec - startSim).toFixed(2)}s overlay="${final.overlayText}"`);
+      } else {
+        fail('orchestration: sequence completes → all done, overlay Idle',
+          JSON.stringify({ lastStatus: last?.status, final }));
+      }
+
+      // (e) stepNode: 신선한 리셋에서 정확히 노드 1개 전진 (커서 +1, sim은 일부만 전진)
+      await orchStop();
+      const beforeStep = await page.evaluate(() => ({
+        index: window.__sim.player.currentStepIndex,
+        simTimeSec: window.__sim.engine.simTimeSec,
+      }));
+      await page.evaluate(() => window.__sim.orchestrator.stepNode());
+      const stepDeadline = Date.now() + ORCH_REALTIME_DEADLINE_MS;
+      let stepped = null;
+      for (;;) {
+        stepped = await page.evaluate(() => ({
+          index: window.__sim.player.currentStepIndex,
+          simTimeSec: window.__sim.engine.simTimeSec,
+          engineState: window.__sim.engine.state,
+        }));
+        if (stepped.engineState === 'paused' && stepped.index > beforeStep.index) break;
+        if (Date.now() > stepDeadline) break;
+        await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+      }
+      const stepAdvance = stepped.simTimeSec - beforeStep.simTimeSec;
+      if (stepped.index === beforeStep.index + 1 && stepped.engineState === 'paused'
+          && stepAdvance > 0 && stepAdvance < ORCH_STEP_MAX_SIM_SEC) {
+        pass('orchestration: stepNode advances exactly one node then pauses',
+          `index ${beforeStep.index}→${stepped.index}, +${stepAdvance.toFixed(2)}s sim`);
+      } else {
+        fail('orchestration: stepNode advances exactly one node then pauses',
+          JSON.stringify({ beforeStep, stepped, stepAdvance }));
+      }
+
+      // (f) setAutoPause 토글이 facade + UI 체크박스에 반영 (unexpected 충돌 강제는 비결정적 — 배선만 검증)
+      const autoPause = await page.evaluate(() => {
+        const o = window.__sim.orchestrator;
+        o.setAutoPause(true);
+        const onFlag = o.autoPause();
+        const checkbox = document.querySelector('[data-testid="autopause-toggle"]');
+        const checked = checkbox ? checkbox.checked : null;
+        o.setAutoPause(false);
+        return { onFlag, checked, offFlag: o.autoPause() };
+      });
+      if (autoPause.onFlag === true && autoPause.checked === true && autoPause.offFlag === false) {
+        pass('orchestration: setAutoPause(true) reflected in facade + UI checkbox, toggles off');
+      } else {
+        fail('orchestration: setAutoPause(true) reflected in facade + UI checkbox, toggles off', JSON.stringify(autoPause));
+      }
+
+      // (g) runFromNode(secondNode) → 되감고 재생 (sim 리셋 후 전진, 크래시 없음, 유효 종료)
+      await orchStop();
+      const nodeIds = await page.evaluate(() => window.__sim.flowGraph.nodeIds());
+      const secondNodeId = nodeIds[1];
+      await page.evaluate((id) => window.__sim.orchestrator.runFromNode(id), secondNodeId);
+      const rerunDeadline = Date.now() + ORCH_REALTIME_DEADLINE_MS;
+      let rerun = null;
+      for (;;) {
+        rerun = await page.evaluate(() => ({
+          index: window.__sim.player.currentStepIndex,
+          simTimeSec: window.__sim.engine.simTimeSec,
+          engineState: window.__sim.engine.state,
+          activeNodeId: window.__sim.orchestrator.activeNodeId(),
+        }));
+        if (rerun.engineState === 'paused' && rerun.index >= 1) break;
+        if (Date.now() > rerunDeadline) break;
+        await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+      }
+      if (rerun.index >= 1 && rerun.simTimeSec > 0 && rerun.activeNodeId === secondNodeId) {
+        pass('orchestration: runFromNode(second) rewinds then fast-forwards to that node',
+          `index=${rerun.index}, sim=${rerun.simTimeSec.toFixed(2)}s, active=${rerun.activeNodeId}`);
+      } else {
+        fail('orchestration: runFromNode(second) rewinds then fast-forwards to that node', JSON.stringify(rerun));
+      }
+
+      // 다음 검증(공통 페이지 에러)을 위해 정지로 리셋
+      await orchStop();
     }
 
     // 페이지 에러는 씬별 상호작용까지 끝난 뒤 마지막에 판정한다
