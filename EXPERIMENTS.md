@@ -705,3 +705,215 @@ CLAUDE.md/docs에 반영). 새 항목은 아래에 추가하고 기존 항목은
   src/ui/command-bar/scene-controls.ts(씬 없음 상태·토스트 토큰),
   src/ui/command-bar/json-viewer.ts(inert), src/ui/dock/timeline.ts(successBorder),
   README.md(재작성), EXPERIMENTS.md
+
+## [2026-07-23] Phase 7 — 3D 파일 임포트 파이프라인 (mesh-import + import-dialog)
+
+- **범위**: `src/render/mesh-import.ts`(파싱·prepareForScene·MeshAssetStore),
+  `src/ui/library/import-dialog.ts`(UX §4.4 다이얼로그), `src/render/mesh-import.test.ts`.
+  씬 편입 배선(RenderSceneApi.addMeshAsset / world의 convexHull·trimesh 지원 /
+  저장 경고)은 통합자 몫으로 남김 — 아래 "통합 필요" 참조.
+- **포맷**: glTF(.glb/.gltf)·STL·OBJ — 확장자 기반 감지, GLTFLoader.parseAsync /
+  STLLoader.parse / OBJLoader.parse(text). 단일 파일 전용(외부 .bin/텍스처 참조
+  .gltf 미지원 — 오류 안내에 .glb 권장 명시, MTL 미지원 — 재질 기본값).
+- **축 변환**: Z-up→Y-up은 URDF 경로(render/urdf.ts axisFix)와 동일한 -π/2 X 회전
+  규약. URDF는 축이 고정 규약이라 로더가 항상 변환하지만, 임포트 메시는 원본 축을
+  알 수 없어 사용자가 다이얼로그에서 선택한다(UX §4.4). 임포트 경로의 축 변환
+  지점은 prepareForScene 한 곳.
+- **피벗 규약**: prepareForScene이 피벗을 bbox "바닥 중심"으로 재정렬 — 엔티티
+  position y=0이 곧 지면 안착. AABB 전략의 box collider만 중심 오프셋(offset)이
+  필요하고 hull/trimesh 정점에는 재정렬이 이미 반영된다.
+- **데시메이션**: convex hull 입력 정점을 그리드 해시로 ≤ 2048(MAX_HULL_POINTS)
+  보장. AABB 균등 그리드에서 점유 셀당 최초 등장 정점 1개(입력 순서 — 결정론,
+  셀 중심 스냅 없음 → hull이 원본을 벗어나지 않음). 분할 수 40에서 시작해 3/4씩
+  축소, ⌊∛2048⌋=12에서 12³=1728 ≤ 2048로 종료 보장.
+- **trimesh 안전 규칙**(DATA_MODEL §2): 다이얼로그가 Trimesh 전략 선택 시 유형을
+  Static으로 강제(Object 버튼 비활성 + 안내 문구). 강제 로직은 순수 함수
+  `forcedEntityKind`가 소유하고 EntitySpec 조립(`buildImportedEntitySpec`)도 같은
+  함수를 소비 — UI 우회 경로가 없다. trimesh 데이터는 데시메이션 없이 전체
+  삼각형(병합 정점+인덱스)을 쓴다(정적 전용 — 형상 충실도 우선).
+- **MeshAssetStore 결정**: MeshAssetResolver(core/scene-edit-types) 구현.
+  ref = 'asset://<n>' 단조 증가. trimesh 등록 에셋의 getPoints는 (getIndices와
+  쌍을 이루도록) trimesh 정점을 돌려준다 — 같은 ref에 convexHull을 써도 전체
+  정점 hull로 여전히 정확. getObject는 "원형"을 주며 씬 투입은 clone(true) 필수,
+  clone은 geometry/material을 공유하므로 임포트 시각 노드에 disposeMeshResources
+  금지(해제는 store.clear() 일괄) — 통합자 주의 사항.
+- **한계(세션 한정 에셋)**: asset:// ref는 현 세션 MeshAssetStore에서만 해석된다.
+  씬 저장(💾) 시 메시 데이터가 JSON에 내장되지 않으므로 다른 세션에서 불러오면
+  해당 엔티티 복원 불가. 저장 경로는 `collectAssetRefs(spec)`가 비어 있지 않으면
+  `ASSET_SAVE_WARNING_KO`를 표시해야 한다(통합자 배선). **백로그**: data-URI 내장
+  (scene-edit-types serializeRef 방향)으로 승격.
+- **통합 필요(다른 소유 파일 — 이번 변경에서 손대지 않음)**:
+  1) `RenderSceneApi`(core/scene-loader.ts)에 `addMeshAsset(ref: string): VisualNode`
+     추가 + buildVisual의 'mesh' 케이스 라우팅, main.ts 글루가
+     `store.getObject(ref)` → `clone(true)` → 씬 추가로 구현.
+  2) `core/world.ts` createCollider의 convexHull/trimesh 분기 — MeshAssetResolver
+     주입(RAPIER.ColliderDesc.convexHull(points) / trimesh(points, indices)).
+  3) 💾 저장 경로에 collectAssetRefs + ASSET_SAVE_WARNING_KO 경고.
+- 검증: tsc 통과, eslint 경고 0, vitest 381/381 통과(신규 29건 — 데시메이션 상한·
+  bbox/피벗/Z-up 회전 수학·STL/OBJ 파싱·store 계약·폼→EntitySpec 매핑·검증 통과·
+  trimesh→Static 강제).
+- 영향 파일: src/render/mesh-import.ts(신설), src/ui/library/import-dialog.ts(신설),
+  src/render/mesh-import.test.ts(신설), EXPERIMENTS.md
+
+## [2026-07-23] Phase 7 — Scene Builder 통합 (워크스페이스 조립 + 편집 배선 + Undo/Redo)
+
+- **범위**: `src/main.ts`(워크스페이스 조립·SceneEditor/상호작용/편집 폼/임포트 배선),
+  `src/ui/history.ts`(+테스트, 신설), `src/ui/workspace.ts` 슬롯 편입, 게이트
+  `--expect=scene-builder` 추가. 병렬 랜딩된 Phase 7 모듈(코어 SceneEditor · 워크스페이스
+  셸 · ViewportInteraction · entity-editor · mesh-import)의 통합 지점.
+
+### 병렬 워크스트림의 결정 사항 (통합자 대리 기록 — 각 소유 랜인 EXPERIMENTS 미기재분)
+- **엔티티 빌드 루틴 추출**: SceneLoader의 엔티티 1개 몫 생성이 exported 함수
+  (`buildEntity`/`buildObjectEntity`/`attachRobotPhysics`)로 추출되어 SceneLoader.build와
+  SceneEditorImpl이 **같은 코드**를 쓴다 — 엔티티 구성의 단일 진실(로직 드리프트 방지).
+- **SceneHandle.builtEntities 라이브 맵**: 빌드 레코드 Map을 SceneHandle과 SceneEditor가
+  공유한다 — 편집(add/remove/재빌드) 후에도 reset()/dispose()가 항상 현재 상태를 순회.
+  기존 `visualNodes`는 빌드 시점 스냅샷으로 남고(호환), 최신 시각 노드는 builtEntities가
+  진실이다 — main의 `visualNodeOf`/픽킹 맵이 이를 소비한다.
+- **RobotRegistry.remove(entityId)** 추가(9줄, 미등록 id no-op): 로봇 제거/개명 시
+  바인딩을 해제하지 않으면 Engine preStep tickAll()이 삭제된 바디에 setKinematicPose를
+  시도해 던진다.
+- **RapierWorld 3번째 ctor 인자 `MeshAssetResolver`**(선택): convexHull/trimesh collider의
+  asset:// ref 해석 지점. 미주입 시 해당 shape은 한국어 오류(프리미티브 전용 씬은 무영향).
+  참고: 현 rapier3d-compat은 ColliderDesc.convexHull이 desc 시점에 null을 돌려주지 않아
+  '볼록 껍질 생성 실패' 분기는 mock으로만 테스트된다(경계 자체의 테스트).
+- **로봇 rename = 동기 재부착**: renameEntity는 URDF 재로드 없이 기존 RobotHandle에
+  attachRobotPhysics로 새 id의 물리를 재부착한다(관절 상태 보존, world 핸들 매핑은
+  새 id로 재생성 — PhysicsWorld에 rename 연산이 없다). ControlSequence의 id 참조 갱신은
+  범위 밖 — 시퀀스 검증이 로드/재생 시점에 다시 잡는다.
+- **라이브러리 템플릿 그룹 배정 편차(의도)**: 동적 오브젝트 collidesWith에 SENSOR_ZONE
+  포함(과제 문안엔 없음) — Rapier 쌍 필터는 양방향이라 OBJECT 측에 없으면 라이브러리
+  Sensor Zone이 사물을 감지하지 못한다(pick-and-place 샘플과 동일 배정). Plane 템플릿은
+  dynamic OBJECT가 아니라 **static ENV**(받침/작업대 용도 — CLAUDE.md §5 정적 환경 규약).
+  Sensor Zone의 ROBOT 감지는 로봇 링크 필터(ROBOT_COLLIDES_WITH)에 SENSOR_ZONE이 없어
+  아직 발화하지 않는다 — 데이터로는 전방 호환(코어 소유자 백로그).
+- **interaction 계층 색상**: render는 ui/theme을 import하지 않으므로 액센트 색은 생성자
+  opts 기본값(0xe67e22 — COLOR.accent와 동일 값 의도적 중복)으로 갖는다.
+
+### 통합 결정
+- **Undo/Redo = serialize() 스냅샷 + 전체 씬 재로드** (`ui/history.ts`, cap 50):
+  부분 diff 적용 대신 검증된 SceneSpec 전체를 loadScene 경로(검증→teardown→클린 빌드)로
+  복원한다 — 정확성 우선, 물리/시각/레지스트리 정합이 구조적으로 보장된다. 로봇 URDF
+  재로드는 브라우저 HTTP 캐시로 흡수(실측 재로드 ~수백 ms). 시퀀스는 원본 JSON을 새
+  스펙에 재검증해 유효할 때만 유지(무효 → 미로드 + 콘솔 경고, 불변식 §2.9 유지).
+  - 스냅샷은 noteChange 시점 **즉시 캡처**(eager) + 트레일링 디바운스(300ms)로 연속
+    조정 burst(스크럽/기즈모)를 1장에 합친다. 지연 캡처였다면 burst 도중 구조 변경이
+    끼면 이전 상태가 유실된다(게이트에서 실제 발견) — 구조 변경(add/remove/rename)은
+    flushPending으로 경계를 세워 개별 스냅샷("undo 1회 = 구조 변경 1개").
+  - 복원 실패(전환 busy/빌드 실패) 시 스택 이동을 되돌린다 — 스택과 씬이 어긋나지 않음.
+  - 히스토리는 앱 수명(재로드를 가로질러 유지), 프리셋 전환/업로드 시에만 reset.
+- **기즈모 commit 의미론** (render/interaction.ts 계약 수용): 드래그 "중"은 순수 시각
+  프리뷰(물리 불변), 드래그 종료 commit 시점에 SceneEditor로 라우팅되어 물리(teleport)와
+  정합된다 — 불변식 §2.1(물리가 진실)을 편집 UX와 양립시키는 유일한 지점. scale 모드는
+  프리미티브만 **치수 편집으로 변환**(box: 축별 배율, sphere: 평균, cylinder/capsule:
+  xz평균 반지름·y 높이, 하한 클램프)하고 updateDimensions 재빌드가 오브젝트 스케일을
+  1로 소거한다("기즈모 스케일=빠른 조정, 진실은 치수" — UX §3.3). 비프리미티브는 거부
+  + 시각 원복.
+- **edit-during-play 정책**: 편집은 언제든 허용 — 동적 엔티티는 teleport(속도 0 초기화)
+  후 물리로 반응한다. 재생 중 기즈모 드래그는 RenderSync가 매 프레임 시각을 덮어써
+  시각적으로 싸우므로 일시정지/idle 편집을 권장(다음 sync에서 물리 진실로 재수렴).
+  Undo/Redo는 재생 중이면 engine.stop 후 진행(결정론적 재로드) + 한국어 토스트
+  '되돌리기: 시뮬 정지됨'. 안전 가드: arm된 시퀀스 재생 중 로봇 제거는 먼저 ⏹ Stop
+  (사라진 로봇을 player가 구동하다 rAF 루프가 죽는 것 방지).
+- **asset:// 세션 한정 한계(정직한 제약)**: 임포트 메시는 앱 수명 MeshAssetStore에서만
+  해석된다(씬 전환/undo 재로드 유지). 씬 저장(💾)은 이제 editor.serialize()(현재 편집
+  상태)를 내보내며, asset:// 참조가 있으면 ASSET_SAVE_WARNING_KO 경고 토스트+콘솔 로그
+  — 다른 세션에서 열면 해당 엔티티는 복원 불가. 백로그: data-URI 내장(serializeRef).
+  RenderSceneApi에 **선택 멤버** `addMeshAsset?(ref)` 추가(필수로 하면 헤드리스 테스트
+  fake 전부가 깨진다 — 미구현 환경은 mesh visual에서 한국어 오류). 임포트 clone은
+  geometry/material을 원형과 공유 — renderApi.remove가 userData.rswAssetRef 마커로
+  disposeMeshResources를 건너뛴다(해제는 store.clear() 일괄).
+- **워크스페이스 편입**: 커맨드바/독/우측 스택/뷰포트 상태선의 fixed 오버레이 배치를
+  슬롯 흐름(static/absolute-in-slot)으로 중화. 렌더러 호스트(#app)를 뷰포트 슬롯으로
+  reparent(absolute inset 0) — 스플리터 드래그/접기 후 notifyResize(window resize 합성)
+  로 캔버스가 따라온다. Renderer에 domElement/orbitControls getter 추가(ViewportInteraction
+  주입 — querySelector 의존 제거). 선택 동기화는 단일 경로: interaction.onSelect →
+  inspector.select + entity-editor.showFor(각 모듈 변경 가드로 루프 없음).
+- **three r169 TransformControls.dispose 버그 우회**: r169의 dispose()는 Controls
+  리팩터링에서 남은 this.traverse 호출로 TypeError를 던진다(r170에서 수정). 씬 전환/
+  undo 재로드가 전부 죽는 실제 크래시로 발견 — disconnect() + 헬퍼 서브트리 수동 해제로
+  대체 (render/interaction.ts dispose).
+- **한계(기록)**: 임시 관절 패널은 빌드 시점 로봇 스냅샷 UI — 편집으로 나중에 추가된
+  로봇은 나타나지 않는다(관절 확인은 인스펙터, 정식 편집 UI는 후속 Phase). 라이브러리
+  Import ⬆ 카드는 LibraryDeps.onImportRequest(선택 dep)로 추가 — 미주입 시 미렌더.
+- **검증(전부 실측)**: `tsc --noEmit` 통과, eslint 경고 0, vitest **418/418** 통과
+  (신규 12건 — history 스택/디바운스/경계/실패 복원), `vite build` 성공. 브라우저 게이트
+  8종 **ALL PASS**: 기존 7종(falling-boxes/arm/arm-sequence/pick-and-place/
+  obstacle-avoidance/collision-testbed/scene-switch) + **scene-builder**(라이브러리 카드
+  7종 렌더, placeTemplate로 box_1 추가·바디 생성·인스펙터 목록 반영·자동 선택,
+  updateTransform teleport 즉시 반영, updateDimensions 0.05→0.1 후 정착 y=0.095,
+  removeEntity 정리, undo로 box_1 복원(전체 재로드) 후 sim 전진, 페이지 에러 0).
+- 영향 파일: src/main.ts(재작성), src/ui/history.ts·history.test.ts(신설),
+  src/render/renderer.ts(getter 2종), src/render/interaction.ts(dispose 우회),
+  src/core/scene-loader.ts(addMeshAsset 선택 멤버 + mesh visual 분기),
+  src/ui/viewport/statusline.ts(슬롯 absolute + 빈 씬 힌트 토글),
+  src/ui/library/library.ts(Import ⬆ 카드), scripts/gate-browser.mjs(scene-builder),
+  EXPERIMENTS.md
+
+## [2026-07-23] Phase 7 리뷰 후속 수정 — 기즈모 드래그/커밋 경합 + 편집 정책 집행
+
+### 배경 (리뷰 발견)
+- **기즈모 commit 경합(major)**: Engine.frame은 playing/paused/idle 모두에서 rAF마다
+  sync.apply를 호출한다 — 드래그 중 TransformControls가 움직인 시각 노드를 매 프레임
+  물리 pose로 되돌려 (1) 드래그 프리뷰가 포인터를 따라오지 않고, (2) pointerup 시점
+  matrixWorld decompose가 대개 물리 pose(≈드래그 전)로 리셋된 값을 읽어 드래그가
+  조용히 유실됐다(release-while-moving일 때만 우연히 성공).
+- **편집 teleport 후 stale prev(major)**: SceneEditor.updateTransform이 바디를
+  teleport해도 RenderSync prev 스냅샷을 갱신하지 않아, paused 프레임의
+  apply(alpha<1)가 편집 전 pose를 계속 보간해 그렸다(SceneHandle.reset()은 같은
+  함정을 sync.commit()으로 이미 잡고 있었다 — 편집 경로만 누락).
+- **임포트 동적 collider 필터(major)**: SENSOR_ZONE 누락 — Rapier 쌍 필터는
+  양방향이라 임포트 사물이 Sensor Zone에 감지되지 않았다(라이브러리 템플릿과 불일치).
+
+### 결정
+- **드래그 pose 캡처 = objectChange 스냅샷**: commit은 라이브 matrixWorld가 아니라
+  드래그 중 objectChange마다 캡처한 최신 트랜스폼을 발행한다(RenderSync 덮어쓰기에
+  면역). 움직임 없는 드래그(기즈모 축 단순 클릭)는 commit을 발행하지 않는다 —
+  보간 렌더 pose가 편집 경로로 물리에 역류하는 no-op teleport·잉여 undo 스냅샷 제거
+  (transformsAlmostEqual, q≈-q 동일 처리, COMMIT_MIN_DELTA=1e-6).
+- **드래그 수명 훅 onDraggingChanged**: dragging=false 통지는 commit 발행 "이후" —
+  main.ts가 드래그 시작 시 대상 바디 sync 바인딩을 해제(프리뷰가 실제로 포인터를
+  따라옴), 종료 시 재바인딩(prev = teleport된 물리 pose, 다음 프레임부터 재수렴).
+- **edit-during-play 정책 변경 (기존 "언제든 허용" 항목을 대체)**: 살아있는 바디를
+  변형하는 UI 편집(기즈모 드래그 시작·runEdit 경유 transform/dimensions/physics)은
+  재생 중이면 **자동 일시정지** + 한국어 토스트('… 시뮬 일시정지됨 — ▶ Play로 재개').
+  근거: core 계약(scene-editor.ts/types.ts "teleport는 씬 리셋/편집 전용 — 시뮬 중
+  사용 금지")과 구현이 상충했고, 특히 로봇 루트 드래그는 playing 중 preStep tickAll이
+  드래그 중간 pose를 kinematic 링크로 push해 "드래그=시각 프리뷰" 계약을 깼다(포인터
+  속도 스윕 임펄스·waitForCollision 오발 가능). 추가(add/place)·remove·rename은 기존
+  정책 유지(재생 중 허용 — 기존 궤적을 편집 API로 변형하지 않음). __sim.editor
+  파사드(게이트/자동화)는 의도적으로 게이트를 우회한다 — teleport는 속도 0 초기화로
+  spec/initialPose 정합이 유지되어 리플레이 결정론을 깨지 않는다(scene-builder 게이트는
+  재생 중 파사드 편집 후 정착 y를 검증한다).
+- **updateDimensions 다중 collider 거부**: colliders[0]만 교체하면 나머지 collider가
+  이전 형상으로 남아 시각·물리가 조용히 어긋난다 — collider 2개 이상이면 한국어
+  오류로 거부(수작성 씬 JSON만 해당, 라이브러리/임포트는 항상 1개).
+- **hull 데시메이션 대표점 = AABB 중심 최원점**: 셀당 최초 등장 정점 유지는 비극점이
+  hull 극점(모서리)을 밀어내 hull이 시각 메시보다 최대 셀 대각선(최소 divisions 12에서
+  축당 ~8%)만큼 작아질 수 있었다 — 셀당 중심 최원점 선택(동거리 시 최초 등장,
+  출력 순서 = 셀 최초 점유 순 — 결정론 유지)으로 극점 손실을 셀 이하 오목부로 한정.
+  과대 근사는 여전히 없음(대표점은 항상 입력 정점).
+- **RenderSyncLike에 commit 추가** (Pick bind|unbind → +commit): SceneEditor.
+  updateTransform이 teleport 후 sync.commit()으로 prev를 갱신한다(reset()과 동일 계약).
+- **액센트 색 주입**: main.ts가 ViewportInteraction 생성 시 ui/theme COLOR.accent를
+  accentColorHex로 주입 — interaction.ts의 중복 상수는 진짜 fallback으로 강등.
+- **임포트 동적 collider**: collidesWith에 SENSOR_ZONE 추가(템플릿 OBJECT_COLLIDES_WITH
+  와 동일 배정 — 정렬 회귀 테스트 추가). Static(ENV)은 기존 유지.
+- **ui→render 헤더 주석 정정**: import-dialog.ts의 "ui/viewport가 render를 래핑하는
+  것과 같은 방향" 주장 삭제(부정확 — statusline은 render를 import하지 않음). 실제
+  근거(하향 의존·역전 없음·three 불투명 통과)로 교체. 의존 주입 리팩터링은 보류
+  (리뷰어 판정: non-blocking, 기존 ui→schema 관례와 일관).
+
+### 검증 (전부 실측)
+- `tsc --noEmit` 통과, eslint 경고 0, vitest **425/425** 통과 (신규 7건 —
+  transformsAlmostEqual 3, teleport 후 sync prev 갱신 1, 다중 collider 거부 1,
+  데시메이션 극점 보존 1, 임포트↔템플릿 collider 정렬 1), `vite build` 성공.
+- 브라우저 게이트 8종 **ALL PASS**: falling-boxes / arm / arm-sequence /
+  pick-and-place / obstacle-avoidance / collision-testbed / scene-switch /
+  scene-builder (재생 중 파사드 편집·teleport·정착 y·undo 재로드 포함 — 편집
+  일시정지 게이트가 파사드를 우회함을 실측 확인).
+- 영향 파일: src/render/interaction.ts(드래그 캡처·no-op 스킵·onDraggingChanged),
+  src/render/mesh-import.ts(대표점 선택), src/core/scene-editor.ts(sync.commit +
+  다중 collider 가드), src/core/scene-loader.ts(RenderSyncLike +commit),
+  src/ui/library/import-dialog.ts(SENSOR_ZONE + 헤더 정정), src/main.ts(액센트 주입 ·
+  pauseForEditIfPlaying · 드래그 sync 서스펜드), 테스트 3파일(+7건), EXPERIMENTS.md

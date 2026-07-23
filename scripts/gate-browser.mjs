@@ -17,6 +17,10 @@
 //   --expect=scene-switch : Phase 6 런타임 씬 전환 스모크 — arm-and-boxes 부트 →
 //   UI select(change 이벤트)로 collision-testbed 전환 → spec.name/엔티티 수/sim 전진
 //   검증 → arm-and-boxes로 복귀(URDF 재로드) → 동일 검증 + 페이지 에러 0건.
+//   --expect=scene-builder : Phase 7 Scene Builder — __sim.editor 파사드로 템플릿 추가
+//   (라이브러리 배치 경로) → 바디 존재/인스펙터 목록 → updateTransform teleport →
+//   updateDimensions 후 물리 정착 y 관측 → removeEntity 정리 → __sim.history.undo로
+//   엔티티 복원(전체 재로드) → 라이브러리 카드 DOM ≥ 6 + 페이지 에러 0건.
 
 import { spawn, execSync } from 'node:child_process';
 import { chromium } from 'playwright';
@@ -42,6 +46,7 @@ const SCENE_BY_EXPECT = {
   'obstacle-avoidance': 'obstacle-avoidance',
   'collision-testbed': 'collision-testbed',
   'scene-switch': 'arm-and-boxes', // 런타임 전환 스모크 — arm-and-boxes에서 출발
+  'scene-builder': 'arm-and-boxes', // Phase 7 씬 편집 — 로봇+박스 씬 위에서 편집 검증
 };
 
 // --expect=arm 어서션 상수
@@ -88,6 +93,14 @@ const SWITCH_TARGET_SCENE = 'collision-testbed';   // 로봇 없는 씬으로 �
 const SWITCH_BACK_SCENE = 'arm-and-boxes';         // 로봇 씬으로 복귀 (URDF 재로드 경로)
 const SWITCH_REALTIME_DEADLINE_MS = 20000;         // 전환(URDF 로드 포함) 실시간 상한
 const SWITCH_MIN_SIM_ADVANCE_SEC = 0.5;            // 전환 직후 새 엔진이 이만큼 전진해야 함
+// --expect=scene-builder (Phase 7 Scene Builder — __sim.editor/__sim.history 파사드)
+const SB_ADD_POSITION = [0.2, 0.05, 0.2];          // box 템플릿 추가 위치 (기존 엔티티와 이격)
+const SB_MOVE_POSITION = [0.5, 0.3, 0.35];         // updateTransform 목표 (자유 낙하 공간)
+const SB_NEW_HALF_EXTENT_M = 0.1;                  // updateDimensions 목표 halfExtents (0.05→0.1)
+const SB_SETTLE_Y_TOLERANCE_M = 0.03;              // 정착 y ≈ halfExtent 판정 허용 오차
+const SB_POSE_TOLERANCE_M = 1e-3;                  // teleport 직후 pose 일치 허용 오차
+const SB_SETTLE_REALTIME_DEADLINE_MS = 15000;      // 치수 변경 후 정착 폴링 실시간 상한
+const SB_MIN_LIBRARY_CARDS = 6;                    // 라이브러리 템플릿 카드 최소 개수
 
 /** 두 엔티티 쌍 일치(순서 무관) */
 function isPair(event, idA, idB) {
@@ -686,6 +699,139 @@ async function main() {
           `${advanceAfterBack.fromSec.toFixed(2)}s → ${advanceAfterBack.toSec.toFixed(2)}s`);
       } else {
         fail('scene-switch: sim advances after switch-back', JSON.stringify(advanceAfterBack));
+      }
+    }
+
+    // ── Phase 7: scene-builder — __sim.editor/__sim.history 파사드로 씬 편집 검증 ──
+    if (expectArg === 'scene-builder') {
+      // (f) 라이브러리 DOM: 템플릿 카드 ≥ SB_MIN_LIBRARY_CARDS (워크스페이스 좌 슬롯)
+      const cardCount = await page.$$eval('[data-testid^="library-card-"]', (els) => els.length);
+      if (cardCount >= SB_MIN_LIBRARY_CARDS) {
+        pass(`scene-builder: library renders >= ${SB_MIN_LIBRARY_CARDS} template cards`, `cards=${cardCount}`);
+      } else {
+        fail(`scene-builder: library renders >= ${SB_MIN_LIBRARY_CARDS} template cards`, `cards=${cardCount}`);
+      }
+
+      // (a) 프로그램적 addEntity — box 템플릿을 지정 위치에 추가 (라이브러리 배치 경로)
+      const added = await page.evaluate(async (position) => {
+        const s = window.__sim;
+        const before = s.editor.entityIds().length;
+        const id = await s.editor.placeTemplate('box', position);
+        const bodies = s.world.bodiesOfEntity(id);
+        return {
+          id,
+          before,
+          after: s.editor.entityIds().length,
+          bodyCount: bodies.length,
+          pose: bodies.length > 0 ? s.world.getPose(bodies[0]) : null,
+          pickables: s.editor.pickableIds(),
+          selected: s.editor.selectedId(),
+        };
+      }, SB_ADD_POSITION);
+
+      if (added.after === added.before + 1 && added.bodyCount === 1) {
+        pass('scene-builder: addEntity(+1 entity, body created in world)',
+          `id=${added.id}, entities ${added.before}→${added.after}`);
+      } else {
+        fail('scene-builder: addEntity(+1 entity, body created in world)', JSON.stringify(added));
+      }
+      const posOk = added.pose
+        && Math.abs(added.pose.position[0] - SB_ADD_POSITION[0]) < SB_POSE_TOLERANCE_M
+        && Math.abs(added.pose.position[2] - SB_ADD_POSITION[2]) < SB_POSE_TOLERANCE_M;
+      if (posOk) {
+        pass('scene-builder: added body spawned at requested x/z', JSON.stringify(added.pose.position));
+      } else {
+        fail('scene-builder: added body spawned at requested x/z', JSON.stringify(added.pose));
+      }
+      if (added.pickables.includes(added.id) && added.selected === added.id) {
+        pass('scene-builder: new entity pickable + auto-selected');
+      } else {
+        fail('scene-builder: new entity pickable + auto-selected',
+          `pickables=${JSON.stringify(added.pickables)} selected=${added.selected}`);
+      }
+      const inInspector = await page.$$eval(
+        '[data-testid="inspector-entity"]',
+        (rows, id) => rows.some((r) => (r.textContent ?? '').includes(id)),
+        added.id,
+      );
+      if (inInspector) pass('scene-builder: inspector list shows new entity');
+      else fail('scene-builder: inspector list shows new entity', `id=${added.id}`);
+
+      // (b) updateTransform → 물리 바디가 즉시 teleport (getPose가 반영)
+      const moved = await page.evaluate(({ id, target }) => {
+        const s = window.__sim;
+        s.editor.updateTransform(id, { position: target });
+        return s.world.getPose(s.world.bodiesOfEntity(id)[0]).position;
+      }, { id: added.id, target: SB_MOVE_POSITION });
+      const movedOk = Math.abs(moved[0] - SB_MOVE_POSITION[0]) < SB_POSE_TOLERANCE_M
+        && Math.abs(moved[1] - SB_MOVE_POSITION[1]) < SB_POSE_TOLERANCE_M
+        && Math.abs(moved[2] - SB_MOVE_POSITION[2]) < SB_POSE_TOLERANCE_M;
+      if (movedOk) pass('scene-builder: updateTransform teleports body (getPose reflects)', JSON.stringify(moved));
+      else fail('scene-builder: updateTransform teleports body (getPose reflects)', JSON.stringify(moved));
+
+      // (c) updateDimensions(halfExtents 0.05→0.1) → collider가 실제로 커졌다는 것을
+      //     물리 "행동"으로 관측: 자유 낙하 후 정착 y ≈ 새 halfExtent (0.1)
+      await page.evaluate(({ id, half }) => {
+        window.__sim.editor.updateDimensions(id, { kind: 'box', halfExtents: [half, half, half] });
+      }, { id: added.id, half: SB_NEW_HALF_EXTENT_M });
+      const settleDeadline = Date.now() + SB_SETTLE_REALTIME_DEADLINE_MS;
+      let settledY = null;
+      for (;;) {
+        settledY = await page.evaluate((id) => {
+          const s = window.__sim;
+          const bodies = s.world.bodiesOfEntity(id);
+          return bodies.length > 0 ? s.world.getPose(bodies[0]).position[1] : null;
+        }, added.id);
+        if (settledY !== null && Math.abs(settledY - SB_NEW_HALF_EXTENT_M) < SB_SETTLE_Y_TOLERANCE_M) break;
+        if (Date.now() > settleDeadline) break;
+        await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+      }
+      if (settledY !== null && Math.abs(settledY - SB_NEW_HALF_EXTENT_M) < SB_SETTLE_Y_TOLERANCE_M) {
+        pass(`scene-builder: updateDimensions observable (settled y ≈ ${SB_NEW_HALF_EXTENT_M})`, `y=${settledY.toFixed(4)}`);
+      } else {
+        fail(`scene-builder: updateDimensions observable (settled y ≈ ${SB_NEW_HALF_EXTENT_M})`, `y=${settledY}`);
+      }
+
+      // (d) removeEntity → 바디/픽킹 대상 정리
+      const removed = await page.evaluate((id) => {
+        const s = window.__sim;
+        s.editor.removeEntity(id);
+        return {
+          bodyCount: s.world.bodiesOfEntity(id).length,
+          pickables: s.editor.pickableIds(),
+          count: s.editor.entityIds().length,
+        };
+      }, added.id);
+      if (removed.bodyCount === 0 && !removed.pickables.includes(added.id) && removed.count === added.before) {
+        pass('scene-builder: removeEntity cleans up (no bodies, pickable gone)', JSON.stringify(removed));
+      } else {
+        fail('scene-builder: removeEntity cleans up (no bodies, pickable gone)', JSON.stringify(removed));
+      }
+
+      // (e) undo → 전체 재로드로 제거 이전 상태 복원 (엔티티 수 +1, 바디 재생성)
+      //     undo는 씬을 재빌드하므로 window.__sim이 새 핸들로 교체된 뒤를 읽는다.
+      const undone = await page.evaluate(async (id) => {
+        const ok = await window.__sim.history.undo();
+        const s = window.__sim;
+        return {
+          ok,
+          ids: s ? s.editor.entityIds() : [],
+          bodyCount: s ? s.world.bodiesOfEntity(id).length : 0,
+        };
+      }, added.id);
+      if (undone.ok && undone.ids.includes(added.id) && undone.bodyCount >= 1) {
+        pass('scene-builder: undo restores removed entity (full reload)',
+          `ids=[${undone.ids.join(', ')}]`);
+      } else {
+        fail('scene-builder: undo restores removed entity (full reload)', JSON.stringify(undone));
+      }
+      // undo 재로드(URDF 포함) 후 새 엔진이 실제로 전진하는지 확인
+      const advanceAfterUndo = await awaitSimAdvance(page, SWITCH_MIN_SIM_ADVANCE_SEC);
+      if (advanceAfterUndo.advanced) {
+        pass('scene-builder: sim advances after undo reload',
+          `${advanceAfterUndo.fromSec.toFixed(2)}s → ${advanceAfterUndo.toSec.toFixed(2)}s`);
+      } else {
+        fail('scene-builder: sim advances after undo reload', JSON.stringify(advanceAfterUndo));
       }
     }
 

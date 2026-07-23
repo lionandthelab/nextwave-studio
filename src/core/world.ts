@@ -11,6 +11,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import type {
   BodyId, ColliderId, ContactEvent, EntityId, PhysicsBodyInit, PhysicsWorld, Pose,
 } from './types';
+import type { MeshAssetResolver } from './scene-edit-types';
 import type {
   BodyType, ColliderGroup, ColliderShape, ColliderSpec, Quat, Vec3,
 } from '../schema/types';
@@ -104,7 +105,11 @@ function rigidBodyDescFor(bodyType: BodyType): RAPIER.RigidBodyDesc {
 }
 
 // Rapier capsule/cylinder는 Y축 정렬 — 프로젝트 Y-up 규약과 일치 (CLAUDE.md §4)
-function colliderDescFor(shape: ColliderShape): RAPIER.ColliderDesc {
+// convexHull/trimesh는 에셋 ref 해석(MeshAssetResolver)이 필요하므로 인스턴스 메서드
+// RapierWorld.colliderDescFor가 처리한다 (Phase 7 임포트 파이프라인).
+function primitiveColliderDescFor(
+  shape: Extract<ColliderShape, { kind: 'box' | 'sphere' | 'capsule' | 'cylinder' }>,
+): RAPIER.ColliderDesc {
   switch (shape.kind) {
     case 'box':
       return RAPIER.ColliderDesc.cuboid(shape.halfExtents[0], shape.halfExtents[1], shape.halfExtents[2]);
@@ -114,10 +119,6 @@ function colliderDescFor(shape: ColliderShape): RAPIER.ColliderDesc {
       return RAPIER.ColliderDesc.capsule(shape.halfHeight, shape.radius);
     case 'cylinder':
       return RAPIER.ColliderDesc.cylinder(shape.halfHeight, shape.radius);
-    case 'convexHull':
-    case 'trimesh':
-    case 'fromVisual':
-      throw new Error(`RapierWorld: collider shape '${shape.kind}' not yet supported (Phase 3+)`);
   }
 }
 
@@ -140,7 +141,16 @@ export class RapierWorld implements PhysicsWorld {
   // 접촉 상태가 '고착'된다 (Phase 4 CollisionMonitor·waitForCollision 이력 소비자 보호).
   private readonly removedColliderToEntity = new Map<ColliderId, EntityId>();
 
-  constructor(gravity: Vec3, timestepHz: number) {
+  /**
+   * @param resolver 임포트된 3D 에셋 저장소 (Phase 7). convexHull/trimesh collider의
+   *   ref를 정점/인덱스 배열로 해석한다. 미주입 시 해당 shape 생성은 한국어 오류로
+   *   실패한다 — 프리미티브 전용 씬(테스트·초기 부트)은 resolver 없이 동작한다.
+   */
+  constructor(
+    gravity: Vec3,
+    timestepHz: number,
+    private readonly resolver?: MeshAssetResolver,
+  ) {
     if (!rapierReady) {
       throw new Error('RapierWorld created before initPhysics() — bootstrap order violation (CLAUDE.md §2.7)');
     }
@@ -169,7 +179,7 @@ export class RapierWorld implements PhysicsWorld {
 
   createCollider(bodyId: BodyId, spec: ColliderSpec, entityId: EntityId): ColliderId {
     const body = this.requireBody(bodyId, 'createCollider');
-    const desc = colliderDescFor(spec.shape)
+    const desc = this.colliderDescFor(spec.shape)
       .setDensity(spec.density ?? DEFAULT_DENSITY)
       .setFriction(spec.friction ?? DEFAULT_FRICTION)
       .setRestitution(spec.restitution ?? DEFAULT_RESTITUTION)
@@ -298,6 +308,74 @@ export class RapierWorld implements PhysicsWorld {
     this.entityToBodies.clear();
     this.sensorColliders.clear();
     this.removedColliderToEntity.clear();
+  }
+
+  /**
+   * ColliderShape → Rapier ColliderDesc.
+   *
+   * - 프리미티브(box/sphere/capsule/cylinder): 순수 변환 (primitiveColliderDescFor).
+   * - convexHull/trimesh (Phase 7 임포트 에셋): 생성자 주입 MeshAssetResolver로 ref를
+   *   정점/인덱스 배열로 해석한다. resolver 미주입·미등록 ref·볼록 껍질 생성 실패는
+   *   모두 한국어 오류로 즉시 던진다 (조용한 무collider 바디 방지).
+   *   trimesh는 스키마 검증(validate.ts)이 fixed 바디 전용으로 이미 제한한다.
+   * - fromVisual: robot 엔티티 전용 — URDF <collision> 유래 collider는 scene-loader의
+   *   로봇 빌더가 링크별 프리미티브로 변환해 생성하므로 이 지점에 도달하지 않는다.
+   *   비로봇 엔티티에서의 사용은 미지원으로 명시 거부한다.
+   */
+  private colliderDescFor(shape: ColliderShape): RAPIER.ColliderDesc {
+    switch (shape.kind) {
+      case 'box':
+      case 'sphere':
+      case 'capsule':
+      case 'cylinder':
+        return primitiveColliderDescFor(shape);
+      case 'convexHull': {
+        const points = this.requireMeshPoints(shape.kind, shape.ref);
+        const desc = RAPIER.ColliderDesc.convexHull(points);
+        if (desc === null) {
+          throw new Error(
+            `RapierWorld: 볼록 껍질 생성 실패 — 에셋 ref '${shape.ref}'의 정점으로 ` +
+              'convex hull을 만들 수 없습니다 (정점이 부족하거나 퇴화된 형상)',
+          );
+        }
+        return desc;
+      }
+      case 'trimesh': {
+        const points = this.requireMeshPoints(shape.kind, shape.ref);
+        const indices = this.resolver?.getIndices(shape.ref);
+        if (indices === undefined) {
+          throw new Error(
+            `RapierWorld: trimesh collider의 에셋 ref '${shape.ref}'에 인덱스가 없습니다 ` +
+              '— 인덱스 없는 메시는 convexHull을 사용하세요',
+          );
+        }
+        return RAPIER.ColliderDesc.trimesh(points, indices);
+      }
+      case 'fromVisual':
+        throw new Error(
+          "RapierWorld: collider shape 'fromVisual'은 robot 엔티티 전용입니다 — " +
+            'URDF <collision> 유래 collider는 scene-loader가 생성합니다. ' +
+            '비로봇 엔티티에는 프리미티브 또는 convexHull을 사용하세요',
+        );
+    }
+  }
+
+  /** convexHull/trimesh 공통: resolver 존재 + ref 해석 가능 검사 (실패는 한국어 오류) */
+  private requireMeshPoints(kind: 'convexHull' | 'trimesh', ref: string): Float32Array {
+    if (!this.resolver) {
+      throw new Error(
+        `RapierWorld: '${kind}' collider는 MeshAssetResolver가 필요합니다 — ` +
+          'RapierWorld 생성자에 resolver를 주입하세요 (에셋 ref: ' + `'${ref}')`,
+      );
+    }
+    const points = this.resolver.getPoints(ref);
+    if (points === undefined) {
+      throw new Error(
+        `RapierWorld: 메시 에셋 ref '${ref}'을(를) 해석할 수 없습니다 — ` +
+          '등록되지 않았거나 삭제된 에셋입니다',
+      );
+    }
+    return points;
   }
 
   private requireBody(bodyId: BodyId, op: string): RAPIER.RigidBody {

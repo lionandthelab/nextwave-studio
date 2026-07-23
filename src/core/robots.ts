@@ -307,6 +307,15 @@ export class RobotRegistry {
     return this.bindings.has(entityId);
   }
 
+  /**
+   * 등록 해제 (Phase 7 씬 편집 — SceneEditor의 로봇 removeEntity/renameEntity 전용).
+   * 해제하지 않으면 Engine preStep의 tickAll()이 제거된 링크 바디에
+   * setKinematicPose를 시도해 던진다. 미등록 id는 no-op (dispose 경로 멱등성).
+   */
+  remove(entityId: EntityId): void {
+    this.bindings.delete(entityId);
+  }
+
   /** 등록된 로봇 엔티티 id 목록 (삽입 순서) */
   ids(): string[] {
     return [...this.bindings.keys()];

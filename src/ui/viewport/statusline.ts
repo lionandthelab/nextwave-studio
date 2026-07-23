@@ -5,8 +5,13 @@
 // 절대 가로막지 않는다. 데이터는 글루(main.ts)가 engine.onTick에서 update()로 공급한다
 // (이 모듈은 core를 import하지 않는다 — 계층 규칙, CLAUDE.md §3).
 //
+// 배치 계약 (Phase 7 워크스페이스): host는 "positioned"(position:relative 등) 뷰포트
+// 슬롯이어야 한다 — 오버레이는 host 기준 absolute로 좌하단/중앙에 앉는다
+// (기존 document.body fixed 오버레이 방식은 워크스페이스 그리드 편입으로 대체됨).
+//
 // 빈 씬 안내 (UX_DESIGN §7 "빈 씬"): 엔티티가 0개인 씬이면 뷰포트 중앙에 안내 문구를
-// 함께 띄운다 — 마운트 시 emptyScene 플래그로 결정된다(씬 스펙은 씬 수명 동안 불변).
+// 함께 띄운다 — 마운트 시 emptyScene 플래그로 결정되고, 씬 편집(Scene Builder)으로
+// 엔티티가 생기면 통합자가 setEmptyHintVisible(false)로 숨긴다.
 
 import {
   COLOR,
@@ -20,8 +25,8 @@ import {
 
 // ── 상수 (매직넘버 금지 — CLAUDE.md §4) ─────────────────────────────
 
-/** 독(본문 180px + 탭바 ~28px)을 침범하지 않는 하단 오프셋 */
-const STATUS_BOTTOM_PX = 220;
+/** 뷰포트 슬롯 좌하단 오프셋 (독은 워크스페이스 그리드의 별도 행 — 겹치지 않는다) */
+const STATUS_BOTTOM_PX = 12;
 const STATUS_LEFT_PX = 12;
 /** simTime 표시 소수 자릿수 (playback.ts와 동일 규약) */
 const SIM_TIME_DECIMALS = 2;
@@ -61,6 +66,8 @@ export interface ViewportStatusHandle {
   readonly el: HTMLElement;
   /** 상태 갱신 (engine.onTick에서 rAF당 1회) */
   update(info: ViewportStatusInfo): void;
+  /** 빈 씬 중앙 안내 표시/숨김 — Scene Builder로 첫 엔티티가 생기면 숨긴다 (통합자 호출) */
+  setEmptyHintVisible(visible: boolean): void;
   dispose(): void;
 }
 
@@ -73,7 +80,7 @@ export function mountViewportStatus(
   ensureThemeStyles();
 
   const line = styled(document.createElement('div'), {
-    position: 'fixed',
+    position: 'absolute',
     left: `${STATUS_LEFT_PX}px`,
     bottom: `${STATUS_BOTTOM_PX}px`,
     zIndex: Z_INDEX.bar,
@@ -144,7 +151,7 @@ export function mountViewportStatus(
   let emptyHint: HTMLElement | null = null;
   if (opts.emptyScene === true) {
     emptyHint = styled(document.createElement('div'), {
-      position: 'fixed',
+      position: 'absolute',
       left: '50%',
       top: '50%',
       transform: 'translate(-50%, -50%)',
@@ -184,6 +191,9 @@ export function mountViewportStatus(
   return {
     el: line,
     update,
+    setEmptyHintVisible: (visible): void => {
+      if (emptyHint) emptyHint.style.display = visible ? '' : 'none';
+    },
     dispose: (): void => {
       line.remove();
       emptyHint?.remove();

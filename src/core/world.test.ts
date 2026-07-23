@@ -2,8 +2,13 @@
 //
 // rapier3d-compat는 WASM을 base64로 내장하므로 Node(vitest) 환경에서 그대로 돈다.
 // 모든 물리 API 사용 전 initPhysics()를 await한다 (CLAUDE.md §2.7).
+//
+// RAPIER 직접 import는 convexHull null 분기 모킹 전용이다 — 프로덕션 코드의
+// "Rapier는 world.ts 밖으로 새지 않는다" 불변식(CLAUDE.md §3/§7)은 core 모듈에
+// 적용되며, 이 파일은 그 경계 자체를 검증하는 테스트다.
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import RAPIER from '@dimforge/rapier3d-compat';
 import {
   COLLISION_GROUP_BITS,
   RapierWorld,
@@ -12,6 +17,7 @@ import {
   interactionGroups,
 } from './world';
 import type { BodyId, ColliderId, ContactEvent, Pose } from './types';
+import type { MeshAssetResolver } from './scene-edit-types';
 import type { ColliderSpec, Quat, Vec3 } from '../schema/types';
 
 // ── 테스트 상수 (매직넘버 금지 — CLAUDE.md §4) ──────────────────────
@@ -301,7 +307,7 @@ describe('RapierWorld', () => {
     }
   });
 
-  it('rejects unsupported collider shapes with a clear Phase 3+ error', () => {
+  it('resolver 없이 convexHull collider를 만들면 한국어 오류로 거부한다', () => {
     const world = new RapierWorld(GRAVITY, TIMESTEP_HZ);
     try {
       const bodyId = world.createBody('mesh-entity', { bodyType: 'fixed', position: [0, 0, 0] });
@@ -309,7 +315,173 @@ describe('RapierWorld', () => {
         shape: { kind: 'convexHull', ref: 'assets/mesh.obj' },
         group: 'OBJECT',
         collidesWith: ['ENV'],
-      }, 'mesh-entity')).toThrow(/not yet supported \(Phase 3\+\)/);
+      }, 'mesh-entity')).toThrow(/MeshAssetResolver가 필요합니다/);
+    } finally {
+      world.free();
+    }
+  });
+
+  it("fromVisual collider는 robot 엔티티 전용 오류로 거부한다 (URDF 경로는 scene-loader 몫)", () => {
+    const world = new RapierWorld(GRAVITY, TIMESTEP_HZ);
+    try {
+      const bodyId = world.createBody('deco', { bodyType: 'fixed', position: [0, 0, 0] });
+      expect(() => world.createCollider(bodyId, {
+        shape: { kind: 'fromVisual' },
+        group: 'OBJECT',
+        collidesWith: ['ENV'],
+      }, 'deco')).toThrow(/robot 엔티티 전용/);
+    } finally {
+      world.free();
+    }
+  });
+});
+
+// ── 메시 collider (Phase 7 — MeshAssetResolver 주입 convexHull/trimesh) ──
+
+/** 정육면체 8꼭짓점 point cloud (half-extent 기준) — convex hull 결과 = box와 동일 */
+function cubePointCloud(halfM: number): Float32Array {
+  const points: number[] = [];
+  for (const x of [-halfM, halfM]) {
+    for (const y of [-halfM, halfM]) {
+      for (const z of [-halfM, halfM]) points.push(x, y, z);
+    }
+  }
+  return new Float32Array(points);
+}
+
+const CUBE_ASSET_REF = 'asset://cube';
+const QUAD_ASSET_REF = 'asset://quad';
+/** 정점만 있고 인덱스가 없는 에셋 — trimesh 거부 검증용 */
+const POINTS_ONLY_ASSET_REF = 'asset://points-only';
+
+const QUAD_HALF_M = 2;
+/** y=0 평면의 사각형(삼각형 2개) — trimesh 바닥 */
+const QUAD_VERTICES = new Float32Array([
+  -QUAD_HALF_M, 0, -QUAD_HALF_M,
+  QUAD_HALF_M, 0, -QUAD_HALF_M,
+  QUAD_HALF_M, 0, QUAD_HALF_M,
+  -QUAD_HALF_M, 0, QUAD_HALF_M,
+]);
+const QUAD_INDICES = new Uint32Array([0, 1, 2, 0, 2, 3]);
+
+const testResolver: MeshAssetResolver = {
+  getPoints: (ref) => {
+    if (ref === CUBE_ASSET_REF || ref === POINTS_ONLY_ASSET_REF) return cubePointCloud(BOX_HALF_M);
+    if (ref === QUAD_ASSET_REF) return QUAD_VERTICES;
+    return undefined;
+  },
+  getIndices: (ref) => (ref === QUAD_ASSET_REF ? QUAD_INDICES : undefined),
+};
+
+describe('RapierWorld — 메시 collider (convexHull/trimesh + resolver)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('정육면체 point cloud convexHull 바디가 바닥에 정확히 정착하고 접촉 이벤트를 낸다', () => {
+    const world = new RapierWorld(GRAVITY, TIMESTEP_HZ, testResolver);
+    try {
+      const groundBody = world.createBody('ground', {
+        bodyType: 'fixed',
+        position: [0, GROUND_CENTER_Y_M, 0],
+      });
+      world.createCollider(groundBody, groundColliderSpec(), 'ground');
+
+      const hullBody = world.createBody('hull', {
+        bodyType: 'dynamic',
+        position: [0, DROP_HEIGHT_M, 0],
+      });
+      world.createCollider(hullBody, {
+        shape: { kind: 'convexHull', ref: CUBE_ASSET_REF },
+        group: 'OBJECT',
+        collidesWith: ['ENV'],
+        emitEvents: true,
+      }, 'hull');
+
+      const events: ContactEvent[] = [];
+      for (let i = 0; i < SETTLE_TICKS; i++) events.push(...world.step());
+
+      // 접촉 이벤트가 EventQueue 경유로 실제 감지된다 (CLAUDE.md §2.4)
+      expect(
+        events.some((e) => e.phase === 'start' && e.kind === 'contact' && pairOf(e) === 'ground,hull'),
+      ).toBe(true);
+      // 정육면체 hull은 box와 동일 — 바닥 위 half-extent 높이에 정착 (관통/터널링 없음)
+      const restY = world.getPose(hullBody).position[1];
+      expect(Math.abs(restY - BOX_HALF_M)).toBeLessThan(REST_HEIGHT_TOLERANCE_M);
+    } finally {
+      world.free();
+    }
+  });
+
+  it('trimesh(fixed) 바닥 위에 동적 박스가 정착하고 접촉 이벤트를 낸다', () => {
+    const world = new RapierWorld(GRAVITY, TIMESTEP_HZ, testResolver);
+    try {
+      const triBody = world.createBody('tri-ground', { bodyType: 'fixed', position: [0, 0, 0] });
+      world.createCollider(triBody, {
+        shape: { kind: 'trimesh', ref: QUAD_ASSET_REF },
+        group: 'ENV',
+        collidesWith: ['OBJECT'],
+      }, 'tri-ground');
+
+      const boxBody = world.createBody('box', {
+        bodyType: 'dynamic',
+        position: [0.2, DROP_HEIGHT_M, 0.1], // 삼각형 내부 임의 지점
+      });
+      world.createCollider(boxBody, boxColliderSpec({ emitEvents: true }), 'box');
+
+      const events: ContactEvent[] = [];
+      for (let i = 0; i < SETTLE_TICKS; i++) events.push(...world.step());
+
+      expect(
+        events.some((e) => e.phase === 'start' && e.kind === 'contact' && pairOf(e) === 'box,tri-ground'),
+      ).toBe(true);
+      const restY = world.getPose(boxBody).position[1];
+      expect(Math.abs(restY - BOX_HALF_M)).toBeLessThan(REST_HEIGHT_TOLERANCE_M);
+    } finally {
+      world.free();
+    }
+  });
+
+  it('등록되지 않은 에셋 ref는 한국어 오류로 거부한다', () => {
+    const world = new RapierWorld(GRAVITY, TIMESTEP_HZ, testResolver);
+    try {
+      const bodyId = world.createBody('mesh-entity', { bodyType: 'fixed', position: [0, 0, 0] });
+      expect(() => world.createCollider(bodyId, {
+        shape: { kind: 'convexHull', ref: 'asset://ghost' },
+        group: 'OBJECT',
+        collidesWith: ['ENV'],
+      }, 'mesh-entity')).toThrow(/해석할 수 없습니다/);
+    } finally {
+      world.free();
+    }
+  });
+
+  it('인덱스 없는 에셋의 trimesh collider는 한국어 오류로 거부한다 (convexHull 안내)', () => {
+    const world = new RapierWorld(GRAVITY, TIMESTEP_HZ, testResolver);
+    try {
+      const bodyId = world.createBody('mesh-entity', { bodyType: 'fixed', position: [0, 0, 0] });
+      expect(() => world.createCollider(bodyId, {
+        shape: { kind: 'trimesh', ref: POINTS_ONLY_ASSET_REF },
+        group: 'ENV',
+        collidesWith: ['OBJECT'],
+      }, 'mesh-entity')).toThrow(/인덱스가 없습니다.*convexHull/);
+    } finally {
+      world.free();
+    }
+  });
+
+  it("ColliderDesc.convexHull이 null을 반환하면 '볼록 껍질 생성 실패' 오류를 던진다", () => {
+    // 현 rapier3d-compat 버전은 desc 생성 시점에 hull을 계산하지 않아 null 경로를
+    // 실데이터로 유발할 수 없다 — 시그니처 계약(| null)의 방어 분기를 모킹으로 검증한다.
+    vi.spyOn(RAPIER.ColliderDesc, 'convexHull').mockReturnValue(null);
+    const world = new RapierWorld(GRAVITY, TIMESTEP_HZ, testResolver);
+    try {
+      const bodyId = world.createBody('mesh-entity', { bodyType: 'dynamic', position: [0, 1, 0] });
+      expect(() => world.createCollider(bodyId, {
+        shape: { kind: 'convexHull', ref: CUBE_ASSET_REF },
+        group: 'OBJECT',
+        collidesWith: ['ENV'],
+      }, 'mesh-entity')).toThrow(/볼록 껍질 생성 실패/);
     } finally {
       world.free();
     }

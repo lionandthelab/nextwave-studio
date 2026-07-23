@@ -101,6 +101,23 @@ export class Renderer {
     this.controls.update();
   }
 
+  /**
+   * WebGL 캔버스 요소 — ViewportInteraction이 포인터/TransformControls를 붙일 대상
+   * (render/interaction.ts 헤더의 "통합 방법" 계약. 통합자 querySelector 의존 제거).
+   */
+  get domElement(): HTMLCanvasElement {
+    return this.webgl.domElement;
+  }
+
+  /**
+   * OrbitControls — 기즈모 드래그 중 잠금(enabled=false) 용도로만 노출한다
+   * (ViewportInteractionDeps.orbitControls의 OrbitControlsLike 표면).
+   * 카메라 상태 변경은 여전히 Renderer가 소유한다.
+   */
+  get orbitControls(): OrbitControls {
+    return this.controls;
+  }
+
   /** 매 프레임 호출 (Engine 루프의 마지막 단계) */
   draw(): void {
     this.controls.update();
