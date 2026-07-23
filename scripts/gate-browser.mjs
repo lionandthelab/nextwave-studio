@@ -26,6 +26,11 @@
 //   waitForCollision 비활성 → 배리어 없이 완주(timeout 경고 없음, 스킵 노드 무active)
 //   → Stop 런 상태 리셋 + 재-Play 완주 → 노드 삭제 → 로봇 rename 플로우 재동기
 //   → 페이지 에러 0건 (불변식 §2.8).
+//   --expect=planner : Phase 9 NL Planner — __sim.planner 파사드(규칙 기반 백엔드).
+//   (a) generate('box_a를 집어') → sequence + 그래프 로드(AI 배지) + 무자동재생(§2.9)
+//   + 라이브 시퀀스 유효, (b) ▶ Play → arm×box_a 충돌 start(reach가 실제 접촉) + done,
+//   (c) generate('박스를 집어') → clarify(2+ 옵션) → box_b 선택 → box_b 시퀀스,
+//   (d) 없는 대상 → clarify/error, 무의미 입력 → 읽을 수 있는 error → 페이지 에러 0건.
 
 import { spawn, execSync } from 'node:child_process';
 import { chromium } from 'playwright';
@@ -53,6 +58,7 @@ const SCENE_BY_EXPECT = {
   'scene-switch': 'arm-and-boxes', // 런타임 전환 스모크 — arm-and-boxes에서 출발
   'scene-builder': 'arm-and-boxes', // Phase 7 씬 편집 — 로봇+박스 씬 위에서 편집 검증
   'flow-graph': 'arm-and-boxes', // Phase 8 Flow Graph — 시퀀스 있는 씬 위에서 그래프 편집 검증
+  planner: 'arm-and-boxes', // Phase 9 NL Planner — 규칙 기반(오프라인) 백엔드로 결정론 검증
 };
 
 // --expect=arm 어서션 상수
@@ -115,6 +121,13 @@ const FG_INSERTED_WAIT_SEC = 1;                    // defaultNodeFor('wait') 기
 // 배리어 이벤트 해제 경로 ≈ 6s+, timeout 경로 ≈ 11.9s — 7.5s 미만 done이면 스킵 증명.
 const FG_SKIP_DONE_MAX_SIM_SEC = 7.5;
 const FG_SKIP_SIM_BUDGET_SEC = 13;                 // 폴링 sim 예산 (timeout 경로도 포착)
+
+// ── Phase 9: planner 게이트 상수 (규칙 기반 백엔드 — 결정론, 네트워크 없음) ──
+// 규칙 기반 'box_a를 집어' → open→approach(moveJoints)→nudge(setJoints)→
+// waitForCollision→close→wait→home = 7 step (2단 접근으로 배리어 직후 접촉 → 이벤트 해제).
+const PLANNER_BOXA_STEP_COUNT = 7;
+const PLANNER_SIM_BUDGET_SEC = 12;                 // Play→done sim 예산
+const PLANNER_EVENT_DONE_MAX_SIM_SEC = 9;          // 이벤트 해제 경로(≈6.7s) vs timeout(≈12s) 구분
 
 /** 두 엔티티 쌍 일치(순서 무관) */
 function isPair(event, idA, idB) {
@@ -1073,6 +1086,139 @@ async function main() {
       } else {
         fail('flow-graph: robot rename resyncs flow refs, editing still works',
           JSON.stringify(renamed));
+      }
+    }
+
+    // ── Phase 9: planner — 자연어 → 검증된 시퀀스 → 그래프 로드 (§2.9 무자동재생) ──
+    if (expectArg === 'planner') {
+      // (a) generate('box_a를 집어') → type 'sequence' + 그래프 로드 + AI 배지 + 무자동재생
+      const genA = await page.evaluate(async () => {
+        const res = await window.__sim.planner.generate('box_a를 집어');
+        const fg = window.__sim.flowGraph;
+        return {
+          type: res.type,
+          last: window.__sim.planner.lastResult(),
+          nodeCount: fg.nodeCount(),
+          kinds: fg.kinds(),
+          isLoaded: window.__sim.planner.isLoadedIntoGraph(),
+          playerStatus: window.__sim.planner.playerStatus(),
+          sequenceJson: fg.sequenceJson(),
+        };
+      });
+
+      if (genA.type === 'sequence') pass('planner: generate(box_a) returns sequence');
+      else fail('planner: generate(box_a) returns sequence', JSON.stringify(genA));
+
+      if (genA.nodeCount === PLANNER_BOXA_STEP_COUNT && genA.last?.stepCount === PLANNER_BOXA_STEP_COUNT) {
+        pass(`planner: graph loaded to generated length (${PLANNER_BOXA_STEP_COUNT} nodes)`,
+          `kinds=[${genA.kinds.join(',')}]`);
+      } else {
+        fail(`planner: graph loaded to generated length (${PLANNER_BOXA_STEP_COUNT} nodes)`,
+          JSON.stringify(genA));
+      }
+
+      // AI 배지: data-origin='generated' 노드 (또는 배지 텍스트 'AI') ≥ 1
+      const aiBadges = await page.$$eval('[data-testid="flow-node"]',
+        (els) => els.filter((el) => el.dataset.origin === 'generated'
+          || (el.textContent ?? '').includes('AI')).length);
+      const domNodesA = await page.$$eval('[data-testid="flow-node"]', (els) => els.length);
+      if (aiBadges >= 1 && domNodesA === PLANNER_BOXA_STEP_COUNT) {
+        pass('planner: generated nodes carry AI badge + DOM count matches', `ai=${aiBadges}, dom=${domNodesA}`);
+      } else {
+        fail('planner: generated nodes carry AI badge + DOM count matches', `ai=${aiBadges}, dom=${domNodesA}`);
+      }
+
+      if (genA.isLoaded) pass('planner: isLoadedIntoGraph() true after sequence generate');
+      else fail('planner: isLoadedIntoGraph() true after sequence generate', JSON.stringify(genA));
+
+      // §2.9 증명: 생성만으로 자동 재생하지 않는다 (player not running)
+      if (genA.playerStatus !== 'running') {
+        pass('planner: NO autoplay after generate (§2.9 — player not running)', `status=${genA.playerStatus}`);
+      } else {
+        fail('planner: NO autoplay after generate (§2.9 — player not running)', `status=${genA.playerStatus}`);
+      }
+
+      // 라이브 시퀀스 JSON 유효 + 그래프 kinds와 일치
+      let seqA = null;
+      try { seqA = JSON.parse(genA.sequenceJson); } catch { seqA = null; }
+      const kindsMatch = seqA && Array.isArray(seqA.steps)
+        && seqA.steps.length === PLANNER_BOXA_STEP_COUNT
+        && JSON.stringify(seqA.steps.map((s) => s.kind)) === JSON.stringify(genA.kinds);
+      if (kindsMatch) pass('planner: live sequence JSON valid and matches graph kinds');
+      else fail('planner: live sequence JSON valid and matches graph kinds', (genA.sequenceJson ?? '').slice(0, 300));
+
+      // (b) ▶ Play → 규칙 기반 reach가 실제로 box_a를 만진다 (충돌 start) + done
+      const runB = await playAndAwaitDone(page, PLANNER_SIM_BUDGET_SEC);
+      const historyB = await page.evaluate((limit) => window.__sim.collision.recent(limit), HISTORY_FETCH_LIMIT);
+      const armBoxAStarts = historyB.filter((e) => e.phase === 'start' && isPair(e, 'arm', 'box_a'));
+      if (armBoxAStarts.length >= 1) {
+        pass('planner: Play → arm×box_a collision start (rule-based reach actually touches)',
+          `timeSec=[${armBoxAStarts.map((e) => e.timeSec.toFixed(3)).join(', ')}]`);
+      } else {
+        fail('planner: Play → arm×box_a collision start (rule-based reach actually touches)',
+          `history=${JSON.stringify(historyB.slice(-20))}`);
+      }
+      if (runB.status === 'done' && runB.elapsedSimSec < PLANNER_EVENT_DONE_MAX_SIM_SEC) {
+        pass(`planner: sequence done within ${PLANNER_EVENT_DONE_MAX_SIM_SEC}s (barrier released by event)`,
+          `elapsed=${runB.elapsedSimSec.toFixed(2)}s`);
+      } else {
+        fail(`planner: sequence done within ${PLANNER_EVENT_DONE_MAX_SIM_SEC}s (barrier released by event)`,
+          JSON.stringify(runB));
+      }
+      // 결정론 리셋 — 이후 clarify 생성이 깨끗한 씬 상태에서 시작하도록
+      await page.evaluate(() => window.__sim.player.stop());
+
+      // (c) generate('박스를 집어') → clarify(2+ 옵션) → box_b 선택 → box_b 시퀀스
+      const clarifyC = await page.evaluate(async () => {
+        const res = await window.__sim.planner.generate('박스를 집어');
+        return { type: res.type, last: window.__sim.planner.lastResult() };
+      });
+      if (clarifyC.type === 'clarify' && (clarifyC.last?.options?.length ?? 0) >= 2) {
+        pass('planner: ambiguous target → clarify with 2+ options', `options=${JSON.stringify(clarifyC.last?.options)}`);
+      } else {
+        fail('planner: ambiguous target → clarify with 2+ options', JSON.stringify(clarifyC));
+      }
+      // P1 규약: 선택을 원문에 되붙여(선택 토큰) 재생성 — box_b 확정
+      const pickedC = await page.evaluate(async () => {
+        const res = await window.__sim.planner.generate('박스를 집어 [선택: box_b]');
+        const seq = JSON.parse(window.__sim.flowGraph.sequenceJson());
+        return {
+          type: res.type,
+          betweens: seq.steps
+            .filter((s) => s.kind === 'waitForCollision')
+            .map((s) => s.between),
+        };
+      });
+      const boxBTargeted = pickedC.type === 'sequence'
+        && pickedC.betweens.some((b) => Array.isArray(b) && b.includes('box_b'));
+      if (boxBTargeted) pass('planner: clarify pick box_b → sequence targets box_b', JSON.stringify(pickedC.betweens));
+      else fail('planner: clarify pick box_b → sequence targets box_b', JSON.stringify(pickedC));
+
+      // (d) 견고성: 없는 대상 → clarify 또는 error (크래시 없음); 무의미 입력 → 읽을 수 있는 error
+      //     (facade 결과는 type만 노출 — 읽을 수 있는 사유는 Console 패널에서 확인)
+      const robustD = await page.evaluate(async () => {
+        const unknown = await window.__sim.planner.generate('없는거 집어');
+        const gibberish = await window.__sim.planner.generate('asdf qwer');
+        return {
+          unknownType: unknown.type,
+          gibberishType: gibberish.type,
+          gibberishLast: window.__sim.planner.lastResult(),
+          consoleText: document.querySelector('[data-testid="console-panel"]')?.textContent ?? '',
+        };
+      });
+      if (robustD.unknownType === 'clarify' || robustD.unknownType === 'error') {
+        pass('planner: unknown target → clarify or error (no crash)', `type=${robustD.unknownType}`);
+      } else {
+        fail('planner: unknown target → clarify or error (no crash)', JSON.stringify(robustD));
+      }
+      // 무의미 입력은 error이고, 사람이 읽을 수 있는 사유(지원 패턴 안내)가 Console에 남는다
+      const readableError = robustD.gibberishType === 'error'
+        && robustD.gibberishLast?.type === 'error'
+        && robustD.consoleText.includes('지원하는 명령');
+      if (readableError) {
+        pass('planner: gibberish → error with readable message (Console)');
+      } else {
+        fail('planner: gibberish → error with readable message (Console)', JSON.stringify(robustD));
       }
     }
 

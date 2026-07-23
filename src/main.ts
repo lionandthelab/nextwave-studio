@@ -129,6 +129,14 @@ import { mountLibrary, TEMPLATE_MIME } from './ui/library/library';
 import { templateByKey } from './ui/library/templates';
 import { mountViewportStatus } from './ui/viewport/statusline';
 import { mountWorkspace } from './ui/workspace';
+import { mountNlInput } from './ui/command-bar/nl-input';
+import type { GenerateMode, NlInputHandle } from './ui/command-bar/nl-input';
+import { DEFAULT_PLANNER_MODEL, mountPlannerSettings } from './ui/command-bar/planner-settings';
+import type { PlannerBackendConfig } from './ui/command-bar/planner-settings';
+import { mountClarifyCard } from './ui/feedback/clarify-card';
+import { mountToasts } from './ui/feedback/toast';
+import { AnthropicAdapter, PlannerService, buildContext } from './planner';
+import type { PlannerResult, WorldSnapshot } from './planner';
 import {
   COLOR,
   FONT,
@@ -159,6 +167,7 @@ import type {
   ColliderShape,
   CollisionEvent,
   ControlSequence,
+  ControlStep,
   EntitySpec,
   FlowGraph,
   FlowNode,
@@ -319,6 +328,29 @@ export interface SimFlowGraphFacade {
   nodeStatuses(): Record<string, string>;
 }
 
+/**
+ * 자연어 Planner 파사드 (Phase 9 — 게이트/자동화용). 플래너 서비스는 앱 수명이지만,
+ * 생성 결과는 "현재 활성 씬"의 그래프에 로드되므로 이 파사드는 씬별 __sim에 실린다.
+ * generate는 UI와 완전히 동일한 흐름을 탄다: buildContext → 생성 → 검증 → 그래프 로드.
+ * 자동 재생하지 않는다(§2.9) — 사용자가(또는 게이트가) ▶ Play를 눌러야 실행된다.
+ */
+export interface SimPlannerFacade {
+  /** 자연어 → 생성 (현재 backend, 교체 모드). 결과 type만 요약해 돌려준다. */
+  generate(nl: string): Promise<{ type: string }>;
+  /** 마지막 생성 결과 요약 (없으면 null) */
+  lastResult(): {
+    type: string;
+    stepCount?: number;
+    assumptions?: string[];
+    question?: string;
+    options?: string[];
+  } | null;
+  /** 마지막 생성 시퀀스가 현재 그래프에 로드되었는지 (origin 'generated' 노드 존재 여부) */
+  isLoadedIntoGraph(): boolean;
+  /** 현재 player 상태 문자열 ('idle'|'running'|'done') — §2.9 무자동재생 증명용 */
+  playerStatus(): string;
+}
+
 /** window.__sim으로 노출되는 시뮬 핸들. Rapier 타입은 새지 않는다(PhysicsWorld 경계). */
 export interface SimHandle {
   readonly engine: Engine;
@@ -330,6 +362,7 @@ export interface SimHandle {
   readonly editor: SimEditorFacade;
   readonly history: SimHistoryFacade;
   readonly flowGraph: SimFlowGraphFacade;
+  readonly planner: SimPlannerFacade;
   readonly player?: SimPlayerFacade;
 }
 
@@ -468,6 +501,17 @@ interface ActiveScene {
   uniquifyId(base: string): string;
   /** 엔티티를 드롭 좌표(null이면 뷰포트 중앙)의 바닥 레이캐스트 지점에 추가 + 선택 */
   placeEntity(entity: EntitySpec, dropClient: { x: number; y: number } | null): Promise<string>;
+  /**
+   * 플래너 생성 시퀀스를 그래프에 로드한다 (Phase 9 — 검증 통과본만, §2.9). seq는 호출부가
+   * 이미 validateSequence를 통과시킨 값이다. replace는 교체(전부 origin 'generated'),
+   * append는 기존 뒤에 이어 붙이며 새 step만 'generated'로 표시하고 label 충돌은 개명한다.
+   * 자동 재생하지 않는다 — currentSequence만 교체하고 player는 로드하지 않는다.
+   */
+  loadGeneratedSequence(seq: ControlSequence, mode: GenerateMode): { ok: boolean; errors?: string[] };
+  /** 현재 그래프에 origin 'generated' 노드가 있는지 (planner 파사드 isLoadedIntoGraph용) */
+  hasGeneratedNodes(): boolean;
+  /** 현재 player 상태 문자열 (planner 파사드 playerStatus용) */
+  playerStatus(): string;
   dispose(): void;
 }
 
@@ -490,6 +534,94 @@ function updateUrlSceneParam(presetName: string | null): void {
   if (presetName !== null) url.searchParams.set('scene', presetName);
   else url.searchParams.delete('scene');
   window.history.replaceState(null, '', url);
+}
+
+// ── 자연어 Planner 설정 영속화 (Phase 9 — localStorage) ──────────────
+// 키는 이 브라우저에만 저장된다(공용 PC 경고는 설정 다이얼로그가 표시). 기본은 규칙 기반
+// (오프라인, 네트워크 없음). Anthropic 선택 + 키가 있을 때만 SDK 어댑터로 라우팅한다.
+
+/** localStorage 키 — { backend, apiKey, model } */
+const PLANNER_CONFIG_KEY = 'robotSimWeb.planner';
+
+/** localStorage에서 플래너 설정을 읽는다 (없거나 손상 시 규칙 기반 기본값) */
+function loadPlannerConfig(): PlannerBackendConfig {
+  try {
+    const raw = localStorage.getItem(PLANNER_CONFIG_KEY);
+    if (raw !== null) {
+      const parsed = JSON.parse(raw) as Partial<PlannerBackendConfig>;
+      return {
+        backend: parsed.backend === 'anthropic' ? 'anthropic' : 'rule-based',
+        apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : '',
+        model:
+          typeof parsed.model === 'string' && parsed.model.trim() !== ''
+            ? parsed.model
+            : DEFAULT_PLANNER_MODEL,
+      };
+    }
+  } catch {
+    // 손상된 저장값/localStorage 불가 — 기본값으로 진행
+  }
+  return { backend: 'rule-based', apiKey: '', model: DEFAULT_PLANNER_MODEL };
+}
+
+/** 플래너 설정을 localStorage에 저장한다 (프라이빗 모드 등 실패는 조용히 무시) */
+function savePlannerConfig(cfg: PlannerBackendConfig): void {
+  try {
+    localStorage.setItem(PLANNER_CONFIG_KEY, JSON.stringify(cfg));
+  } catch {
+    // 세션 한정으로만 동작 (localStorage 불가)
+  }
+}
+
+/** 설정 → PlannerService. anthropic + 키가 있으면 SDK 어댑터, 그 외엔 규칙 기반(방어적 폴백) */
+function buildPlannerService(cfg: PlannerBackendConfig): PlannerService {
+  if (cfg.backend === 'anthropic' && cfg.apiKey.trim() !== '') {
+    return new PlannerService({
+      backend: { adapter: new AnthropicAdapter({ apiKey: cfg.apiKey, model: cfg.model }) },
+    });
+  }
+  return new PlannerService({ backend: 'rule-based' });
+}
+
+/**
+ * '이어서(append)' 병합: 기존 step 뒤에 incoming step을 이어 붙인다. incoming의 label
+ * 이름이 기존 label과 충돌하면 suffix('_2','_3'...)로 개명하고, 같은 incoming 세그먼트의
+ * goto가 그 label을 가리키면 참조도 함께 갱신한다 (교체/이어서 모드 계약 — Phase 9).
+ */
+function appendStepsWithLabelRename(
+  existing: readonly ControlStep[],
+  incoming: readonly ControlStep[],
+): ControlStep[] {
+  const used = new Set<string>();
+  for (const step of existing) {
+    if (step.kind === 'label') used.add(step.name);
+  }
+  const rename = new Map<string, string>();
+  for (const step of incoming) {
+    if (step.kind !== 'label') continue;
+    if (!used.has(step.name)) {
+      used.add(step.name);
+      continue;
+    }
+    let n = 2;
+    let candidate = `${step.name}_${n}`;
+    while (used.has(candidate)) {
+      n += 1;
+      candidate = `${step.name}_${n}`;
+    }
+    rename.set(step.name, candidate);
+    used.add(candidate);
+  }
+  const renamedIncoming = incoming.map((step) => {
+    if (step.kind === 'label' && rename.has(step.name)) {
+      return { ...step, name: rename.get(step.name)! };
+    }
+    if (step.kind === 'goto' && rename.has(step.label)) {
+      return { ...step, label: rename.get(step.label)! };
+    }
+    return step;
+  });
+  return [...existing, ...renamedIncoming];
 }
 
 // ── 부트스트랩 ──────────────────────────────────────────────────────
@@ -1732,6 +1864,72 @@ async function boot(): Promise<void> {
       });
       built.flowCanvas = flowCanvas;
 
+      // ── 플래너 생성 시퀀스 로드 (Phase 9 — human-in-the-loop, §2.9) ────
+      // 검증은 호출부(main의 handlePlannerResult)가 이미 수행했다. 여기서는 그래프에
+      // origin 'generated'로 로드하고 §2.8 파이프라인(serializeGraph(scene))으로 한 번
+      // 더 재직렬화 검증한 뒤 commit한다. player는 로드하지 않는다 — sequenceArmed=false
+      // 유지 → 다음 ▶ Play가 armSequenceIfAvailable에서 재검증→로드(무자동재생 증명).
+      const loadGeneratedSequence = (
+        seq: ControlSequence,
+        mode: GenerateMode,
+      ): { ok: boolean; errors?: string[] } => {
+        const useAppend =
+          mode === 'append' && currentSequence !== null && flowGraph.nodes.length > 0;
+
+        let nextGraph: FlowGraph;
+        let nextId: string;
+        let nextLoop: boolean | undefined;
+
+        if (useAppend) {
+          const base = currentSequence!;
+          const appendedSteps = appendStepsWithLabelRename(base.steps, seq.steps);
+          const mergedSeq: ControlSequence = {
+            id: flowSeqMeta.id,
+            robot: base.robot,
+            ...(flowSeqMeta.loop !== undefined ? { loop: flowSeqMeta.loop } : {}),
+            steps: appendedSteps,
+          };
+          // 기존 노드의 origin은 보존하고, 새로 이어 붙인 step만 'generated'로 표시한다
+          // (fromSequence는 step 순서와 노드가 1:1 — 앞 k개가 기존, 뒤가 새 step).
+          const oldOrigins = flowGraph.nodes.map((node) => node.origin);
+          const rebuilt = fromSequence(mergedSeq, { origin: 'manual' });
+          const k = oldOrigins.length;
+          const nodes: FlowNode[] = rebuilt.nodes.map((node, i) =>
+            i < k
+              ? { ...node, origin: oldOrigins[i] ?? 'manual' }
+              : { ...node, origin: 'generated' },
+          );
+          nextGraph = { nodes, edges: deriveEdges(nodes), robot: rebuilt.robot };
+          nextId = flowSeqMeta.id;
+          nextLoop = flowSeqMeta.loop;
+        } else {
+          nextGraph = fromSequence(seq, { origin: 'generated' });
+          nextId = seq.id;
+          nextLoop = seq.loop;
+        }
+
+        const serialized = serializeGraph(nextGraph, editor.spec, {
+          id: nextId,
+          ...(nextLoop !== undefined ? { loop: nextLoop } : {}),
+        });
+        if (!serialized.ok) {
+          lastFlowValidation = serialized.errors;
+          return { ok: false, errors: serialized.errors };
+        }
+        flowSeqMeta.id = nextId;
+        flowSeqMeta.loop = nextLoop;
+        flowGraph = nextGraph;
+        lastFlowValidation = 'ok';
+        commitFlowSequence(serialized.sequence);
+        setFlowPaneVisible(true); // 생성된 플로우는 페인을 열어 검토 대상으로 노출
+        flowCanvas.render();
+        nodeEditor.refresh();
+        return { ok: true };
+      };
+
+      const hasGeneratedNodes = (): boolean =>
+        flowGraph.nodes.some((node) => node.origin === 'generated');
+
       /**
        * player 커서 → 캔버스 상태 점 (기본 동기 — Phase 10이 심화): 커서 앞 done ·
        * 현재 active · 뒤 pending. 비활성 노드는 active로 표시하지 않는다(스킵은 같은
@@ -1886,6 +2084,16 @@ async function boot(): Promise<void> {
         nodeStatuses: () => ({ ...flowStatuses }),
       };
 
+      // 플래너 파사드 (Phase 9): 생성은 앱 수명 runGenerate를 위임 호출한다 — UI와
+      // 완전히 같은 흐름(검증 → 그래프 로드 → 무자동재생). 로드 여부/player 상태는 이
+      // 씬의 상태에서 읽는다. lastResult는 앱 수명(마지막 생성)이라 boot 클로저를 본다.
+      const plannerFacade: SimPlannerFacade = {
+        generate: (nl) => runGenerate(nl, 'replace').then((result) => ({ type: result.type })),
+        lastResult: () => lastPlannerResult,
+        isLoadedIntoGraph: () => hasGeneratedNodes(),
+        playerStatus: () => player.status,
+      };
+
       // 씬 전환 후 게이트/자동화가 보는 핸들은 항상 "이" 씬의 새 인스턴스들이다
       window.__sim = {
         engine,
@@ -1897,6 +2105,7 @@ async function boot(): Promise<void> {
         editor: editorFacade,
         history: historyFacade,
         flowGraph: flowFacade,
+        planner: plannerFacade,
         ...(playerFacade ? { player: playerFacade } : {}),
       };
 
@@ -1964,6 +2173,9 @@ async function boot(): Promise<void> {
         engine,
         uniquifyId,
         placeEntity,
+        loadGeneratedSequence,
+        hasGeneratedNodes,
+        playerStatus: () => player.status,
         dispose: teardownBuilt,
       };
     } catch (err) {
@@ -2158,6 +2370,184 @@ async function boot(): Promise<void> {
       pendingImportDrop = { x: e.clientX, y: e.clientY };
       importDialog.openWith(file);
     }
+  });
+
+  // ── 자연어 Planner (Phase 9, UX_DESIGN §3.1/§4.1 Flow 1, PLANNER.md — 앱 수명) ──
+  // 설정(backend/apiKey/model)은 localStorage 영속. 규칙 기반(오프라인)이 기본이며,
+  // Anthropic 선택 시 이 세션 브라우저에서 직접 호출한다(교육/프로토타입 — PRD §6).
+  // 생성 흐름은 §2.9를 매 출구에서 집행한다: (1) 플래너가 검증한 sequence를 실행 노출
+  // 직전 한 번 더 validateSequence(심층 방어) → 실패면 로드하지 않음, (2) 검증 통과본만
+  // 그래프에 로드하고 자동 재생하지 않음(사용자 ▶ Play), (3) clarify/error/예외는
+  // 시뮬레이터로 보내지 않고 명확화 카드·토스트·콘솔로 표면화한다.
+
+  const toasts = mountToasts(document.body);
+  const clarifyCard = mountClarifyCard(document.body);
+
+  let plannerConfig = loadPlannerConfig();
+  let plannerService = buildPlannerService(plannerConfig);
+
+  /** 중복 생성 가드 + nl-input busy 표시 */
+  let generating = false;
+  /** nl-input 핸들 (mount 후 할당 — runGenerate가 상태를 표시) */
+  let nlInput: NlInputHandle | null = null;
+  /** planner 파사드 lastResult()용 — 마지막 생성 결과 요약 (앱 수명, 마지막 생성) */
+  let lastPlannerResult:
+    | {
+        type: string;
+        stepCount?: number;
+        assumptions?: string[];
+        question?: string;
+        options?: string[];
+      }
+    | null = null;
+
+  /**
+   * 현재 활성 씬의 실시간 상태 스냅샷 (관절값 + 물체 월드 위치) — 그라운딩 정확도를
+   * 높인다(밀려 이동한 물체는 현재 위치로). 진실은 물리(world) — public 파사드로만 읽는다.
+   */
+  const buildLiveSnapshot = (): WorldSnapshot => {
+    const sim = window.__sim;
+    if (!sim) return {};
+    const jointValuesByRobot: Record<string, Record<string, number>> = {};
+    for (const robotId of sim.robots.ids()) {
+      jointValuesByRobot[robotId] = sim.robots.readJoints(robotId);
+    }
+    const positionsByEntity: Record<string, [number, number, number]> = {};
+    for (const id of sim.editor.entityIds()) {
+      const bodies = sim.world.bodiesOfEntity(id);
+      if (bodies.length > 0) {
+        const p = sim.world.getPose(bodies[0]!).position;
+        positionsByEntity[id] = [p[0], p[1], p[2]];
+      }
+    }
+    return { jointValuesByRobot, positionsByEntity };
+  };
+
+  /** 플래너 결과 3분기 처리 (§2.9 집행 — 검증 통과본만 그래프 로드, 무자동재생) */
+  const handlePlannerResult = (
+    result: PlannerResult,
+    nl: string,
+    mode: GenerateMode,
+    scene: ActiveScene,
+  ): void => {
+    if (result.type === 'sequence') {
+      // 심층 방어(§2.9): 플래너가 이미 검증했지만 실행 노출 직전 현재 씬에 한 번 더 검증
+      const validation = validateSequence(result.sequence, scene.editor.spec);
+      if (!validation.ok) {
+        const detail = validation.errors.join('\n');
+        appLog('error', `생성 시퀀스 재검증 실패 — 로드하지 않습니다:\n${detail}`);
+        toasts.show('error', '생성된 시퀀스가 검증을 통과하지 못했습니다', { detail });
+        nlInput?.setState('error', detail);
+        lastPlannerResult = { type: 'error' };
+        return;
+      }
+      const loaded = scene.loadGeneratedSequence(validation.value, mode);
+      if (!loaded.ok) {
+        const detail = (loaded.errors ?? ['알 수 없는 오류']).join('\n');
+        appLog('error', `생성 시퀀스 그래프 로드 실패:\n${detail}`);
+        toasts.show('error', '생성된 시퀀스를 그래프에 로드하지 못했습니다', { detail });
+        nlInput?.setState('error', detail);
+        lastPlannerResult = { type: 'error' };
+        return;
+      }
+      const assumptions = result.assumptions ?? [];
+      if (assumptions.length > 0) {
+        toasts.show('info', `가정: ${assumptions.join(' · ')}`);
+        appLog('info', `플래너 가정: ${assumptions.join(' / ')}`);
+      }
+      const modeKo = mode === 'append' ? '이어서' : '교체';
+      appLog(
+        'info',
+        `플래너 생성 완료 (${validation.value.steps.length}개 step · ${modeKo}) — ▶ Play로 재생`,
+      );
+      lastPlannerResult = {
+        type: 'sequence',
+        stepCount: validation.value.steps.length,
+        ...(assumptions.length > 0 ? { assumptions } : {}),
+      };
+      nlInput?.setState('success');
+      return;
+    }
+
+    if (result.type === 'clarify') {
+      lastPlannerResult = {
+        type: 'clarify',
+        question: result.question,
+        ...(result.options ? { options: result.options } : {}),
+      };
+      nlInput?.setState('clarify');
+      clarifyCard.show(result.question, result.options, (choice) => {
+        if (choice === null) {
+          nlInput?.setState('idle');
+          return;
+        }
+        // P1 규약: 선택을 원문에 되붙여 재생성 ("... [선택: box_b]")
+        void runGenerate(`${nl} [선택: ${choice}]`, mode);
+      });
+      return;
+    }
+
+    // error
+    lastPlannerResult = { type: 'error' };
+    appLog('error', `플래너 오류: ${result.message}`);
+    toasts.show('error', result.message);
+    nlInput?.setState('error', result.message);
+  };
+
+  /**
+   * 자연어 → 생성. buildContext(현재 씬 + 라이브 스냅샷) → plannerService.generate →
+   * handlePlannerResult. 어댑터/네트워크 예외는 한국어 토스트로 표면화한다. 결과를
+   * 돌려주어 파사드(게이트)가 type을 검사할 수 있게 한다.
+   */
+  const runGenerate = async (nl: string, mode: GenerateMode): Promise<PlannerResult> => {
+    clarifyCard.hide(); // 새 생성은 대기 중인 명확화 카드를 조용히 대체
+    const scene = active;
+    if (!scene) {
+      const message = '활성 씬이 없어 생성할 수 없습니다.';
+      lastPlannerResult = { type: 'error' };
+      toasts.show('error', message);
+      nlInput?.setState('error', message);
+      return { type: 'error', message };
+    }
+    if (generating) {
+      return { type: 'error', message: '생성이 이미 진행 중입니다.' };
+    }
+    generating = true;
+    nlInput?.setState('generating');
+    try {
+      const ctx = buildContext(scene.editor.spec, buildLiveSnapshot());
+      const result = await plannerService.generate(nl, ctx, scene.editor.spec);
+      handlePlannerResult(result, nl, mode, scene);
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      appLog('error', `플래너 예외: ${message}`);
+      toasts.show('error', '생성 중 오류가 발생했습니다', { detail: message });
+      nlInput?.setState('error', message);
+      lastPlannerResult = { type: 'error' };
+      return { type: 'error', message };
+    } finally {
+      generating = false;
+    }
+  };
+
+  // nl-input (커맨드바 중앙-좌 — 재생 컨트롤 앞). 생성 요청만 발행하고 실행·검증·그래프
+  // 로드는 runGenerate가 담당한다 (nl-input은 core/planner를 모른다 — CLAUDE.md §3).
+  nlInput = mountNlInput(commandBar.center, {
+    generate: (nl, mode) => runGenerate(nl, mode).then(() => undefined),
+    isBusy: () => generating,
+  });
+
+  // ⚙ 플래너 설정 (커맨드바 우측) — 저장 시 localStorage 영속 + 서비스 재구성
+  mountPlannerSettings(commandBar.right, {
+    get: () => plannerConfig,
+    set: (cfg) => {
+      plannerConfig = cfg;
+      savePlannerConfig(cfg);
+      plannerService = buildPlannerService(cfg);
+      appLog('info', `플래너 백엔드 설정: ${plannerService.backendName}`);
+      toasts.show('success', `플래너 설정 저장됨 — ${plannerService.backendName}`);
+    },
   });
 
   // ── 부트 씬 로드 (?scene= 딥링크 — 기존 게이트 계약 그대로) ───────

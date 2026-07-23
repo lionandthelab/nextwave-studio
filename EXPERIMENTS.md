@@ -1066,3 +1066,110 @@ Phase 8 통합의 "알려진 한계"였던 "씬 편집이 라이브 시퀀스 �
   src/core/control/steps.ts(문구 계약 상수), src/ui/theme.ts(+토큰 3종),
   src/ui/flow-graph/canvas.ts(토큰 소비), docs/UX_DESIGN.md §6(FlowNode.id 정정),
   scripts/gate-browser.mjs(flow-graph 어서션 2종), 테스트 2파일.
+
+---
+
+## [2026-07-23] Phase 9 — 자연어 Planner 앱 통합 (설정·생성 흐름·그래프 로드·게이트)
+
+- 상태: 결정됨
+- 맥락: P1(src/planner/* — PlannerService·buildContext·규칙기반/Anthropic 어댑터·복구
+  루프)와 P2(nl-input·clarify-card·toast·planner-settings ui) 랜딩분을 앱에 배선한다.
+  자연어 → 검증된 ControlSequence 초안 → Flow Graph 로드까지 §2.9(미검증/무자동재생)를
+  매 출구에서 집행하는 것이 목표. 규범: PLANNER.md, UX_DESIGN §4.1 Flow 1, ROADMAP Phase 9.
+
+### 선택 — (a) 플래너 백엔드: 규칙 기반 오프라인 기본 + Anthropic SDK 어댑터
+- **기본은 규칙 기반(오프라인)** — 네트워크·API 키 없이 결정론적으로 동작하므로 데모/
+  게이트가 재현 가능하다. Anthropic은 설정에서 명시적으로 켜야 활성(키 필요).
+- **구조화 출력(structured outputs, output_config.json_schema)으로 JSON 형식을 보장**
+  한다. PLANNER.md §4.1의 "결정성 힌트: 온도 낮게"는 이 모델(claude-opus-4-8)에서
+  temperature/top_p/top_k가 제거되어(전송 시 400) 쓸 수 없다 — 대신 **구조화 출력 +
+  few-shot 예시 1개 + 명시적 그라운딩 규약**으로 안정성을 확보한다(supersedes PLANNER.md
+  §4.1의 온도 힌트 in practice). adaptive thinking 사용.
+- 어댑터 격리(LlmAdapter): main은 설정에서 AnthropicAdapter(apiKey/model)를 주입만 하고,
+  planner 계층은 localStorage/DOM을 모른다(CLAUDE.md §3). anthropic+키가 있을 때만 SDK
+  경로, 그 외엔 규칙 기반으로 방어적 폴백(buildPlannerService).
+
+### 선택 — (b) API 키 localStorage 저장 UX와 경고
+- 설정은 `localStorage['robotSimWeb.planner']`에 { backend, apiKey, model }로 저장.
+  손상값/localStorage 불가(프라이빗 모드)는 조용히 규칙 기반 기본으로 폴백한다.
+- **투명성 고지**(planner-settings): "키는 이 브라우저에만 저장되고 Anthropic 호출에만
+  쓰이며 공용 PC에서 쓰지 말 것" — 항상 표시. 교육/프로토타입 도구임을 재확인(PRD §6).
+- 게이트는 **fresh chromium(빈 localStorage) = 규칙 기반**이라 네트워크 없이 결정론적.
+
+### 선택 — (c) 이어서(append) 모드 label 충돌 처리
+- append 병합은 기존 step 뒤에 incoming step을 이어 붙이되, incoming의 label 이름이
+  기존 label과 충돌하면 suffix('_2','_3'...)로 개명하고 **같은 세그먼트의 goto 참조도
+  함께 갱신**한다(appendStepsWithLabelRename). 서로 다른 세그먼트로 향하는 goto는 건드리지
+  않는다(edge case, 문서화).
+- append는 **새로 이어 붙인 step만 origin 'generated'**로 표시하고 기존 노드 origin은
+  보존한다(fromSequence는 step↔노드 1:1이므로 앞 k개=기존, 뒤=신규). 병합본은 §2.8
+  파이프라인(serializeGraph(scene) 참조 무결성)으로 재검증 후에만 커밋된다.
+
+### 선택 — 규칙 기반 reach를 2단(approach+nudge)으로 — 결정론적 접촉 계약
+- **맥락**: waitForCollision 배리어는 init 마커 "이후"의 충돌만 감지한다(steps.ts
+  happenedSince). 단일 moveJoints로 박스에 닿으면 접촉 start가 배리어 시작 "전"에 발생해
+  놓치고 timeout(6s)으로 흘러 done이 늦고 노드가 'error'로 마킹된다.
+- **선택**: planTouch를 open→**moveJoints(approach, 박스 바로 위)**→**setJoints(nudge,
+  눌러 내림)**→waitForCollision→close→wait→home = 7 step으로 바꿨다(기존 6 → 7).
+  이는 arm-touch-box.sequence.json의 검증된 2단 패턴과 동일하다 — nudge가 배리어 직후
+  접촉 start를 만들어 이벤트로 해제한다. mid 밴드(0.3≤r<0.45) 값은 arm-touch-box의 검증
+  자세(approach joint2 0.639·joint3 1.414·joint5 1.089 / nudge 0.683·1.442·1.017)를 채택.
+  box_a[0.35,·,0.15]·box_b[0.3,·,-0.2] 모두 이 밴드.
+- **측정치**: planner 게이트에서 arm×box_a 충돌 start @5.03s, done @play+5.27s(이벤트
+  해제 — timeout≈12s 경로 아님). rule-based.test.ts 20건 통과(구조 6→7 step 반영).
+
+### 선택 — 파사드/글루 경계
+- **__sim.planner 파사드**(씬별): generate(nl)은 앱 수명 runGenerate를 위임 호출한다 —
+  UI와 완전히 같은 흐름(buildContext→생성→심층 방어 재검증→그래프 로드→무자동재생).
+  lastResult/isLoadedIntoGraph/playerStatus로 게이트가 §2.9(무자동재생)를 증명한다.
+- **앱 수명 vs 씬별**: 플래너 서비스·설정·nl-input·clarify·toast·⚙는 앱 수명(boot),
+  생성 시퀀스는 "현재 씬"의 그래프에 로드되므로 ActiveScene.loadGeneratedSequence로
+  위임(replace/append). 씬 전환을 가로질러 nl-input은 커맨드바 중앙-좌에 유지된다.
+- **AI 배지 DOM 노출**: canvas.ts 노드 <g>에 data-origin=node.origin 추가(배지 텍스트와
+  병행) — 게이트가 generated 노드를 DOM으로 검증. 시각 변화 없음(배지는 기존대로 렌더).
+- **심층 방어(§2.9)**: planner가 이미 validateSequence를 통과시키지만, main도 실행 노출
+  직전 현재 씬에 한 번 더 validateSequence — 실패 시 로드하지 않고 토스트/콘솔로 표면화.
+
+### 트레이드오프
+- 규칙 기반 reach는 정확한 IK가 아니라 밴드 테이블 휴리스틱 — near/far 밴드는 mid의
+  형상 추세를 유지한 근사이며 게이트로 검증되는 것은 mid(box_a/box_b)뿐. IK 솔버는 백로그.
+- append origin 승격은 기존 노드를 'manual'로 재빌드 후 인덱스로 이전 origin을 복원한다 —
+  노드 id는 fromSequence가 새로 발급('n1'..) 하므로 선택/상태는 commit이 리셋(무해).
+
+### 검증 (전부 실측)
+- `tsc --noEmit` 통과, eslint 경고 0, vitest **662/662 통과**(+2 파일·+기존 대비 planner
+  게이트 반영), `vite build` 성공.
+- 브라우저 게이트 **ALL PASS**: planner(신규 — 생성/AI배지/무자동재생/실제 접촉/clarify→
+  box_b/견고성) · flow-graph · arm-sequence · scene-builder · scene-switch · pick-and-place.
+- **빌드 마찰(환경)**: `vite build`가 Bash(git-bash)의 소문자 드라이브레터 cwd(`c:\...`)
+  에서 `[vite:html-inline-proxy] No matching HTML proxy module found`(대소문자 불일치
+  `C:` vs `c:`)로 실패 — PowerShell(대문자 `C:\...`)에서는 정상. 코드/설정 무관한 Vite
+  Windows 드라이브레터 케이싱 버그. 빌드/게이트는 PowerShell에서 실행할 것.
+- 영향 파일: src/main.ts(플래너 boot 배선 · runGenerate/handlePlannerResult · 설정
+  영속화 · loadGeneratedSequence/append 병합 · __sim.planner 파사드), src/planner/
+  adapters/rule-based.ts(2단 접근+nudge reach), src/planner/planner.ts(few-shot 2단),
+  src/ui/flow-graph/canvas.ts(data-origin), scripts/gate-browser.mjs(--expect=planner),
+  src/planner/rule-based.test.ts(7 step 반영).
+
+## [2026-07-23] 그라운딩⇄검증 정렬: gripper 전용 관절을 SceneContext.joints에서 제외
+
+- 상태: 결정됨
+- 맥락: 안전 리뷰 지적 — scene-context.ts의 robotJointNames가 joints 배열을
+  home ∪ jointMap ∪ jointLimits ∪ gripper.joints로 유도했으나, validate.ts의
+  checkJointNames는 knownJoints를 home ∪ jointMap ∪ jointLimits로만 구성한다.
+  gripper 전용 관절(예: finger_left_joint)은 LLM에 "사용 가능 관절"로 광고되지만
+  moveJoints/setJoints 대상으로 쓰면 검증에서 거부되는 비대칭이 있었다.
+- 선택: robotJointNames에서 gripper.joints 포함을 제거해 joints 배열을 checkJointNames의
+  knownJoints와 정확히 일치시킨다(Option B). validator는 손대지 않는다.
+- 근거: 그리퍼는 별도 제어면이다 — `gripper` step(state: open/close/0..1)으로 구동되고
+  SceneContextRobot.gripper로 이미 완전히 노출된다. gripper.joints 존재 검증은 URDF를
+  아는 최초 지점인 scene-loader.attachRobotPhysics가 담당한다(기존 리뷰 회귀 결정).
+  따라서 gripper.joints는 moveJoints/setJoints 대상이 아니며, joints 배열로 광고하면
+  잘못된 메타데이터(revolute/[-π,π]/current 0인 평행 그리퍼 prismatic 관절)까지 함께
+  노출된다. validator를 느슨하게 하는 Option A는 평행 그리퍼 추상(양 손가락 동시 보간)을
+  깨므로 채택하지 않았다. §2.9 위반 아님(fail-safe) — 그라운딩 정확도·재시도 낭비 개선.
+- 트레이드오프: gripper 관절명은 이제 joints 배열이 아닌 gripper 객체로만 LLM에 보인다
+  (의도된 제어 경로). gripper.joints가 home 등에도 선언되면 그 경로로 자연히 포함된다.
+- 영향 파일: src/planner/scene-context.ts(robotJointNames + docstring),
+  src/planner/scene-context.test.ts(joints 배열 기대치 갱신 + 그라운딩⇄검증 정렬
+  회귀 테스트 2건 추가: validateSequence 통과/거부).

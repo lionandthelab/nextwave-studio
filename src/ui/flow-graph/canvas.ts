@@ -741,6 +741,8 @@ export function mountFlowCanvas(host: HTMLElement, deps: FlowCanvasDeps): FlowCa
     const g = svgEl('g', { class: 'rsw-fg-node', role: 'button' });
     g.dataset.fgNode = node.id;
     g.dataset.testid = 'flow-node';
+    // 출처를 DOM에 노출한다 (배지 텍스트와 병행 — 게이트/자동화의 'AI'(generated) 검증용).
+    g.dataset.origin = node.origin;
     if (!node.enabled) g.setAttribute('opacity', '0.5');
 
     // 본체 (stroke는 CSS 클래스 소유 — hover/선택 상태와 조합)
