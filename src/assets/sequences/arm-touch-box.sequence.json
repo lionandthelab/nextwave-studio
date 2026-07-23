@@ -1,0 +1,27 @@
+{
+  "id": "arm-touch-box",
+  "robot": "arm",
+  "loop": false,
+  "steps": [
+    { "kind": "gripper", "state": "open", "durationSec": 0.4 },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint1": -0.405, "joint2": 0.639, "joint3": 1.414, "joint5": 1.089 },
+      "durationSec": 2.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "setJoints",
+      "targets": { "joint2": 0.683, "joint3": 1.442, "joint5": 1.017 }
+    },
+    { "kind": "waitForCollision", "between": ["arm", "box_a"], "timeoutSec": 6 },
+    { "kind": "gripper", "state": "close", "durationSec": 0.5 },
+    { "kind": "wait", "durationSec": 0.5 },
+    {
+      "kind": "moveJoints",
+      "targets": { "joint1": 0, "joint2": -0.6, "joint3": 1.2, "joint5": -0.6 },
+      "durationSec": 2.0,
+      "easing": "easeInOut"
+    }
+  ]
+}

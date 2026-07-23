@@ -135,6 +135,13 @@ export interface SceneHandle {
   /** 씬의 로봇 바인딩 보관소 — Engine preStep 훅이 robots.tickAll()을 호출한다. */
   readonly robots: RobotRegistry;
   /**
+   * 엔티티 id → 시각 노드 (프리미티브/바닥 등 비로봇 엔티티만 — 충돌 하이라이트용,
+   * UX_DESIGN §3.3). 로봇의 시각은 RobotHandle이 소유하므로 여기 포함되지 않는다 —
+   * 로봇 노드 매핑은 글루(main.ts)가 loadRobot 시점에 수집한다. 읽기 전용(순수 시각
+   * 소비 전용 — 불변식 §2.1: 물리 pose를 역으로 쓰는 용도 금지).
+   */
+  readonly visualNodes: ReadonlyMap<EntityId, VisualNode>;
+  /**
    * 모든 바디를 초기 스펙 트랜스폼으로 텔레포트하고 속도를 0으로 만든다
    * — 동일 SceneSpec에서 동일 궤적을 재현하는 결정론적 재생용 (SIMULATION.md §6).
    * 로봇은 applyHome()으로 생성 시점 관절 포즈를 복원하고, 링크 바디를 home FK
@@ -214,9 +221,14 @@ export class SceneLoader {
     }
 
     const entityIds: readonly EntityId[] = built.map((b) => b.entityId);
+    const visualNodes = new Map<EntityId, VisualNode>();
+    for (const b of built) {
+      if (b.node) visualNodes.set(b.entityId, b.node);
+    }
     return {
       entityIds,
       robots,
+      visualNodes,
       reset: (): void => {
         for (const b of built) {
           if (b.robot) {
@@ -310,6 +322,24 @@ export class SceneLoader {
         jointLimitOverrides: spec.jointLimits,
         home: spec.home,
       });
+      // gripper.joints 존재 검증 — URDF 관절 목록과 스키마 gripper 설정을 모두 아는
+      // 최초 지점이 여기다 (validateSequence는 URDF를 볼 수 없고 checkJointNames는
+      // gripper step을 다루지 않는다). 여기서 거르지 않으면 재생 중 gripper step의
+      // resolveJoint 예외가 Engine rAF 루프를 통째로 죽인다 — 로드 시점의 한국어
+      // 오류(부트스트랩 오버레이)로 앞당긴다.
+      if (spec.gripper) {
+        for (const jointName of spec.gripper.joints) {
+          try {
+            binding.resolveJoint(jointName);
+          } catch (err) {
+            throw new Error(
+              `scene-loader: 로봇 '${spec.id}'의 gripper.joints에 존재하지 않는 관절 ` +
+                `'${jointName}'이(가) 있습니다 — ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+      }
+
       // FK 뷰(시각 로봇)를 home 관절 상태로 갱신 — linkBodies가 비어 있어 물리 push 없음
       binding.tick();
 

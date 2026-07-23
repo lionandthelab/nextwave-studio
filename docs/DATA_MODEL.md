@@ -112,6 +112,13 @@ interface RobotSpec extends EntitySpec {
   // 관절 자동 collider 생성 정책
   linkColliders?: 'fromVisual' | 'primitive' | 'none';
   selfCollision?: boolean;               // 기본 false (인접 링크 무시)
+  // 그리퍼 구성: `gripper` 제어 step이 구동할 관절과 open/close 값 매핑.
+  // 값은 각 관절에 동일하게 적용된다(평행 그리퍼). 0..1 상태는 close↔open 선형 보간.
+  gripper?: {
+    joints: string[];                    // URDF 관절명(또는 jointMap 논리명)
+    open: number;                        // 열림 상태 관절값 (예: 0.03)
+    close: number;                       // 닫힘 상태 관절값 (예: 0.0)
+  };
 }
 ```
 

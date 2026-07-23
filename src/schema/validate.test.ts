@@ -377,6 +377,83 @@ describe('validateSequence — 시퀀스 자체 규칙', () => {
     expect(text).toContain('steps[0].timeoutSec: timeoutSec는 0보다 커야 합니다');
   });
 
+  it('goto times가 음수면 실패한다', () => {
+    const text = joined(
+      validateSequence({
+        id: 'neg-times',
+        robot: 'arm',
+        steps: [
+          { kind: 'label', name: 'start' },
+          { kind: 'goto', label: 'start', times: -3.5 },
+        ],
+      }),
+    );
+    expect(text).toContain('steps[1].times');
+    expect(text).toContain('times는 0 이상이어야 합니다');
+  });
+
+  it('goto times가 소수면 실패한다', () => {
+    const text = joined(
+      validateSequence({
+        id: 'frac-times',
+        robot: 'arm',
+        steps: [
+          { kind: 'label', name: 'start' },
+          { kind: 'goto', label: 'start', times: 1.5 },
+        ],
+      }),
+    );
+    expect(text).toContain('steps[1].times');
+    expect(text).toContain('times는 정수여야 합니다');
+  });
+
+  it('goto times 0(점프 안 함)은 허용한다', () => {
+    expectOk(
+      validateSequence({
+        id: 'zero-times',
+        robot: 'arm',
+        steps: [
+          { kind: 'label', name: 'start' },
+          { kind: 'goto', label: 'start', times: 0 },
+        ],
+      }),
+    );
+  });
+
+  it('gripper state 숫자값이 0..1 밖이면 실패한다 (런타임 clamp에 가려지는 데이터 오류)', () => {
+    const over = joined(
+      validateSequence({
+        id: 'gripper-over',
+        robot: 'arm',
+        steps: [{ kind: 'gripper', state: 42 }],
+      }),
+    );
+    expect(over).toContain('steps[0].state');
+    expect(over).toContain('0 이상 1 이하');
+
+    const under = joined(
+      validateSequence({
+        id: 'gripper-under',
+        robot: 'arm',
+        steps: [{ kind: 'gripper', state: -0.1 }],
+      }),
+    );
+    expect(under).toContain('steps[0].state');
+    expect(under).toContain('0 이상 1 이하');
+  });
+
+  it('gripper state 경계값 0/1과 중간값은 허용한다', () => {
+    for (const state of [0, 0.5, 1]) {
+      expectOk(
+        validateSequence({
+          id: `gripper-${state}`,
+          robot: 'arm',
+          steps: [{ kind: 'gripper', state }],
+        }),
+      );
+    }
+  });
+
   it('알 수 없는 step kind는 실패한다', () => {
     const text = joined(
       validateSequence({

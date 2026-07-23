@@ -11,6 +11,9 @@
 //   3. window.__sim 노출 (engine/world/sceneHandle/spec)
 //   4. 시뮬 시간이 실제로 전진 (simTimeSec > 1)
 // --expect 로 씬별 물리 어서션 추가 (아래 SCENE_BY_EXPECT가 ?scene= 파라미터로 매핑).
+//   --expect=arm-sequence : Phase 4+5 통합 — 시퀀스 무자동재생(human-in-the-loop) 확인 후
+//   파사드 play()로 재생 시작 → arm×box_a 충돌 start 이력 + waitForCollision 통과 +
+//   그리퍼 닫힘 + status done + 충돌 로그 DOM 행 검증.
 
 import { spawn, execSync } from 'node:child_process';
 import { chromium } from 'playwright';
@@ -31,6 +34,7 @@ const expectArg = process.argv.find((a) => a.startsWith('--expect='))?.split('='
 const SCENE_BY_EXPECT = {
   'falling-boxes': 'falling-boxes',
   arm: 'arm-and-boxes',
+  'arm-sequence': 'arm-and-boxes',
 };
 
 // --expect=arm 어서션 상수
@@ -42,6 +46,16 @@ const ARM_LYING_MAX_Y_M = 0.2;          // 전 링크가 이 아래면 로봇이
 const ARM_JOINT1_TARGET_RAD = 1.2;      // 구동 검증용 목표값
 const ARM_DRIVE_WAIT_MS = 300;          // 목표 적용 후 물리 반영 대기
 const ARM_MIN_LINK_DISPLACEMENT_M = 0.02; // x/z 이동 판정 임계
+
+// --expect=arm-sequence 어서션 상수 (arm-touch-box.sequence.json 기준)
+const SEQ_WAIT_FOR_COLLISION_INDEX = 3;   // [gripper, moveJoints, setJoints, ★waitForCollision, gripper, wait, moveJoints]
+const SEQ_STEP_COUNT = 7;
+const SEQ_SIM_TIME_BUDGET_SEC = 12;       // Play 이후 이 sim 시간 안에 done이어야 함
+const SEQ_EVENT_DONE_MAX_SIM_SEC = 9;     // Play→done sim 경과: 이벤트 해제 경로 ≈6s, timeout 경로 ≈11.9s — 9s 미만이어야 "실제 충돌" 해제
+const SEQ_POLL_INTERVAL_MS = 100;
+const SEQ_REALTIME_DEADLINE_MS = 30000;   // 폴링 실시간 상한 (행 방지)
+const SEQ_GRIPPER_OPEN_MIN_M = 0.025;     // "열림 관측" 판정 (open=0.03)
+const SEQ_GRIPPER_CLOSED_TOL_M = 2e-3;    // "닫힘(≈0) 관측" 판정 (close=0.0)
 
 function startPreview() {
   const proc = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort'], {
@@ -198,6 +212,113 @@ async function main() {
           `before=${JSON.stringify(before.map((p) => p.position))} after=${JSON.stringify(after.map((p) => p.position))}`,
         );
       }
+    }
+
+    if (expectArg === 'arm-sequence') {
+      // 1) player 파사드 노출 + 무자동재생 (human-in-the-loop — CLAUDE.md §2.9의 원칙)
+      const initial = await page.evaluate(() => {
+        const p = window.__sim?.player;
+        if (!p) return null;
+        return { status: p.status, stepCount: p.stepCount, index: p.currentStepIndex };
+      });
+      if (initial) pass('arm-sequence: __sim.player exposed', JSON.stringify(initial));
+      else fail('arm-sequence: __sim.player exposed', 'player facade not found');
+
+      if (initial?.status === 'idle') {
+        pass('arm-sequence: no autoplay (status idle before Play)');
+      } else {
+        fail('arm-sequence: no autoplay (status idle before Play)', `status=${initial?.status}`);
+      }
+      if (initial?.stepCount === SEQ_STEP_COUNT) {
+        pass(`arm-sequence: sequence validated & loaded (${SEQ_STEP_COUNT} steps)`);
+      } else {
+        fail(`arm-sequence: sequence validated & loaded (${SEQ_STEP_COUNT} steps)`, `stepCount=${initial?.stepCount}`);
+      }
+
+      // 파사드가 없으면(시퀀스 검증 회귀 등) 이후 상호작용 evaluate가 TypeError로
+      // 거부되어 하네스가 exit 2로 죽고 PASS/FAIL 표를 잃는다 — FAIL로 기록하고
+      // 남은 arm-sequence 어서션을 건너뛴다 (종료 코드는 어차피 비-0).
+      if (!initial) {
+        fail('arm-sequence: interaction checks skipped', 'player facade missing — Play/barrier/gripper/done assertions cannot run');
+      } else {
+      // 2) ▶ Play — 파사드로 사람 승인 재생 시작 (Play 시점 simTime을 경과 기준으로 기록)
+      const started = await page.evaluate(() => {
+        window.__sim.player.play();
+        return { status: window.__sim.player.status, simTimeSec: window.__sim.engine.simTimeSec };
+      });
+      const playSimTimeSec = started.simTimeSec;
+      if (started.status === 'running') pass('arm-sequence: Play starts sequence (status running)');
+      else fail('arm-sequence: Play starts sequence (status running)', `status=${started.status}`);
+
+      // 3) sim 시간 예산 안에서 done까지 폴링 — 그리퍼 열림→닫힘 궤적 관측
+      let sawGripperOpen = false;
+      let minFingerAfterOpenM = Infinity;
+      let sawPastWaitIndex = false;
+      let last = null;
+      const realDeadline = Date.now() + SEQ_REALTIME_DEADLINE_MS;
+      for (;;) {
+        last = await page.evaluate(() => {
+          const s = window.__sim;
+          const joints = s.robots.readJoints('arm');
+          return {
+            status: s.player.status,
+            index: s.player.currentStepIndex,
+            simTimeSec: s.engine.simTimeSec,
+            fingerMaxM: Math.max(joints.finger_left_joint ?? 0, joints.finger_right_joint ?? 0),
+          };
+        });
+        if (last.fingerMaxM >= SEQ_GRIPPER_OPEN_MIN_M) sawGripperOpen = true;
+        if (sawGripperOpen) minFingerAfterOpenM = Math.min(minFingerAfterOpenM, last.fingerMaxM);
+        if (last.index > SEQ_WAIT_FOR_COLLISION_INDEX) sawPastWaitIndex = true;
+        if (last.status === 'done') break;
+        if (last.simTimeSec - playSimTimeSec > SEQ_SIM_TIME_BUDGET_SEC || Date.now() > realDeadline) break;
+        await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+      }
+
+      // 4) 충돌 이력: arm × box_a start 이벤트가 기록되었다 (EventQueue 유래 — CLAUDE.md §2.4)
+      const armBoxStarts = await page.evaluate(() => {
+        const events = window.__sim.collision.recent(200);
+        return events
+          .filter((e) => e.phase === 'start'
+            && ((e.a === 'arm' && e.b === 'box_a') || (e.a === 'box_a' && e.b === 'arm')))
+          .map((e) => e.timeSec);
+      });
+      if (armBoxStarts.length >= 1) {
+        pass('arm-sequence: collision history has arm×box_a start', `timeSec=[${armBoxStarts.map((t) => t.toFixed(3)).join(', ')}]`);
+      } else {
+        fail('arm-sequence: collision history has arm×box_a start', `history=${JSON.stringify(await page.evaluate(() => window.__sim.collision.recent(50)))}`);
+      }
+
+      // 5) waitForCollision 통과 (배리어 해제 — 커서가 인덱스를 지나감)
+      if (sawPastWaitIndex) pass('arm-sequence: player advanced past waitForCollision index');
+      else fail('arm-sequence: player advanced past waitForCollision index', `last=${JSON.stringify(last)}`);
+
+      // 6) 그리퍼: 열림(≥0.025) 후 닫힘(≈0) 관측 — close step이 실제 구동됨
+      if (sawGripperOpen && minFingerAfterOpenM <= SEQ_GRIPPER_CLOSED_TOL_M) {
+        pass('arm-sequence: gripper opened then closed (finger ≈ 0)', `minAfterOpen=${minFingerAfterOpenM.toExponential(2)}`);
+      } else {
+        fail('arm-sequence: gripper opened then closed (finger ≈ 0)', `sawOpen=${sawGripperOpen} minAfterOpen=${minFingerAfterOpenM}`);
+      }
+
+      // 7) 최종 done — timeout(6s) 경로가 아니라 실제 충돌 해제 경로의 시간 안에서
+      const elapsedSinceplaySec = (last?.simTimeSec ?? Infinity) - playSimTimeSec;
+      if (last?.status === 'done') {
+        pass('arm-sequence: sequence finished (status done)', `simTime=${last.simTimeSec.toFixed(2)}s (play 후 ${elapsedSinceplaySec.toFixed(2)}s)`);
+      } else {
+        fail('arm-sequence: sequence finished (status done)', `last=${JSON.stringify(last)}`);
+      }
+      if (last?.status === 'done' && elapsedSinceplaySec < SEQ_EVENT_DONE_MAX_SIM_SEC) {
+        pass(`arm-sequence: done within ${SEQ_EVENT_DONE_MAX_SIM_SEC}s of Play (barrier released by event, not timeout)`);
+      } else {
+        fail(`arm-sequence: done within ${SEQ_EVENT_DONE_MAX_SIM_SEC}s of Play (barrier released by event, not timeout)`, `elapsed=${elapsedSinceplaySec}`);
+      }
+
+      // 8) 충돌 로그 DOM: box_a가 포함된 행 ≥ 1 (UI 배선 — UX_DESIGN §3.6)
+      const boxARowCount = await page.$$eval('[data-testid="collision-row"]',
+        (rows) => rows.filter((r) => (r.textContent ?? '').includes('box_a')).length);
+      if (boxARowCount >= 1) pass('arm-sequence: collision-log DOM has box_a row(s)', `rows=${boxARowCount}`);
+      else fail('arm-sequence: collision-log DOM has box_a row(s)', `rows=${boxARowCount}`);
+      } // end if (initial) — 파사드 부재 시 상호작용 어서션 건너뜀
     }
 
     // 페이지 에러는 씬별 상호작용까지 끝난 뒤 마지막에 판정한다

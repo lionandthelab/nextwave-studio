@@ -228,6 +228,13 @@ export const robotSpecSchema = z.object({
   controller: z.enum(['sequence', 'manual']),
   linkColliders: z.enum(['fromVisual', 'primitive', 'none']).optional(),
   selfCollision: z.boolean().optional(),
+  gripper: z
+    .object({
+      joints: z.array(z.string().min(1)).min(1, 'gripper.joints는 최소 1개 관절이 필요합니다'),
+      open: finiteNumber,
+      close: finiteNumber,
+    })
+    .optional(),
 });
 
 export const entitySpecSchema = z.discriminatedUnion('type', [
@@ -311,7 +318,18 @@ export const controlStepSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('gripper'),
     robot: entityIdSchema.optional(),
-    state: z.union([z.literal('open'), z.literal('close'), finiteNumber]),
+    // 숫자 형태는 0..1 (0=close, 1=open — DATA_MODEL §6). 범위 밖 값은 런타임
+    // clamp01(steps.ts)이 조용히 삼켜 데이터 오류를 가리므로 검증에서 미리 거부한다.
+    state: z
+      .union([z.literal('open'), z.literal('close'), finiteNumber])
+      .superRefine((state, ctx) => {
+        if (typeof state === 'number' && (state < 0 || state > 1)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'gripper state 숫자값은 0 이상 1 이하여야 합니다 (0=close, 1=open)',
+          });
+        }
+      }),
     durationSec: durationSecSchema.optional(),
   }),
   z.object({ kind: z.literal('wait'), durationSec: durationSecSchema }),
@@ -327,7 +345,13 @@ export const controlStepSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('goto'),
     label: z.string().min(1, 'goto 대상 label은 비어 있지 않은 문자열이어야 합니다'),
-    times: finiteNumber.optional(),
+    // "N회 반복" 시맨틱 (DATA_MODEL §6): 음수는 영구 no-op, 소수는 ceil처럼 동작해
+    // (player.ts 'fired < times') 의도와 조용히 어긋난다 — 0 이상의 정수만 허용.
+    times: z
+      .number()
+      .int('times는 정수여야 합니다')
+      .nonnegative('times는 0 이상이어야 합니다')
+      .optional(),
   }),
   z.object({
     kind: z.literal('moveToPose'),

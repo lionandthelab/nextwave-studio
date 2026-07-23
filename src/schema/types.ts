@@ -86,6 +86,12 @@ export interface RobotSpec extends EntitySpec {
   controller: 'sequence' | 'manual';
   linkColliders?: 'fromVisual' | 'primitive' | 'none';
   selfCollision?: boolean;                         // 기본 false (인접 링크 무시)
+  /** gripper 제어 step이 구동할 관절 + open/close 값 (DATA_MODEL §4.1) */
+  gripper?: {
+    joints: string[];
+    open: number;
+    close: number;
+  };
 }
 
 export function isRobotSpec(e: EntitySpec): e is RobotSpec {

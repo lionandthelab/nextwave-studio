@@ -12,10 +12,11 @@
       "transform": { "position": [0, 0, 0] },
       "visual": { "kind": "urdf", "ref": "assets/robots/arm6/arm6.urdf" },
       "urdf": "assets/robots/arm6/arm6.urdf",
-      "controller": "manual",
+      "controller": "sequence",
       "linkColliders": "fromVisual",
       "selfCollision": false,
-      "home": { "joint2": -0.6, "joint3": 1.2, "joint5": -0.6 }
+      "home": { "joint1": 0.0, "joint2": -0.6, "joint3": 1.2, "joint5": -0.6 },
+      "gripper": { "joints": ["finger_left_joint", "finger_right_joint"], "open": 0.03, "close": 0.0 }
     },
     {
       "id": "box_a",

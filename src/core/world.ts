@@ -1,6 +1,7 @@
 // core/world.ts — Rapier 물리 월드 래퍼 (PhysicsWorld 구현)
 //
-// 이 파일과 core/collision.ts만 Rapier를 import할 수 있다 — 불변식 (CLAUDE.md §3, §7).
+// 이 파일만 Rapier를 import할 수 있다 — 불변식 (CLAUDE.md §3, §7). core/collision.ts는
+// 엔진 비의존 순수 모듈이다(step()이 핸들→EntityId 변환을 이미 끝낸 ContactEvent만 소비).
 // WASM 초기화(initPhysics)가 완료되기 전에는 어떤 물리 API도 호출하지 않는다 (§2.7).
 //
 // Phase 1: 바디/collider 생성, 고정 timestep 스텝, EventQueue 기반 충돌 이벤트,

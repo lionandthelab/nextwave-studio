@@ -257,10 +257,12 @@ describe('arm-and-boxes.scene.json', () => {
     const arm = robotEntities[0];
     if (!arm) throw new Error('robot 엔티티가 없습니다');
     expect(arm.id).toBe('arm');
-    expect(arm.controller).toBe('manual');
+    // Phase 5: 시퀀스가 선언된 씬 — controller 'sequence', home에 joint1 포함
+    // (arm-touch-box.sequence.json의 joint1 참조가 검증을 통과하기 위한 관절 명세)
+    expect(arm.controller).toBe('sequence');
     expect(arm.linkColliders).toBe('fromVisual');
     expect(arm.selfCollision).toBe(false);
-    expect(arm.home).toEqual({ joint2: -0.6, joint3: 1.2, joint5: -0.6 });
+    expect(arm.home).toEqual({ joint1: 0.0, joint2: -0.6, joint3: 1.2, joint5: -0.6 });
 
     const boxes = dynamicEntitiesOf(spec);
     expect(boxes.map((e) => e.id)).toEqual(['box_a', 'box_b']);
@@ -559,5 +561,33 @@ describe('SceneLoader — robot 브랜치', () => {
     handle.dispose();
     expect(world.removedEntityIds).toContain(ROBOT_ID);
     expect(fake.disposeCount).toBe(1);
+  });
+
+  // 리뷰 회귀: gripper.joints는 validateSequence(URDF를 못 봄)·checkJointNames(gripper
+  // 미다룸)의 사각지대였다 — 존재하지 않는 관절이면 재생 중 resolveJoint 예외가
+  // Engine rAF 루프를 죽였다. build 시점(URDF 관절 목록을 아는 최초 지점)에 거부한다.
+  it('gripper.joints가 URDF에 없는 관절을 참조하면 build가 실패하고 자원을 정리한다', async () => {
+    const world = new RecordingWorld();
+    const fake = new FakeRobotHandle();
+    const renderApi = makeRenderApi(() => Promise.resolve<RobotHandle>(fake));
+    const loader = new SceneLoader(world, renderApi, new RenderSync(world));
+
+    await expect(
+      loader.build(
+        makeRobotScene({ gripper: { joints: ['ghost_joint'], open: 0.03, close: 0 } }),
+      ),
+    ).rejects.toThrow(/gripper\.joints.*'ghost_joint'/);
+
+    // 부분 생성 자원이 남지 않는다 (build의 teardown 계약)
+    expect(world.removedEntityIds).toContain(ROBOT_ID);
+    expect(fake.disposeCount).toBe(1);
+  });
+
+  it('gripper.joints는 URDF 원명·jointMap 논리명 모두 허용한다', async () => {
+    const { handle } = await buildRobotScene({
+      jointMap: { grip: 'j2' },
+      gripper: { joints: ['grip', 'j2'], open: 0.05, close: 0 },
+    });
+    expect(handle.robots.has(ROBOT_ID)).toBe(true);
   });
 });
