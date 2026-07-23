@@ -210,6 +210,16 @@ const waitHandler: StepHandler<StepOfKind<'wait'>, WaitState> = {
 
 // waitForCollision — init 시점 마커 이후의 충돌 발생을 배리어로 대기.
 // timeoutSec 초과 시 경고 후 진행한다 (DATA_MODEL §6 "timeout 초과 시 경고 후 진행").
+
+/**
+ * waitForCollision timeout 경고의 **문구 계약** 조각. main.ts(handlePlayerWarn)가
+ * 이 두 문자열의 substring 매칭으로 해당 노드를 'error'로 마킹한다 — 경고 문구를
+ * 바꿀 때는 반드시 이 상수를 통해서만 바꿀 것 (steps.test.ts가 발행 문구에 두 조각이
+ * 포함됨을 고정한다 — 임의 리워딩이 소비자를 조용히 끊는 것을 방지).
+ */
+export const WAIT_FOR_COLLISION_WARN_TAG = 'waitForCollision';
+export const WAIT_FOR_COLLISION_TIMEOUT_MARKER = '감지되지 않았습니다';
+
 interface WaitForCollisionState {
   collisionMark: unknown;
   between: [string, string];
@@ -230,8 +240,8 @@ const waitForCollisionHandler: StepHandler<StepOfKind<'waitForCollision'>, WaitF
       state.elapsedSec += dtSec;
       if (state.timeoutSec !== undefined && state.elapsedSec >= state.timeoutSec) {
         ctx.warn(
-          `control: waitForCollision('${state.between[0]}' × '${state.between[1]}')이(가) ` +
-            `${state.timeoutSec}s 안에 감지되지 않았습니다 — 경고 후 다음 step으로 진행합니다`,
+          `control: ${WAIT_FOR_COLLISION_WARN_TAG}('${state.between[0]}' × '${state.between[1]}')이(가) ` +
+            `${state.timeoutSec}s 안에 ${WAIT_FOR_COLLISION_TIMEOUT_MARKER} — 경고 후 다음 step으로 진행합니다`,
         );
         return 'done';
       }

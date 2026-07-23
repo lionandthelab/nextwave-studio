@@ -917,3 +917,152 @@ CLAUDE.md/docs에 반영). 새 항목은 아래에 추가하고 기존 항목은
   다중 collider 가드), src/core/scene-loader.ts(RenderSyncLike +commit),
   src/ui/library/import-dialog.ts(SENSOR_ZONE + 헤더 정정), src/main.ts(액센트 주입 ·
   pauseForEditIfPlaying · 드래그 sync 서스펜드), 테스트 3파일(+7건), EXPERIMENTS.md
+
+## [2026-07-23] Phase 8 — Flow Graph 에디터 (스키마 뷰모델 + 캔버스 + 노드 폼 + 통합)
+
+### 배경
+ControlSequence를 n8n형 노드 그래프로 시각화·편집한다 (UX_DESIGN §3.4/§6, ROADMAP
+Phase 8). 병렬 작업 3건(F1 schema/flow-graph.ts + player 스킵, F2 ui/flow-graph 캔버스,
+F3 ui/inspector/node-editor.ts 폼)을 main.ts 글루로 통합했다. 핵심 게이트는 불변식
+§2.8 — 그래프 편집으로 직렬화 불가능한 상태를 만들 수 없다.
+
+### 결정 (스키마 계층 — F1)
+- **edges는 파생 상태다**: FlowGraph의 단일 진실은 노드 배열(순서 + goto params)이며,
+  seq/loop 엣지는 모든 편집 후 deriveEdges로 재유도된다. 엣지를 독립 편집 대상으로
+  두면 "노드 순서 ↔ steps 배열 1:1" 불변식(UX §6)과 이중 진실이 생긴다.
+- **loop 엣지는 첫 label 승리**: goto → 같은 이름의 첫 번째 label 노드. player의
+  "중복 label은 첫 번째가 이긴다" 규칙과 동일한 해석을 뷰에도 적용.
+- **정규형: enabled:true는 직렬화에서 생략**: toSequence는 enabled가 false일 때만
+  키를 남긴다 — 편집 왕복이 원본 JSON에 잡음을 더하지 않는다.
+- **편집 연산의 구조 게이트는 씬 없이 돈다**: F1 op의 finishEdit는 serializeGraph
+  (scene 없음 — zod 구조 검증)만 통과시킨다. 씬 참조 무결성(로봇/엔티티/관절 존재)은
+  씬을 아는 통합 글루의 소관(아래).
+- **시퀀스 id/loop는 그래프에 실리지 않는다**: FlowGraph는 steps의 뷰다(§6 고정 계약
+  — nodes/edges/robot). 원본 id/loop는 ToSequenceOptions로 복원한다 — main 글루가
+  flowSeqMeta로 보관·전달.
+- **player 스킵 시맨틱**: enabled:false step은 핸들러 실행 없이 건너뛴다(순서 유지).
+  스킵은 dt를 보존한다 — 이번 tick의 첫 "실행" step이 전체 dt를 받아 "비활성 = 없는
+  것처럼" 동작. 비활성 goto는 점프하지 않고 통과, 비활성 label은 여전히 goto 대상
+  (위치 마커). 스킵도 same-tick 진행 한도(64)에 계상.
+
+### 결정 (캔버스 — F2)
+- **캔버스는 ui.x/y를 무시하고 체인 순서에서 결정론 배치**: 렌더가 (graph, statuses,
+  selection, viewport)의 순수 함수가 되고, 드래그 재정렬의 "drop x → 삽입 인덱스"
+  계산이 1행 체인을 전제로 단순해진다. ui.x/y는 표현 전용(UX §6)이라 실행/직렬화에
+  무영향 — 자유 배치는 필요해질 때 재검토.
+- **리스너는 마운트 시 1세트 위임 부착**: render()는 DOM만 재구축한다(전체 재렌더,
+  MVP ≤ 64 노드) — 리스너 누수 없음.
+- **캔버스는 그래프를 직접 변형하지 않는다**: 모든 편집이 deps.applyOp(순수 op)로
+  나가고, 거부 피드백(한국어 토스트)은 통합자 몫.
+
+### 결정 (통합 — main.ts 글루)
+- **편집 파이프라인 단일 경로 runFlowOp**: op(구조 검증 포함) → serializeGraph(graph,
+  editor.spec, {id, loop}) 씬 참조 무결성 → '수정됨' 배지 diff → 커밋(라이브 시퀀스
+  교체 + JSON 뷰어/타임라인 갱신) → 캔버스/폼 재동기화. 실패는 한국어 오류로 거부되고
+  그래프/시퀀스는 불변 — UI(캔버스/팔레트/폼)와 __sim.flowGraph 파사드가 전부 이
+  경로만 쓴다(§2.8).
+- **시퀀스 편집은 재생을 정지한다**: armed 중 편집 커밋 → unarm + player 커서 0 +
+  토스트 '시퀀스 수정됨 — 처음부터 재생됩니다'. 엔진(씬 물리)은 계속 돈다. preStep이
+  sequenceArmed로 player.step을 게이트한다(ControlPlayer에 unload가 없어 로드된 이전
+  시퀀스의 진행을 글루가 차단). 다음 ▶ Play가 "현재" 시퀀스를 새로 load — human-in-
+  the-loop(§2.9) 유지: 편집이 자동 재생을 유발하지 않는다.
+- **'수정됨' 배지는 내용 diff로 승격**: fromSequence 로드는 origin 'manual'인데 F1
+  op는 generated→modified만 승격한다 — 글루가 커밋 시 params/enabled/note 내용이
+  바뀐 노드를 'modified'로 승격해 "로드된 JSON과 달라짐"을 표시. 순서 이동만으로는
+  배지가 붙지 않는다(내용 불변).
+- **우측 스택 선택 중재 (마지막 선택 승리)**: 노드 선택 → 뷰포트 선택 해제 + 노드
+  폼 표시, 엔티티 선택 → 노드 선택 해제 + 엔티티 폼 표시. 해제(null) 에코는 패널을
+  바꾸지 않아 루프가 없다. 두 폼 모두 마운트 유지, display만 전환.
+- **player 상태 동기(기본형)**: onStepChange → 커서 앞 done · 현재 active · 뒤
+  pending. 비활성 노드는 active로 표시하지 않는다(스킵은 같은 tick 통과).
+  waitForCollision timeout 경고(warn 콜백 문구 매칭)는 해당 노드를 'error'로 마킹.
+  Phase 10이 노드 경계 정지·재실행으로 심화한다.
+- **setNote op는 글루가 보완**: note는 노드 필드(params 제외)라 updateNodeParams로
+  닿지 않는다 — 같은 §2.8 파이프라인을 거치는 로컬 op(deriveEdges + serializeGraph).
+- **adoptIntoStack이 zIndex도 auto로 리셋**: 단독 마운트 기본값(Z_INDEX.panel=100)이
+  flex 아이템으로 남아 {} JSON 슬라이드 패널(95)을 가려 클릭을 가로챘다(게이트에서
+  실측 발견) — 우측 스택은 슬라이드 패널보다 아래가 theme 규약.
+- **씬 undo/redo가 시퀀스 편집을 보존**: ActiveScene.sequenceJson이 편집된 라이브
+  시퀀스를 우선 반환 — 히스토리 재로드가 그래프 편집을 잃지 않는다.
+- **시퀀스 없는 씬도 '플로우' 토글로 빈 그래프 시작**: 기본 로봇 = 씬의 첫 로봇.
+  로봇 없는 씬은 시퀀스 스키마(robot 참조)가 모든 편집을 거부한다 — 페인 열 때
+  한국어 안내 토스트.
+
+### 알려진 한계 (Phase 10 백로그)
+- Space 단축키가 재생 토글(playback)과 캔버스 팬 수식키에 동시 배정 — 전역 단축키
+  중재 미구현. Del은 선택 중재(한쪽만 선택 유지)로 실질 충돌 없음.
+- 씬 편집(엔티티 삭제/개명)이 라이브 시퀀스 참조를 깨는 경우의 재검증은 로드/편집
+  시점에만 이뤄진다(다음 그래프 편집 시 거부로 표면화).
+- moveToPose는 팔레트에서 제외(IK 백로그 — player가 경고 후 스킵). 기존 시퀀스의
+  해당 노드는 정상 표시된다.
+
+### 검증 (전부 실측)
+- `tsc --noEmit` 통과, eslint 경고 0, vitest 578/578 통과, `vite build` 성공.
+- 브라우저 게이트: **flow-graph 신규 ALL PASS** (7노드 렌더 → insertWait(2) 8노드 +
+  직렬화 검증 → JSON 뷰어 동기 → reorder 순서 갱신 → waitForCollision 비활성 재생
+  5.92s done(배리어/timeout 미경유, 스킵 노드 무active) → 삭제 7→6 + 유효 + 페이지
+  에러 0) + 기존 게이트 재실행(arm-sequence/scene-builder/scene-switch/pick-and-place).
+- 영향 파일: src/main.ts(글루 통합 + adoptIntoStack zIndex), scripts/gate-browser.mjs
+  (flow-graph 시나리오), EXPERIMENTS.md. (F1/F2/F3 산출물은 병렬 에이전트 몫.)
+
+## [2026-07-23] Phase 8 리뷰 후속 수정 — 씬 편집 ↔ 플로우 정합 (arm 재검증 · rename 재동기)
+
+### 배경 (리뷰 지적)
+Phase 8 통합의 "알려진 한계"였던 "씬 편집이 라이브 시퀀스 참조를 깨는 경우"가
+실제로는 두 가지 실질 결함이었다:
+1. **Play arm이 재검증 없이 stale 시퀀스를 로드**: 커밋 이후 로봇 rename/제거가
+   일어나면 다음 Play에서 Engine preStep(try/catch 없음)의 RobotRegistry.get이
+   던져 tick 루프가 죽는다 — "검증 통과본만 실행"(§2.9) 계약이 실행 시점에 깨짐.
+2. **flowGraph.robot이 빌드 시점 스냅샷으로 고정**: (a) 로봇 rename 후 모든 플로우
+   편집이 "씬에 없는 엔티티"로 거부, (b) 로봇 없는 씬(robot '')에 로봇을 추가해도
+   편집 영구 거부 — §2.8은 지켜지지만(거부+한국어 피드백) 에디터가 세션 내 잠긴다.
+
+### 결정
+- **arm 직전 재검증**: armSequenceIfAvailable이 player.load 전에
+  `validateSequence(currentSequence, editor.spec)`를 실행 — 실패 시 arm 거부 +
+  한국어 토스트/콘솔 오류. 엔진 재생(씬 물리)은 시퀀스와 무관하게 계속된다.
+- **rename 재동기 remapEntityId(schema/flow-graph)**: 순수 치환 함수(기본 robot ·
+  step params.robot · waitForCollision.between). 시스템 동기화라 origin 배지를
+  바꾸지 않고, 참조가 없으면 동일 참조를 반환한다(변경 판별 계약). 글루는
+  SceneEditEvent(rename)에서 옛 id를 "직전 통지 시점 id 목록과의 차집합"으로
+  복원해(이벤트에 new id만 실림) §2.8 파이프라인(serializeGraph(scene))으로 커밋.
+- **기본 로봇 채택**: 'add' 통지에서 flowGraph.robot이 무효(빈 문자열/죽은 참조)면
+  첫 로봇을 채택 — 유효한 기본 로봇은 절대 바꾸지 않는다.
+- **Stop = unarm + 캔버스 런 상태 클리어**: 이전 런의 'error'/everActive가 Stop→Play
+  재실행에 잔존하고 player.reset() 통지가 idle 중 노드 0을 'active'(펄스)로 남기던
+  문제 — Stop이 unarm하여 다음 Play가 재검증→재로드(arm) 단일 경로를 타고,
+  statuses/everActive를 비워 idle 캔버스는 전부 pending(재생 바 '대기' 표기와 일관).
+- **waitForCollision timeout 문구 계약을 상수로 고정**: steps.ts가
+  WAIT_FOR_COLLISION_WARN_TAG/TIMEOUT_MARKER를 export하고 발행 문구를 이 상수로
+  조립, main.ts 매칭도 동일 상수 사용 — 발행측 리워딩이 노드 'error' 마킹을 조용히
+  끊을 수 없다(steps.test.ts가 문구 포함을 핀).
+- **시퀀스 언로드 토스트**: 씬 빌드에서 시퀀스 검증 실패 시(히스토리 undo로 참조가
+  깨진 경우 포함) 콘솔 로그에 더해 토스트로 표면화 — undo 직후 플로우가 조용히
+  사라지는 UX 방지.
+- **테마 토큰 3종 추가**: COLOR.borderHover('#4a5058')/gridDot/mutedSoft — flow
+  캔버스의 하드코딩 색 리터럴 3곳을 토큰 소비로 교체(값 동일 — 시각 변화 없음).
+- **UX_DESIGN §6 문서 정정**: FlowNode.id 주석 "= ControlStep.id" →
+  그래프-로컬 안정 id('n1','n2',…)로 — ControlStep에는 id 필드가 없다(구현·파사드
+  nodeIds 계약과 문서 일치, CLAUDE.md §10).
+
+### 명시적 보류 (백로그 유지)
+- **플로우 편집의 Undo/Redo 미포함**: SceneHistory는 SceneSpec 스냅샷만 기록한다 —
+  UX §7("씬·그래프 편집 전반")의 그래프 몫은 {spec, sequence} 쌍 스냅샷으로의
+  히스토리 일반화가 필요해 Phase 8 범위에서 보류(ROADMAP Phase 8 체크리스트에도
+  없음). 부작용: 플로우 편집 직후 Ctrl+Z는 마지막 "씬" 편집을 되돌린다(전체 재로드,
+  라이브 시퀀스는 sequenceJson 경유로 보존). Phase 10 전후 재검토.
+- **로봇 제거 시 재동기는 하지 않는다**: 죽은 참조의 자동 치환은 의미 변경이라
+  거부 피드백(편집)과 arm 재검증(재생)으로만 막는다 — 로봇을 다시 추가하면
+  기본 로봇 채택이 편집을 되살린다.
+
+### 검증 (전부 실측)
+- `tsc --noEmit` 통과, eslint 경고 0, vitest 586/586 통과(+8: remapEntityId 7 ·
+  timeout 문구 계약 1), `vite build` 성공.
+- 브라우저 게이트 ALL PASS: flow-graph(신규 어서션 2종 포함 — Stop 런 상태 리셋 +
+  재-Play 완주 6.00s done, 로봇 rename 후 seq.robot/between 재동기 + insertWait
+  성공) · arm-sequence · scene-builder · scene-switch.
+- 영향 파일: src/schema/flow-graph.ts(remapEntityId), src/main.ts(arm 재검증 ·
+  Stop 리셋 · rename/add 재동기 글루 · 문구 상수 매칭 · 언로드 토스트),
+  src/core/control/steps.ts(문구 계약 상수), src/ui/theme.ts(+토큰 3종),
+  src/ui/flow-graph/canvas.ts(토큰 소비), docs/UX_DESIGN.md §6(FlowNode.id 정정),
+  scripts/gate-browser.mjs(flow-graph 어서션 2종), 테스트 2파일.

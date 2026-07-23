@@ -15,6 +15,13 @@
 //   times 미지정은 무한 점프 (DATA_MODEL §6).
 // - load/reset/루프 랩은 커서·경과·goto 카운터를 모두 초기화한다 — 결정론적 재생
 //   (동일 시퀀스 → 동일 setJoints 호출 로그, SIMULATION §6).
+// - enabled:false step은 핸들러 실행 없이 건너뛴다(순서 유지 — DATA_MODEL §6,
+//   UX_DESIGN §3.4 활성/비활성). 스킵도 같은 tick 진행 한도에 계상된다.
+//   · 비활성 goto는 점프하지 않고 통과한다(스킵이 goto 가로채기보다 먼저).
+//   · 비활성 label은 여전히 goto 대상으로 해석된다 — label은 위치 마커이며,
+//     비활성화는 "그 자리에서 아무것도 안 함"(원래 no-op)만 바꾸기 때문이다.
+//   · 스킵은 시간을 소비하지 않으므로 dt를 보존한다 — 이번 tick의 첫 "실행" step이
+//     전체 dt를 받는다(비활성 step은 순서만 남기고 없는 것처럼 동작).
 
 import type { ControlSequence, ControlStep } from '../../schema/types';
 import type { CollisionQuery, RobotApi, StepContext, StepRuntime } from './steps';
@@ -106,6 +113,8 @@ export class ControlPlayer {
    * 검증을 우회한 입력(프로그래밍 오류)에 대해 방어한다.
    */
   load(seq: ControlSequence): void {
+    // label은 위치 마커 — enabled와 무관하게 goto 대상으로 해석한다
+    // (비활성 label로의 점프 허용; 도착 후 label 자체는 스킵되어 원래처럼 no-op).
     const labels = new Map<string, number>();
     seq.steps.forEach((step, index) => {
       if (step.kind === 'label' && !labels.has(step.name)) labels.set(step.name, index);
@@ -166,6 +175,20 @@ export class ControlPlayer {
       }
       const current = seq.steps[this.cursor];
       if (!current) return; // noUncheckedIndexedAccess 방어 — 위 범위 검사로 도달 불가
+
+      // enabled:false — 핸들러 실행 없이 건너뜀 (순서 유지, DATA_MODEL §6).
+      // goto 가로채기보다 먼저이므로 비활성 goto는 점프하지 않고 통과한다.
+      // dt는 보존한다 — 스킵은 시간을 소비하지 않으며, 이번 tick의 첫 실행 step이
+      // 전체 dt를 받아야 "비활성 = 없는 것처럼" 시맨틱이 유지된다.
+      if (current.enabled === false) {
+        if (progressBudget <= 0) {
+          this.warnSameTickLimit();
+          return;
+        }
+        progressBudget -= 1;
+        this.moveCursorTo(this.cursor + 1);
+        continue;
+      }
 
       // goto는 제어 흐름 — 핸들러 대신 player가 커서를 직접 움직인다
       if (current.kind === 'goto') {

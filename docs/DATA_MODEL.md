@@ -152,7 +152,12 @@ interface SceneSpec {
 ```ts
 type Easing = 'linear' | 'easeInOut' | 'step';
 
-type ControlStep =
+// 모든 step 공통 옵션 필드 (Flow Graph 뷰 무손실 왕복 지원 — UX_DESIGN §6):
+// - enabled: false면 player가 실행하지 않고 건너뛴다(순서 유지). 기본 true.
+// - note: 사용자 메모(실행 무관).
+type StepCommon = { enabled?: boolean; note?: string };
+
+type ControlStep = StepCommon & (
   // 관절을 duration 동안 목표값으로 보간 이동
   | { kind: 'moveJoints'; robot?: string; targets: Record<string, number>;
       durationSec: number; easing?: Easing }
@@ -169,7 +174,8 @@ type ControlStep =
   | { kind: 'label'; name: string }
   | { kind: 'goto'; label: string; times?: number }   // times 미지정 시 무한
   // (로드맵) 카테시안 목표 — IK 솔버 주입 지점
-  | { kind: 'moveToPose'; robot?: string; target: Transform; durationSec: number };
+  | { kind: 'moveToPose'; robot?: string; target: Transform; durationSec: number }
+);
 
 interface ControlSequence {
   id: string;

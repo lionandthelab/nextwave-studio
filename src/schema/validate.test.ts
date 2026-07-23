@@ -467,6 +467,81 @@ describe('validateSequence — 시퀀스 자체 규칙', () => {
   });
 });
 
+// ── validateSequence: StepCommon(enabled/note) 무손실 왕복 ───────────
+
+describe('validateSequence — StepCommon(enabled/note) 보존', () => {
+  /** 모든 step 종류에 enabled/note를 섞은 시퀀스 (Flow Graph 무손실 왕복의 전제) */
+  const commonFieldsSequence: ControlSequence = {
+    id: 'common-fields',
+    robot: 'arm',
+    steps: [
+      { kind: 'moveJoints', targets: { joint1: 0.1 }, durationSec: 1, enabled: false, note: '이동' },
+      { kind: 'setJoints', targets: { joint2: 0 }, note: '즉시 적용' },
+      { kind: 'gripper', state: 'open', durationSec: 0.2, enabled: false },
+      { kind: 'wait', durationSec: 0.5, note: '대기' },
+      { kind: 'waitForCollision', between: ['arm', 'box_a'], timeoutSec: 2, enabled: false },
+      { kind: 'label', name: 'L', enabled: false, note: '위치 마커' },
+      { kind: 'goto', label: 'L', times: 1, enabled: false },
+      {
+        kind: 'moveToPose',
+        target: { position: [0, 0, 0] },
+        durationSec: 1,
+        enabled: false,
+        note: 'IK 백로그',
+      },
+    ],
+  };
+
+  it('모든 step 종류에서 enabled:false/note가 검증을 통과하고 벗겨지지 않는다', () => {
+    const value = expectOk(validateSequence(commonFieldsSequence));
+    expect(value.steps).toEqual(commonFieldsSequence.steps);
+    // 명시적으로: zod strip에 걸리지 않았는지 키 존재까지 확인
+    expect(value.steps[0]).toHaveProperty('enabled', false);
+    expect(value.steps[0]).toHaveProperty('note', '이동');
+    expect(value.steps[6]).toHaveProperty('enabled', false);
+  });
+
+  it('scene과 함께 검증해도 enabled/note가 보존된다', () => {
+    const value = expectOk(validateSequence(commonFieldsSequence, exampleScene));
+    expect(value.steps).toEqual(commonFieldsSequence.steps);
+  });
+
+  it('enabled:true 명시도 그대로 보존된다', () => {
+    const value = expectOk(
+      validateSequence({
+        id: 'explicit-true',
+        robot: 'arm',
+        steps: [{ kind: 'wait', durationSec: 1, enabled: true }],
+      }),
+    );
+    expect(value.steps[0]).toHaveProperty('enabled', true);
+  });
+
+  it('enabled가 boolean이 아니면 실패한다', () => {
+    const text = joined(
+      validateSequence({
+        id: 'bad-enabled',
+        robot: 'arm',
+        steps: [{ kind: 'wait', durationSec: 1, enabled: 'yes' }],
+      }),
+    );
+    expect(text).toContain('steps[0].enabled');
+    expect(text).toContain('boolean');
+  });
+
+  it('note가 문자열이 아니면 실패한다', () => {
+    const text = joined(
+      validateSequence({
+        id: 'bad-note',
+        robot: 'arm',
+        steps: [{ kind: 'wait', durationSec: 1, note: 42 }],
+      }),
+    );
+    expect(text).toContain('steps[0].note');
+    expect(text).toContain('string');
+  });
+});
+
 describe('validateSequence — 씬 참조 무결성 (scene 제공 시)', () => {
   it('시퀀스의 기본 robot이 씬에 없으면 실패한다', () => {
     const text = joined(

@@ -33,6 +33,8 @@ export const COLOR = {
   borderSoft: '#22252b',
   /** 버튼/입력 테두리 */
   borderStrong: '#3a3f47',
+  /** 버튼/입력/노드 hover 테두리 */
+  borderHover: '#4a5058',
   /** 본문 텍스트 (≥ 4.5:1) */
   text: '#cfd4db',
   /** 제목/값 강조 텍스트 */
@@ -41,6 +43,10 @@ export const COLOR = {
   label: '#9aa1ab',
   /** 보조/빈 상태 텍스트 — 4.5:1을 지키는 최저 명도 */
   muted: '#8b93a1',
+  /** muted 계열 배경 틴트 (비활성 배지 등) */
+  mutedSoft: 'rgba(139, 147, 161, 0.15)',
+  /** 캔버스 배경 그리드 점 */
+  gridDot: 'rgba(255,255,255,0.06)',
   /** 액센트 (주황 — 로봇 팔 색과 일관) */
   accent: '#e67e22',
   /** 어두운 배경 위 액센트 "텍스트"용 밝은 변형 */
@@ -187,7 +193,7 @@ export function ensureThemeStyles(): void {
 }
 .ui-btn:hover:not(:disabled) {
   background: #2b2f37;
-  border-color: #4a5058;
+  border-color: ${COLOR.borderHover};
   color: ${COLOR.textStrong};
 }
 .ui-btn:active:not(:disabled) { background: #1d2026; }
@@ -222,7 +228,7 @@ export function ensureThemeStyles(): void {
   transition: border-color 0.12s ease, color 0.12s ease;
 }
 .ui-input { background: ${COLOR.bgField}; }
-.ui-select:hover:not(:disabled), .ui-input:hover:not(:disabled) { border-color: #4a5058; }
+.ui-select:hover:not(:disabled), .ui-input:hover:not(:disabled) { border-color: ${COLOR.borderHover}; }
 .ui-select:disabled { opacity: 0.45; }
 
 /* ── 포커스 링 (키보드 조작 가시성 — UX_DESIGN §9) ─────────────────── */

@@ -290,6 +290,16 @@ export const sceneSpecSchema = z
 
 export const easingSchema = z.enum(['linear', 'easeInOut', 'step']);
 
+/**
+ * StepCommon(types.ts) — 모든 ControlStep 변형에 공통으로 붙는 옵션 필드.
+ * zod object는 기본으로 미선언 키를 벗겨내므로(strip), 각 변형에 이 shape를 spread해야
+ * enabled/note가 검증 후에도 보존된다 — Flow Graph 무손실 왕복의 전제 (UX_DESIGN §6).
+ */
+const stepCommonShape = {
+  enabled: z.boolean().optional(),
+  note: z.string().optional(),
+};
+
 const jointTargetsSchema = z.record(z.string(), finiteNumber);
 
 const durationSecSchema = z
@@ -309,11 +319,13 @@ export const controlStepSchema = z.discriminatedUnion('kind', [
     targets: jointTargetsSchema,
     durationSec: durationSecSchema,
     easing: easingSchema.optional(),
+    ...stepCommonShape,
   }),
   z.object({
     kind: z.literal('setJoints'),
     robot: entityIdSchema.optional(),
     targets: jointTargetsSchema,
+    ...stepCommonShape,
   }),
   z.object({
     kind: z.literal('gripper'),
@@ -331,16 +343,19 @@ export const controlStepSchema = z.discriminatedUnion('kind', [
         }
       }),
     durationSec: durationSecSchema.optional(),
+    ...stepCommonShape,
   }),
-  z.object({ kind: z.literal('wait'), durationSec: durationSecSchema }),
+  z.object({ kind: z.literal('wait'), durationSec: durationSecSchema, ...stepCommonShape }),
   z.object({
     kind: z.literal('waitForCollision'),
     between: z.tuple([entityIdSchema, entityIdSchema]),
     timeoutSec: timeoutSecSchema.optional(),
+    ...stepCommonShape,
   }),
   z.object({
     kind: z.literal('label'),
     name: z.string().min(1, 'label 이름은 비어 있지 않은 문자열이어야 합니다'),
+    ...stepCommonShape,
   }),
   z.object({
     kind: z.literal('goto'),
@@ -352,12 +367,14 @@ export const controlStepSchema = z.discriminatedUnion('kind', [
       .int('times는 정수여야 합니다')
       .nonnegative('times는 0 이상이어야 합니다')
       .optional(),
+    ...stepCommonShape,
   }),
   z.object({
     kind: z.literal('moveToPose'),
     robot: entityIdSchema.optional(),
     target: transformSchema,
     durationSec: durationSecSchema,
+    ...stepCommonShape,
   }),
 ]);
 

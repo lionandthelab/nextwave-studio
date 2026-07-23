@@ -21,6 +21,11 @@
 //   (라이브러리 배치 경로) → 바디 존재/인스펙터 목록 → updateTransform teleport →
 //   updateDimensions 후 물리 정착 y 관측 → removeEntity 정리 → __sim.history.undo로
 //   엔티티 복원(전체 재로드) → 라이브러리 카드 DOM ≥ 6 + 페이지 에러 0건.
+//   --expect=flow-graph : Phase 8 Flow Graph — 페인 표시 + DOM 노드 수 → insertWait
+//   삽입(직렬화 유효) → JSON 뷰어 동기 → reorder 순서 갱신 → (재로드 후)
+//   waitForCollision 비활성 → 배리어 없이 완주(timeout 경고 없음, 스킵 노드 무active)
+//   → Stop 런 상태 리셋 + 재-Play 완주 → 노드 삭제 → 로봇 rename 플로우 재동기
+//   → 페이지 에러 0건 (불변식 §2.8).
 
 import { spawn, execSync } from 'node:child_process';
 import { chromium } from 'playwright';
@@ -47,6 +52,7 @@ const SCENE_BY_EXPECT = {
   'collision-testbed': 'collision-testbed',
   'scene-switch': 'arm-and-boxes', // 런타임 전환 스모크 — arm-and-boxes에서 출발
   'scene-builder': 'arm-and-boxes', // Phase 7 씬 편집 — 로봇+박스 씬 위에서 편집 검증
+  'flow-graph': 'arm-and-boxes', // Phase 8 Flow Graph — 시퀀스 있는 씬 위에서 그래프 편집 검증
 };
 
 // --expect=arm 어서션 상수
@@ -101,6 +107,14 @@ const SB_SETTLE_Y_TOLERANCE_M = 0.03;              // 정착 y ≈ halfExtent �
 const SB_POSE_TOLERANCE_M = 1e-3;                  // teleport 직후 pose 일치 허용 오차
 const SB_SETTLE_REALTIME_DEADLINE_MS = 15000;      // 치수 변경 후 정착 폴링 실시간 상한
 const SB_MIN_LIBRARY_CARDS = 6;                    // 라이브러리 템플릿 카드 최소 개수
+// --expect=flow-graph (Phase 8 — __sim.flowGraph 파사드 + DOM/JSON 뷰어/스킵 재생)
+const FG_BOOT_NODE_COUNT = 7;                      // arm-touch-box.sequence.json step 수
+const FG_INSERT_AT = 2;                            // insertWait 삽입 위치
+const FG_INSERTED_WAIT_SEC = 1;                    // defaultNodeFor('wait') 기본 durationSec
+// 배리어(waitForCollision) 비활성 시 명목 길이 ≈ 0.4+2.5+0+0.5+0.5+2.0 = 5.9s.
+// 배리어 이벤트 해제 경로 ≈ 6s+, timeout 경로 ≈ 11.9s — 7.5s 미만 done이면 스킵 증명.
+const FG_SKIP_DONE_MAX_SIM_SEC = 7.5;
+const FG_SKIP_SIM_BUDGET_SEC = 13;                 // 폴링 sim 예산 (timeout 경로도 포착)
 
 /** 두 엔티티 쌍 일치(순서 무관) */
 function isPair(event, idA, idB) {
@@ -832,6 +846,233 @@ async function main() {
           `${advanceAfterUndo.fromSec.toFixed(2)}s → ${advanceAfterUndo.toSec.toFixed(2)}s`);
       } else {
         fail('scene-builder: sim advances after undo reload', JSON.stringify(advanceAfterUndo));
+      }
+    }
+
+    // ── Phase 8: flow-graph — 그래프 편집이 항상 유효한 시퀀스로 직렬화 (불변식 §2.8) ──
+    if (expectArg === 'flow-graph') {
+      // (a) 페인 표시 + 렌더된 DOM 노드 수 = 시퀀스 step 수 (arm-touch-box 7개)
+      const paneVisible = await page.$eval(
+        '[data-testid="workspace-flow-graph"]',
+        (el) => getComputedStyle(el).display !== 'none',
+      );
+      const domNodes0 = await page.$$eval('[data-testid="flow-node"]', (els) => els.length);
+      const facade0 = await page.evaluate(() => ({
+        visible: window.__sim.flowGraph.visible(),
+        nodeCount: window.__sim.flowGraph.nodeCount(),
+        kinds: window.__sim.flowGraph.kinds(),
+      }));
+      if (
+        paneVisible && facade0.visible
+        && domNodes0 === FG_BOOT_NODE_COUNT && facade0.nodeCount === FG_BOOT_NODE_COUNT
+      ) {
+        pass(`flow-graph: pane visible with ${FG_BOOT_NODE_COUNT} rendered nodes`,
+          `dom=${domNodes0}, kinds=[${facade0.kinds.join(',')}]`);
+      } else {
+        fail(`flow-graph: pane visible with ${FG_BOOT_NODE_COUNT} rendered nodes`,
+          JSON.stringify({ paneVisible, domNodes0, facade0 }));
+      }
+
+      // (b) insertWait(2) → 8노드 + 직렬화 시퀀스가 파싱·검증 통과 (facade lastValidation)
+      const inserted = await page.evaluate((at) => {
+        const fg = window.__sim.flowGraph;
+        const ok = fg.insertWait(at);
+        return {
+          ok,
+          nodeCount: fg.nodeCount(),
+          lastValidation: fg.lastValidation(),
+          sequenceJson: fg.sequenceJson(),
+        };
+      }, FG_INSERT_AT);
+      let insertedSeq = null;
+      try { insertedSeq = JSON.parse(inserted.sequenceJson); } catch { insertedSeq = null; }
+      const insertedStep = insertedSeq?.steps?.[FG_INSERT_AT];
+      const domNodesAfterInsert = await page.$$eval('[data-testid="flow-node"]', (els) => els.length);
+      if (
+        inserted.ok && inserted.lastValidation === 'ok'
+        && inserted.nodeCount === FG_BOOT_NODE_COUNT + 1
+        && domNodesAfterInsert === FG_BOOT_NODE_COUNT + 1
+        && insertedSeq && insertedSeq.steps.length === FG_BOOT_NODE_COUNT + 1
+        && insertedStep && insertedStep.kind === 'wait'
+        && insertedStep.durationSec === FG_INSERTED_WAIT_SEC
+      ) {
+        pass(`flow-graph: insertWait(${FG_INSERT_AT}) → ${FG_BOOT_NODE_COUNT + 1} nodes, sequence parses + validates`,
+          `steps[${FG_INSERT_AT}]=${JSON.stringify(insertedStep)}`);
+      } else {
+        fail(`flow-graph: insertWait(${FG_INSERT_AT}) → ${FG_BOOT_NODE_COUNT + 1} nodes, sequence parses + validates`,
+          JSON.stringify({ inserted, domNodesAfterInsert }));
+      }
+
+      // (f) '{} JSON' 뷰어에 삽입된 wait step 반영 (그래프 편집 ↔ JSON 실시간 동기)
+      await page.click('[data-testid="json-toggle"]');
+      const viewerText = await page.$eval('[data-testid="json-content"]', (el) => el.textContent ?? '');
+      let viewerSeq = null;
+      try { viewerSeq = JSON.parse(viewerText); } catch { viewerSeq = null; }
+      const viewerStep = viewerSeq?.steps?.[FG_INSERT_AT];
+      if (viewerStep && viewerStep.kind === 'wait' && viewerStep.durationSec === FG_INSERTED_WAIT_SEC) {
+        pass('flow-graph: JSON viewer shows inserted wait step');
+      } else {
+        fail('flow-graph: JSON viewer shows inserted wait step', viewerText.slice(0, 300));
+      }
+      await page.click('[data-testid="json-close"]');
+
+      // (c) reorder: 첫 노드를 인덱스 1로 — 시퀀스 순서가 그대로 갱신 (앞 두 kind 스왑)
+      const reordered = await page.evaluate(() => {
+        const fg = window.__sim.flowGraph;
+        const before = fg.kinds();
+        const ids = fg.nodeIds();
+        const ok = fg.reorder(ids[0], 1);
+        return {
+          ok,
+          before,
+          after: fg.kinds(),
+          seqKinds: JSON.parse(fg.sequenceJson()).steps.map((s) => s.kind),
+          lastValidation: fg.lastValidation(),
+        };
+      });
+      const expectedAfter = [reordered.before[1], reordered.before[0], ...reordered.before.slice(2)];
+      const orderOk = JSON.stringify(reordered.after) === JSON.stringify(expectedAfter)
+        && JSON.stringify(reordered.seqKinds) === JSON.stringify(expectedAfter);
+      if (reordered.ok && orderOk && reordered.lastValidation === 'ok') {
+        pass('flow-graph: reorder updates sequence order accordingly',
+          `[${reordered.before.slice(0, 2).join(',')}] → [${reordered.after.slice(0, 2).join(',')}]`);
+      } else {
+        fail('flow-graph: reorder updates sequence order accordingly', JSON.stringify(reordered));
+      }
+
+      // 결정론 리셋: (d)는 편집 전 원본 시퀀스에서 시작해야 한다 — 페이지 재로드
+      await page.goto(url, { waitUntil: 'load' });
+      await page.waitForFunction(() => window.__sim !== undefined, undefined, { timeout: 15000 });
+
+      // (d) waitForCollision 비활성 → 재생: 배리어 없이 완주(빠른 done, timeout 경고
+      //     없음) + 스킵 노드는 한 번도 active로 표시되지 않는다
+      const disabled = await page.evaluate(() => {
+        const fg = window.__sim.flowGraph;
+        const kinds = fg.kinds();
+        const ids = fg.nodeIds();
+        const index = kinds.indexOf('waitForCollision');
+        const id = ids[index];
+        const ok = fg.setEnabled(id, false);
+        return { ok, id, index, lastValidation: fg.lastValidation() };
+      });
+      if (disabled.ok && disabled.index >= 0 && disabled.lastValidation === 'ok') {
+        pass('flow-graph: setEnabled(waitForCollision, false) commits (sequence still valid)',
+          `nodeId=${disabled.id} (index ${disabled.index})`);
+      } else {
+        fail('flow-graph: setEnabled(waitForCollision, false) commits (sequence still valid)',
+          JSON.stringify(disabled));
+      }
+      const run = await playAndAwaitDone(page, FG_SKIP_SIM_BUDGET_SEC);
+      if (run.status === 'done' && run.elapsedSimSec < FG_SKIP_DONE_MAX_SIM_SEC) {
+        pass(`flow-graph: disabled barrier → done within ${FG_SKIP_DONE_MAX_SIM_SEC}s (no waitForCollision wait)`,
+          `elapsed=${run.elapsedSimSec.toFixed(2)}s`);
+      } else {
+        fail(`flow-graph: disabled barrier → done within ${FG_SKIP_DONE_MAX_SIM_SEC}s (no waitForCollision wait)`,
+          JSON.stringify(run));
+      }
+      const skipObs = await page.evaluate((id) => ({
+        everActive: window.__sim.flowGraph.everActiveNodeIds(),
+        status: window.__sim.flowGraph.nodeStatuses()[id] ?? '(none)',
+        consoleText: document.querySelector('[data-testid="console-panel"]')?.textContent ?? '',
+      }), disabled.id);
+      const noTimeoutWarn = !skipObs.consoleText.includes('감지되지 않았습니다');
+      if (
+        !skipObs.everActive.includes(disabled.id)
+        && skipObs.status !== 'active' && skipObs.status !== 'error'
+        && noTimeoutWarn
+      ) {
+        pass('flow-graph: skipped node never active, no timeout warn',
+          `status=${skipObs.status}, everActive=[${skipObs.everActive.join(',')}]`);
+      } else {
+        fail('flow-graph: skipped node never active, no timeout warn',
+          JSON.stringify({ everActive: skipObs.everActive, status: skipObs.status, noTimeoutWarn }));
+      }
+
+      // (d2) Stop → 캔버스 런 상태 완전 리셋 (unarm + statuses/everActive 클리어),
+      //      이어서 재-Play가 처음부터 완주한다 — Stop→Play 재실행에 이전 런 잔상 없음
+      const stopped = await page.evaluate(() => {
+        window.__sim.player.stop();
+        const statuses = window.__sim.flowGraph.nodeStatuses();
+        return {
+          everActive: window.__sim.flowGraph.everActiveNodeIds(),
+          nonPending: Object.values(statuses).filter((s) => s !== 'pending').length,
+        };
+      });
+      if (stopped.everActive.length === 0 && stopped.nonPending === 0) {
+        pass('flow-graph: Stop clears run state (all statuses pending, everActive empty)');
+      } else {
+        fail('flow-graph: Stop clears run state (all statuses pending, everActive empty)',
+          JSON.stringify(stopped));
+      }
+      const replay = await playAndAwaitDone(page, FG_SKIP_SIM_BUDGET_SEC);
+      if (replay.status === 'done' && replay.elapsedSimSec < FG_SKIP_DONE_MAX_SIM_SEC) {
+        pass('flow-graph: Stop → Play replays from start to done (re-arm + revalidation path)',
+          `elapsed=${replay.elapsedSimSec.toFixed(2)}s`);
+      } else {
+        fail('flow-graph: Stop → Play replays from start to done (re-arm + revalidation path)',
+          JSON.stringify(replay));
+      }
+
+      // (e) 노드 삭제 → 노드 수 감소 + 시퀀스 여전히 유효 (§2.8)
+      const removedNode = await page.evaluate(() => {
+        const fg = window.__sim.flowGraph;
+        const before = fg.nodeCount();
+        const kinds = fg.kinds();
+        const ids = fg.nodeIds();
+        const ok = fg.remove(ids[kinds.indexOf('wait')]);
+        return {
+          ok,
+          before,
+          after: fg.nodeCount(),
+          lastValidation: fg.lastValidation(),
+          stepCount: JSON.parse(fg.sequenceJson()).steps.length,
+        };
+      });
+      const domAfterRemove = await page.$$eval('[data-testid="flow-node"]', (els) => els.length);
+      if (
+        removedNode.ok && removedNode.after === removedNode.before - 1
+        && domAfterRemove === removedNode.after
+        && removedNode.lastValidation === 'ok' && removedNode.stepCount === removedNode.after
+      ) {
+        pass('flow-graph: remove node → count drops, sequence valid',
+          `nodes ${removedNode.before}→${removedNode.after} (dom=${domAfterRemove})`);
+      } else {
+        fail('flow-graph: remove node → count drops, sequence valid',
+          JSON.stringify({ removedNode, domAfterRemove }));
+      }
+
+      // (g) 로봇 rename → 플로우 참조(기본 robot·between) 자동 재동기 + 편집 계속 가능
+      //     (rename 후 모든 플로우 편집이 "씬에 없는 엔티티"로 거부되는 잠김 회귀 방지)
+      const renamed = await page.evaluate(() => {
+        const s = window.__sim;
+        s.editor.renameEntity('arm', 'arm_renamed');
+        const fg = s.flowGraph;
+        const seq = JSON.parse(fg.sequenceJson());
+        const okInsert = fg.insertWait(0); // rename 이후에도 §2.8 파이프라인이 통과해야 함
+        return {
+          robotIds: s.robots.ids(),
+          seqRobot: seq.robot,
+          betweens: seq.steps
+            .filter((st) => st.kind === 'waitForCollision')
+            .map((st) => st.between),
+          okInsert,
+          lastValidation: fg.lastValidation(),
+        };
+      });
+      const betweenRemapped = renamed.betweens.length >= 1
+        && renamed.betweens.every((b) => b.includes('arm_renamed') && !b.includes('arm'));
+      if (
+        renamed.robotIds.includes('arm_renamed')
+        && renamed.seqRobot === 'arm_renamed'
+        && betweenRemapped
+        && renamed.okInsert
+        && renamed.lastValidation === 'ok'
+      ) {
+        pass('flow-graph: robot rename resyncs flow refs, editing still works',
+          `robot=${renamed.seqRobot}, betweens=${JSON.stringify(renamed.betweens)}`);
+      } else {
+        fail('flow-graph: robot rename resyncs flow refs, editing still works',
+          JSON.stringify(renamed));
       }
     }
 

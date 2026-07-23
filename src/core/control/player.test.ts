@@ -507,3 +507,142 @@ describe('ControlPlayer loop/reset 결정론', () => {
     expect(robots.setJointsCalls).toEqual(fullRunLog);
   });
 });
+
+// ── enabled:false 스킵 (DATA_MODEL §6 StepCommon, UX_DESIGN §3.4) ───
+
+describe('ControlPlayer enabled:false 스킵', () => {
+  it('비활성 moveJoints는 관절을 건드리지 않고, 다음 step이 이번 tick의 dt를 온전히 받는다', () => {
+    const { player, robots } = makeRig();
+    player.load(
+      makeSeq([
+        { kind: 'moveJoints', targets: { j1: 1 }, durationSec: 1, enabled: false },
+        { kind: 'wait', durationSec: DT_SEC }, // 스킵이 dt를 소비하지 않으면 1 tick에 완료
+      ]),
+    );
+
+    runTicks(player, 1);
+    expect(robots.setJointsCalls).toHaveLength(0); // 핸들러 미실행 — 관절 불변
+    expect(player.status).toBe('done'); // wait가 전체 dt(0.1)를 받아 같은 tick에 완료
+  });
+
+  it('비활성 setJoints도 실행되지 않고 활성 step만 실행된다', () => {
+    const { player, robots } = makeRig();
+    player.load(
+      makeSeq([
+        { kind: 'setJoints', targets: { j1: 9 }, enabled: false },
+        { kind: 'setJoints', targets: { j1: 1 } },
+      ]),
+    );
+
+    runTicks(player, 1);
+    expect(robots.setJointsCalls).toEqual([{ robot: DEFAULT_ROBOT, values: { j1: 1 } }]);
+    expect(player.status).toBe('done');
+  });
+
+  it('비활성 goto는 점프하지 않고 통과한다(fall-through)', () => {
+    const { player, robots } = makeRig();
+    player.load(
+      makeSeq([
+        { kind: 'label', name: 'L' },
+        { kind: 'setJoints', targets: { j1: 1 } },
+        { kind: 'goto', label: 'L', times: 5, enabled: false }, // 활성이면 본문 6회
+        { kind: 'setJoints', targets: { j1: 2 } },
+      ]),
+    );
+
+    runTicks(player, 1);
+    expect(robots.setJointsCalls).toEqual([
+      { robot: DEFAULT_ROBOT, values: { j1: 1 } }, // 본문 1회 — 점프 없음
+      { robot: DEFAULT_ROBOT, values: { j1: 2 } },
+    ]);
+    expect(player.status).toBe('done');
+  });
+
+  it('비활성 label도 goto 대상으로 해석된다(위치 마커) — load도 throw하지 않는다', () => {
+    const { player, robots } = makeRig();
+    player.load(
+      makeSeq([
+        { kind: 'goto', label: 'L', times: 1 }, // 전방 점프 → 사이 step을 건너뛴다
+        { kind: 'setJoints', targets: { j1: 9 } }, // 점프로 건너뛰어짐
+        { kind: 'label', name: 'L', enabled: false },
+        { kind: 'setJoints', targets: { j1: 1 } },
+      ]),
+    );
+
+    runTicks(player, 1);
+    expect(robots.setJointsCalls).toEqual([{ robot: DEFAULT_ROBOT, values: { j1: 1 } }]);
+    expect(player.status).toBe('done');
+  });
+
+  it('loop: 비활성 step이 있어도 랩이 정상 동작하고 랩마다 로그가 동일하다', () => {
+    const { player, robots } = makeRig();
+    player.load(
+      makeSeq(
+        [
+          { kind: 'setJoints', targets: { j1: 1 } },
+          { kind: 'wait', durationSec: 1, enabled: false }, // 활성이면 랩당 10+ tick
+        ],
+        { loop: true },
+      ),
+    );
+
+    runTicks(player, 1); // 1랩: setJoints + 스킵 + 랩
+    expect(robots.setJointsCalls).toHaveLength(1);
+    expect(player.status).toBe('running');
+    expect(player.currentStepIndex).toBe(0); // 랩 후 커서 0
+
+    runTicks(player, 1); // 2랩 — 동일 로그 반복 (결정론)
+    expect(robots.setJointsCalls).toHaveLength(2);
+    expect(robots.setJointsCalls[1]).toEqual(robots.setJointsCalls[0]);
+  });
+
+  it('전부 비활성인 시퀀스(비루프)는 아무것도 실행하지 않고 done이 된다', () => {
+    const { player, robots, warnings, events } = makeRig();
+    player.load(
+      makeSeq([
+        { kind: 'setJoints', targets: { j1: 1 }, enabled: false },
+        { kind: 'wait', durationSec: 5, enabled: false },
+      ]),
+    );
+
+    runTicks(player, 1);
+    expect(robots.setJointsCalls).toHaveLength(0);
+    expect(warnings).toHaveLength(0);
+    expect(player.status).toBe('done');
+    // 커서는 스킵된 step들을 통과하며 통지된다: load(0) → 1 → 끝(2, null)
+    expect(events).toEqual([
+      { index: 0, kind: 'setJoints' },
+      { index: 1, kind: 'wait' },
+      { index: 2, kind: null },
+    ]);
+  });
+
+  it('스킵도 같은 tick 진행 한도에 계상된다 — 한도 초과 시 경고 후 다음 tick 재개', () => {
+    const { player, warnings } = makeRig();
+    const extraSteps = 5;
+    const steps: ControlStep[] = Array.from(
+      { length: SAME_TICK_STEP_LIMIT + extraSteps },
+      (): ControlStep => ({ kind: 'wait', durationSec: 1, enabled: false }),
+    );
+    player.load(makeSeq(steps));
+
+    runTicks(player, 1); // 한도만큼 스킵 후 중단
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(String(SAME_TICK_STEP_LIMIT));
+    expect(player.currentStepIndex).toBe(SAME_TICK_STEP_LIMIT);
+    expect(player.status).toBe('running');
+
+    runTicks(player, 1); // 나머지 스킵 → 끝
+    expect(player.status).toBe('done');
+    expect(warnings).toHaveLength(1); // 추가 경고 없음
+  });
+
+  it('enabled:true 명시는 일반 실행과 동일하다', () => {
+    const { player, robots } = makeRig();
+    player.load(makeSeq([{ kind: 'setJoints', targets: { j1: 0.5 }, enabled: true }]));
+
+    runTicks(player, 1);
+    expect(robots.setJointsCalls).toEqual([{ robot: DEFAULT_ROBOT, values: { j1: 0.5 } }]);
+    expect(player.status).toBe('done');
+  });
+});

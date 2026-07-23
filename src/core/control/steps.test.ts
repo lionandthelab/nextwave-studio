@@ -6,7 +6,12 @@
 // 규범: docs/SIMULATION.md §3, docs/DATA_MODEL.md §6.
 
 import { describe, expect, it } from 'vitest';
-import { initStep, stepHandlers } from './steps';
+import {
+  WAIT_FOR_COLLISION_TIMEOUT_MARKER,
+  WAIT_FOR_COLLISION_WARN_TAG,
+  initStep,
+  stepHandlers,
+} from './steps';
 import type { CollisionQuery, RobotApi, StepContext, StepOfKind } from './steps';
 
 // ── 테스트 상수 (매직넘버 금지 — CLAUDE.md §4) ──────────────────────
@@ -448,6 +453,23 @@ describe('waitForCollision 핸들러', () => {
     expect(warnings[0]).toContain(BETWEEN[0]);
     expect(warnings[0]).toContain(BETWEEN[1]);
     expect(warnings[0]).toContain(String(timeoutSec));
+  });
+
+  it('timeout 경고 문구 계약: 발행 문구에 WARN_TAG/TIMEOUT_MARKER 상수가 포함된다', () => {
+    // main.ts(handlePlayerWarn)가 이 두 조각의 substring 매칭으로 노드를 'error'로
+    // 마킹한다 — steps.ts의 문구를 상수 우회 없이 리워딩하면 이 테스트가 깨진다.
+    const { ctx, warnings } = makeRig();
+    const step: StepOfKind<'waitForCollision'> = {
+      kind: 'waitForCollision',
+      between: BETWEEN,
+      timeoutSec: 0.1,
+    };
+    const state = stepHandlers.waitForCollision.init(step, ctx);
+    stepHandlers.waitForCollision.tick(state, ctx, 0.2);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(WAIT_FOR_COLLISION_WARN_TAG);
+    expect(warnings[0]).toContain(WAIT_FOR_COLLISION_TIMEOUT_MARKER);
   });
 
   it('충돌 확인이 timeout 판정보다 우선한다', () => {

@@ -52,6 +52,19 @@
 // 로드/시작된다(불변식 §2.9의 원칙을 플래너 이전 단계부터 적용). 물리 루프 자체는
 // 씬 로드 직후 시작한다(낙하 등 씬 자체 물리는 재생 컨트롤과 무관하게 관찰 가능해야 함
 // — 기존 falling-boxes 게이트 계약 유지).
+//
+// ── Flow Graph (Phase 8, UX_DESIGN §3.4/§6) ─────────────────────────
+// 그래프 상태(FlowGraph)의 단일 소유자는 이 글루다: 씬 로드 시 fromSequence로 만들고,
+// 모든 편집은 runFlowOp 파이프라인(op → 구조 검증 → 씬 참조 무결성 serializeGraph →
+// 커밋)을 거친다 — 편집으로 직렬화 불가능한 상태를 만들 수 없다(불변식 §2.8). 커밋은
+// 라이브 ControlSequence를 교체하고 JSON 뷰어·타임라인을 갱신한다.
+// **시퀀스 편집 정책**: 재생(armed) 중 편집이 커밋되면 재생을 정지한다 — 엔진(씬 물리)
+// 은 계속 돌고, player만 unarm + 커서 0으로 리셋된다(한국어 토스트 '시퀀스 수정됨 —
+// 처음부터 재생됩니다'). 다음 ▶ Play가 편집된 시퀀스를 처음부터 재생한다.
+// edges는 노드 배열에서 파생되는 상태다(schema/flow-graph deriveEdges) — 진실은
+// 노드 순서 + goto params뿐이며, 이 글루는 그래프를 직접 변형하지 않고 op만 적용한다.
+// 시퀀스 없는 씬도 '플로우' 토글로 빈 그래프에서 시퀀스를 만들 수 있다(기본 로봇 =
+// 씬의 첫 로봇; 로봇 없는 씬은 시퀀스 검증(robot 참조)이 편집을 거부 — 한국어 안내).
 
 import { CollisionMonitor } from './core/collision';
 import {
@@ -60,12 +73,16 @@ import {
 } from './core/control/adapters';
 import { ControlPlayer } from './core/control/player';
 import type { PlayerStatus } from './core/control/player';
+import {
+  WAIT_FOR_COLLISION_TIMEOUT_MARKER,
+  WAIT_FOR_COLLISION_WARN_TAG,
+} from './core/control/steps';
 import { Engine, ENGINE_SPEED_OPTIONS } from './core/engine';
 import type { EngineSpeed, EngineState } from './core/engine';
 import { GROUND_ENTITY_ID, SceneLoader } from './core/scene-loader';
 import type { RenderSceneApi, RobotHandle, SceneHandle, VisualNode } from './core/scene-loader';
 import { SceneEditorImpl } from './core/scene-editor';
-import type { SceneEditor } from './core/scene-edit-types';
+import type { SceneEditEvent, SceneEditor } from './core/scene-edit-types';
 import type { JointInfo } from './core/robot-types';
 import { RenderSync } from './core/sync';
 import type { PhysicsWorld, Pose } from './core/types';
@@ -89,6 +106,10 @@ import { Renderer } from './render/renderer';
 import { loadUrdfRobot } from './render/urdf';
 import { mountJsonViewer } from './ui/command-bar/json-viewer';
 import { mountPlaybackBar } from './ui/command-bar/playback';
+import { mountFlowCanvas } from './ui/flow-graph/canvas';
+import type { FlowCanvasOpResult } from './ui/flow-graph/canvas';
+import type { NodeRunStatus } from './ui/flow-graph/node-render';
+import { mountNodeEditor } from './ui/inspector/node-editor';
 import {
   mountCommandBarShell,
   mountSceneControls,
@@ -118,12 +139,29 @@ import {
   Z_INDEX,
   makeButton,
 } from './ui/theme';
-import { isRobotSpec, validateScene, validateSequence } from './schema';
+import {
+  FLOW_GRAPH_SEQUENCE_ID,
+  defaultNodeFor,
+  deriveEdges,
+  fromSequence,
+  insertNode,
+  isRobotSpec,
+  moveNode,
+  remapEntityId,
+  removeNode,
+  serializeGraph,
+  setNodeEnabled,
+  updateNodeParams,
+  validateScene,
+  validateSequence,
+} from './schema';
 import type {
   ColliderShape,
   CollisionEvent,
   ControlSequence,
   EntitySpec,
+  FlowGraph,
+  FlowNode,
   PhysicsSpec,
   SceneSpec,
   Transform,
@@ -251,6 +289,36 @@ export interface SimHistoryFacade {
   readonly canRedo: boolean;
 }
 
+/**
+ * Flow Graph 편집 파사드 (Phase 8 — 게이트/자동화용 최소 표면).
+ * 모든 편집은 UI와 동일한 runFlowOp 파이프라인(§2.8)을 거친다 — 성공 시 라이브
+ * 시퀀스가 교체되고, 실패(반환 false) 시 그래프/시퀀스는 변하지 않는다.
+ */
+export interface SimFlowGraphFacade {
+  /** flowGraph 페인 표시 여부 ('플로우' 토글 상태) */
+  visible(): boolean;
+  nodeCount(): number;
+  /** 체인 순서의 노드 id 목록 ('n1','n2',... — fromSequence 안정 id 규약) */
+  nodeIds(): string[];
+  /** 체인 순서의 step kind 목록 */
+  kinds(): string[];
+  /** 노드 params 깊은 복사본 (없으면 null) */
+  params(nodeId: string): Record<string, unknown> | null;
+  reorder(nodeId: string, toIndex: number): boolean;
+  /** defaultNodeFor('wait') 기본값 노드를 atIndex에 삽입 */
+  insertWait(atIndex: number): boolean;
+  remove(nodeId: string): boolean;
+  setEnabled(nodeId: string, enabled: boolean): boolean;
+  /** 현재 라이브 ControlSequence의 JSON 문자열 (커밋된 진실 — 항상 검증 통과본) */
+  sequenceJson(): string;
+  /** 마지막 편집 파이프라인 결과: 'ok' 또는 한국어 오류 목록 */
+  lastValidation(): 'ok' | string[];
+  /** 이번 재생 런에서 'active'로 표시된 적 있는 노드 id (스킵 검증용 — arm 시 리셋) */
+  everActiveNodeIds(): string[];
+  /** 현재 캔버스 실행 상태 맵 (nodeId → pending|active|done|error) */
+  nodeStatuses(): Record<string, string>;
+}
+
 /** window.__sim으로 노출되는 시뮬 핸들. Rapier 타입은 새지 않는다(PhysicsWorld 경계). */
 export interface SimHandle {
   readonly engine: Engine;
@@ -261,6 +329,7 @@ export interface SimHandle {
   readonly collision: SimCollisionFacade;
   readonly editor: SimEditorFacade;
   readonly history: SimHistoryFacade;
+  readonly flowGraph: SimFlowGraphFacade;
   readonly player?: SimPlayerFacade;
 }
 
@@ -381,10 +450,18 @@ type SceneLoadResult =
 /** 활성 씬 1개 몫의 런타임 — dispose()가 이 씬의 모든 자원·구독·UI를 해제한다 */
 interface ActiveScene {
   readonly spec: SceneSpec;
-  /** 검증을 통과한 시퀀스 (없거나 무효면 null — 실행에 노출되지 않음, §2.9) */
+  /**
+   * 현재 라이브 시퀀스 (검증 통과본, 없으면 null — 실행에 노출되지 않음, §2.9).
+   * Phase 8: 그래프 편집이 커밋될 때마다 교체된다 — JSON 뷰어가 이 값을 그린다.
+   */
   readonly validSequence: ControlSequence | null;
-  /** 히스토리 재로드 시 새 스펙에 재검증할 원본 시퀀스 JSON */
+  /**
+   * 히스토리 재로드 시 새 스펙에 재검증할 시퀀스 JSON. 그래프 편집으로 라이브
+   * 시퀀스가 생겼으면 그것이 우선한다 — 씬 undo/redo가 시퀀스 편집을 잃지 않는다.
+   */
   readonly sequenceJson: unknown;
+  /** '플로우' 토글로 페인이 열렸을 때 — 로봇 없는 씬 안내 등 컨텍스트 피드백 */
+  onFlowPaneShown(): void;
   readonly editor: SceneEditor;
   readonly engine: Engine;
   /** idBase → 현재 편집 스펙 기준 씬-유일 id (라이브러리 배치용) */
@@ -482,6 +559,28 @@ async function boot(): Promise<void> {
     left: 'auto',
     right: 'auto',
   } satisfies Partial<CSSStyleDeclaration>);
+  // '플로우' 토글 (Phase 8) — 중앙 하단 flowGraph 페인 표시/숨김. 표시 상태는 앱 수명이
+  // 소유하고, 씬 로드가 시퀀스 유무로 재설정한다(시퀀스 있는 씬 = 자동 표시). 시퀀스
+  // 없는 씬도 페인을 열어 빈 그래프에서 시퀀스를 만들 수 있다(파일 헤더의 Flow Graph 절).
+  let flowPaneVisible = false;
+  const flowToggleButton = makeButton(
+    '플로우',
+    '플로우 그래프 페인 표시/숨김',
+    'flow-toggle',
+  );
+  flowToggleButton.setAttribute('aria-pressed', 'false');
+  const setFlowPaneVisible = (visible: boolean): void => {
+    flowPaneVisible = visible;
+    workspace.setFlowGraphVisible(visible); // 변경 시 notifyResize → 캔버스 fit 추종
+    flowToggleButton.classList.toggle('ui-btn--active', visible);
+    flowToggleButton.setAttribute('aria-pressed', String(visible));
+  };
+  flowToggleButton.addEventListener('click', () => {
+    setFlowPaneVisible(!flowPaneVisible);
+    if (flowPaneVisible) active?.onFlowPaneShown();
+  });
+  commandBar.right.appendChild(flowToggleButton);
+
   const jsonViewer = mountJsonViewer(
     commandBar.right,
     document.body,
@@ -719,6 +818,9 @@ async function boot(): Promise<void> {
       jointPanel?: ReturnType<typeof mountJointPanel>;
       inspector?: InspectorHandle;
       entityEditor?: ReturnType<typeof mountEntityEditor>;
+      flowNodeEditor?: ReturnType<typeof mountNodeEditor>;
+      flowCanvas?: ReturnType<typeof mountFlowCanvas>;
+      flowPaneHost?: HTMLDivElement;
     } = {};
 
     // 이 씬 몫의 전부를 해제한다 — 다음 빌드에 어떤 상태도 새지 않는다(전체 클린 빌드).
@@ -736,6 +838,10 @@ async function boot(): Promise<void> {
       built.gizmoBar?.remove();
       built.playbackBar?.dispose();
       built.viewportStatus?.dispose();
+      // flow 캔버스는 앱 수명 페인(workspace.slots.flowGraph) 안에 산다 — 씬 몫만 제거
+      built.flowCanvas?.dispose();
+      built.flowPaneHost?.remove();
+      built.flowNodeEditor?.dispose();
       built.entityEditor?.dispose();
       built.inspector?.dispose();
       built.jointPanel?.dispose();
@@ -761,10 +867,16 @@ async function boot(): Promise<void> {
         const entity = editor.spec.entities.find((e) => e.id === robotId);
         return entity && isRobotSpec(entity) ? entity.gripper : undefined;
       });
+      // player 경고 → 콘솔 로그 + flow 캔버스 상태 배선(아래 flow 섹션이 구현을 주입:
+      // waitForCollision timeout 경고 시 해당 노드를 'error'로 마킹 — Phase 8 §4)
+      let handlePlayerWarn: (msg: string) => void = () => {};
       const player = new ControlPlayer({
         robots: robotApi,
         collision: collisionQueryFromMonitor(monitor),
-        warn: (msg) => appLog('warn', msg),
+        warn: (msg) => {
+          appLog('warn', msg);
+          handlePlayerWarn(msg);
+        },
       });
 
       // 시퀀스 검증 — 미검증/무효 시퀀스는 실행(player)에 노출하지 않는다 (불변식 §2.9)
@@ -778,13 +890,40 @@ async function boot(): Promise<void> {
             `시퀀스 '${validSequence.id}' 검증 통과 (${validSequence.steps.length}개 step) — ▶ Play로 재생`,
           );
         } else {
-          // 히스토리 복원으로 엔티티 참조가 깨진 경우 등 — 시퀀스는 언로드 상태로 남는다
+          // 히스토리 복원으로 엔티티 참조가 깨진 경우 등 — 시퀀스는 언로드 상태로 남는다.
+          // 콘솔 로그만으로는 플로우가 사라진 이유가 보이지 않으므로 토스트로도 알린다
+          // (undo 직후의 조용한 플로우 소실 방지 — UX §7 검증 오류 표면화).
           console.warn('Sequence validation failed:', sequenceValidation.errors);
           for (const error of sequenceValidation.errors) {
             appLog('error', `시퀀스 검증 실패: ${error}`);
           }
+          showToast(
+            '시퀀스 검증 실패 — 플로우를 로드하지 않았습니다. Console 탭에서 사유를 확인하세요',
+            'warn',
+          );
         }
       }
+
+      // ── 라이브 시퀀스 + Flow Graph 상태 (Phase 8 — 파일 헤더의 Flow Graph 절) ──
+      // currentSequence가 "지금 재생 가능한" 진실이다. 그래프 편집 커밋마다 교체되고,
+      // JSON 뷰어·타임라인·Play arm이 전부 이 값을 본다. sequenceArmed는 최초 Play
+      // 시 player.load 여부(human-in-the-loop) + preStep 진행 게이트를 겸한다.
+      let currentSequence: ControlSequence | null = validSequence;
+      let sequenceArmed = false;
+      /** toSequence 복원용 시퀀스 메타 (그래프에는 id/loop가 실리지 않는다 — F1 계약) */
+      const flowSeqMeta: { id: string; loop: boolean | undefined } = {
+        id: validSequence?.id ?? FLOW_GRAPH_SEQUENCE_ID,
+        loop: validSequence?.loop,
+      };
+      /** 그래프 진실 (단일 소유: 이 글루) — 시퀀스 없는 씬은 빈 그래프 + 첫 로봇 기본 */
+      let flowGraph: FlowGraph = validSequence
+        ? fromSequence(validSequence, { origin: 'manual' })
+        : { nodes: [], edges: [], robot: sceneHandle.robots.ids()[0] ?? '' };
+      let lastFlowValidation: 'ok' | string[] = 'ok';
+      /** 캔버스 실행 상태 (nodeId → 상태) — player 커서 통지가 다시 그린다 */
+      let flowStatuses: Record<string, NodeRunStatus> = {};
+      /** 이번 재생 런에서 active로 표시된 노드 (게이트의 스킵 검증용 — arm 시 리셋) */
+      const flowEverActiveNodeIds = new Set<string>();
 
       const engine = new Engine(
         {
@@ -794,9 +933,11 @@ async function boot(): Promise<void> {
           hooks: {
             // 매 물리 tick, world.step() 직전 (ARCHITECTURE §5 ①):
             // ① player가 관절 "상태"를 갱신하고 → ② robots가 FK를 kinematic 바디로 push.
-            // player는 시퀀스 미로드 시 no-op — 순서 계약은 모든 씬에서 동일하다.
+            // sequenceArmed 게이트: 미로드 시 no-op이던 기존 계약에 더해, 그래프 편집이
+            // 재생을 정지(unarm)하면 로드된 이전 시퀀스도 더 진행하지 않는다 (Phase 8
+            // 시퀀스 편집 정책 — 파일 헤더).
             preStep: (simTimeSec, dtSec) => {
-              player.step(simTimeSec, dtSec);
+              if (sequenceArmed) player.step(simTimeSec, dtSec);
               sceneHandle.robots.tickAll();
             },
             // 접촉 이벤트 발행 (ARCHITECTURE §5 ③) — 이력 기록 + UI 구독자 통지
@@ -1010,13 +1151,30 @@ async function boot(): Promise<void> {
       let inspectorLastRefreshMs = 0;
       let inspectorLastEngineState: EngineState = 'idle';
 
-      // 시퀀스 arm(최초 Play 시 player 로드) — 파일 헤더의 human-in-the-loop 정책
-      let sequenceArmed = false;
+      // 시퀀스 arm(최초 Play 시 player 로드) — 파일 헤더의 human-in-the-loop 정책.
+      // Phase 8: 그래프 편집이 unarm하므로, 다음 Play가 "현재" 시퀀스를 새로 로드한다.
       const armSequenceIfAvailable = (): void => {
-        if (!validSequence || sequenceArmed) return;
-        player.load(validSequence);
+        if (!currentSequence || sequenceArmed) return;
+        // 실행 직전 재검증 (§2.9 "검증 통과본만 실행"): 마지막 커밋 이후의 씬 편집
+        // (로봇 rename/제거 등)으로 참조가 깨진 시퀀스를 arm하면 엔진 preStep의
+        // RobotRegistry.get이 던져 tick 루프가 죽는다 — arm을 거부하고 한국어 오류를
+        // 표면화한다. 엔진 재생(씬 물리)은 시퀀스와 무관하게 그대로 진행된다.
+        const revalidation = validateSequence(currentSequence, editor.spec);
+        if (!revalidation.ok) {
+          const detail = revalidation.errors.join('\n');
+          appLog('error', `시퀀스 재검증 실패 — 재생을 거부합니다:\n${detail}`);
+          showToast(`시퀀스가 현재 씬과 맞지 않아 재생할 수 없습니다:\n${detail}`, 'warn');
+          return;
+        }
+        // 새 재생 런 — 이전 런의 상태 점/active 이력을 리셋 (load 통지가 다시 그린다)
+        flowStatuses = {};
+        flowEverActiveNodeIds.clear();
+        player.load(currentSequence);
         sequenceArmed = true;
-        appLog('info', `시퀀스 '${validSequence.id}' 재생 시작 (${validSequence.steps.length}개 step)`);
+        appLog(
+          'info',
+          `시퀀스 '${currentSequence.id}' 재생 시작 (${currentSequence.steps.length}개 step)`,
+        );
       };
 
       const playbackControls = {
@@ -1034,8 +1192,18 @@ async function boot(): Promise<void> {
           engine.stop();
           sceneHandle.reset();
           if (sequenceArmed) player.reset();
+          // Stop은 unarm한다 — 다음 ▶ Play가 armSequenceIfAvailable에서 재검증→재로드
+          // 하며 상태 점/everActive 리셋 경로가 한 곳으로 모인다 (같은 시퀀스의 load는
+          // 결정론적 재생과 동치 — ControlPlayer.load 계약).
+          sequenceArmed = false;
           monitor.clear();
           collisionPanel.clear();
+          // player.reset() 통지가 남긴 'active(0)' 점과 이전 런의 'error' 마킹을 지운다
+          // — 엔진 idle 동안 캔버스는 전부 pending (재생 바 '대기 (▶ Play)' 표기와 일관,
+          // everActiveNodeIds 파사드 계약 "이번 재생 런" 유지).
+          flowStatuses = {};
+          flowEverActiveNodeIds.clear();
+          flowCanvas.setStatuses({});
         },
         stepOnce: (): void => {
           engine.stepOnce();
@@ -1065,12 +1233,10 @@ async function boot(): Promise<void> {
       });
       built.viewportStatus = viewportStatus;
 
-      // 타임라인: 검증된 시퀀스의 step 마커 + player 커서 연동
+      // 타임라인: 검증된 시퀀스의 step 마커 (player 커서 연동은 flow 섹션의
+      // onStepChange 구독이 타임라인 + 캔버스 상태를 함께 갱신한다 — Phase 8)
       if (validSequence) {
         timelinePanel.setSequence(validSequence.steps.map((step) => step.kind));
-        built.offStepChange = player.onStepChange((index) => {
-          timelinePanel.setActiveIndex(index);
-        });
       }
 
       // rAF당 1회: 재생 바 + 타임라인 리드아웃 + 상호작용 헬퍼 갱신 (물리 tick과 분리)
@@ -1080,7 +1246,7 @@ async function boot(): Promise<void> {
         playbackBar.update({
           engineState: info.state,
           simTimeSec: info.simTimeSec,
-          sequence: validSequence
+          sequence: currentSequence
             ? {
                 // 엔진 idle에서는 armed 여부와 무관하게 대기 라벨을 보인다 — ⏹ Stop 후
                 // player.reset()은 커서를 되감으며 'running'으로 두지만(ControlPlayer.reset
@@ -1089,7 +1255,9 @@ async function boot(): Promise<void> {
                 status:
                   sequenceArmed && info.state !== 'idle' ? player.status : '대기 (▶ Play)',
                 stepIndex: player.currentStepIndex,
-                stepCount: player.stepCount,
+                // 미arm(편집 직후 포함) 상태에서는 player가 이전 시퀀스를 물고 있을 수
+                // 있다 — 총 step 수는 항상 현재 라이브 시퀀스 기준으로 보인다 (Phase 8)
+                stepCount: sequenceArmed ? player.stepCount : currentSequence.steps.length,
               }
             : undefined,
         });
@@ -1097,8 +1265,11 @@ async function boot(): Promise<void> {
         viewportStatus.update({
           engineState: info.state,
           simTimeSec: info.simTimeSec,
-          sequence: validSequence
-            ? { stepIndex: player.currentStepIndex, stepCount: player.stepCount }
+          sequence: currentSequence
+            ? {
+                stepIndex: player.currentStepIndex,
+                stepCount: sequenceArmed ? player.stepCount : currentSequence.steps.length,
+              }
             : undefined,
         });
 
@@ -1145,8 +1316,7 @@ async function boot(): Promise<void> {
         recent: (n) => monitor.history({ limit: n ?? COLLISION_RECENT_DEFAULT_LIMIT }),
       };
 
-      const armedSequence = validSequence; // 클로저용 non-null 별칭 (아래 파사드에서 사용)
-      const playerFacade: SimPlayerFacade | undefined = armedSequence
+      const playerFacade: SimPlayerFacade | undefined = validSequence
         ? {
             get status() {
               return player.status;
@@ -1155,8 +1325,9 @@ async function boot(): Promise<void> {
               return player.currentStepIndex;
             },
             get stepCount() {
-              // Play 전(미로드)에도 검증된 시퀀스의 step 수를 보고한다 — "로드 가능" 상태 표면
-              return player.loaded ? player.stepCount : armedSequence.steps.length;
+              // Play 전(미arm — 그래프 편집 직후 포함)에도 "현재 라이브 시퀀스"의
+              // step 수를 보고한다 — "로드 가능" 상태 표면 (Phase 8)
+              return sequenceArmed ? player.stepCount : (currentSequence?.steps.length ?? 0);
             },
             play: playbackControls.play,
             pause: playbackControls.pause,
@@ -1235,18 +1406,7 @@ async function boot(): Promise<void> {
         },
       };
 
-      // 씬 전환 후 게이트/자동화가 보는 핸들은 항상 "이" 씬의 새 인스턴스들이다
-      window.__sim = {
-        engine,
-        world,
-        sceneHandle,
-        spec,
-        robots,
-        collision: collisionFacade,
-        editor: editorFacade,
-        history: historyFacade,
-        ...(playerFacade ? { player: playerFacade } : {}),
-      };
+      // (window.__sim 배선은 flow 파사드까지 조립된 뒤 — 아래 Flow Graph 섹션 끝)
 
       // ── 우측 패널 스택: 관절 패널 + 인스펙터 + 엔티티 편집 (UX_DESIGN §2 우측 존) ──
       // 워크스페이스 우 슬롯(스크롤 소유) 안의 세로 스택 — fixed 오버레이가 아니다.
@@ -1262,7 +1422,10 @@ async function boot(): Promise<void> {
       workspace.slots.rightStack.appendChild(rightStack);
       built.rightStack = rightStack;
 
-      /** 패널을 스택 흐름(static)으로 편입 — 모듈 기본 절대 배치/자체 폭 제약을 해제 */
+      /** 패널을 스택 흐름(static)으로 편입 — 모듈 기본 절대 배치/자체 폭 제약을 해제.
+       *  zIndex도 auto로 되돌린다: 단독 마운트 기본값(Z_INDEX.panel=100)이 flex 아이템
+       *  으로 남으면 {} JSON 슬라이드 패널(95) 위에 그려져 클릭을 가로챈다 — 우측
+       *  스택은 슬라이드 패널보다 아래가 규약이다 (ui/theme.ts Z_INDEX 주석). */
       const adoptIntoStack = (panelEl: HTMLElement): void => {
         Object.assign(panelEl.style, {
           position: 'static',
@@ -1273,6 +1436,7 @@ async function boot(): Promise<void> {
           maxHeight: 'none',
           minHeight: '0',
           flex: '0 1 auto',
+          zIndex: 'auto',
         } satisfies Partial<CSSStyleDeclaration>);
       };
 
@@ -1365,6 +1529,377 @@ async function boot(): Promise<void> {
       built.entityEditor = entityEditor;
       adoptIntoStack(entityEditor.el);
 
+      // ── Flow Graph 글루 (Phase 8): 편집 파이프라인 + 캔버스/노드 폼 + 상태 동기 ──
+      // 파일 헤더의 Flow Graph 절이 규범이다. 그래프 상태는 위 라이브 시퀀스 블록의
+      // flowGraph가 진실이고, 여기서는 op 적용·검증·커밋·UI 재동기화만 조립한다.
+
+      /** 그래프의 label 노드 이름 목록 (팔레트/goto 대상 후보 — 중복 제거, 등장 순) */
+      const flowLabelNames = (): string[] => {
+        const names: string[] = [];
+        for (const node of flowGraph.nodes) {
+          if (node.kind !== 'label') continue;
+          const name = node.params['name'];
+          if (typeof name === 'string' && !names.includes(name)) names.push(name);
+        }
+        return names;
+      };
+
+      /** defaultNodeFor 컨텍스트 — 캔버스 팔레트의 비활성 판정도 이 값을 쓴다 */
+      const flowPaletteContext = (): { robot: string; entityIds: string[]; labels: string[] } => ({
+        robot: flowGraph.robot,
+        entityIds: editor.spec.entities.map((e) => e.id),
+        labels: flowLabelNames(),
+      });
+
+      /**
+       * 내용이 바뀐 노드에 '수정됨' 배지(origin 'modified')를 단다 — 로드된 시퀀스
+       * JSON과 달라졌음을 표시 (UX §3.4). F1의 op는 generated→modified만 승격하므로,
+       * fromSequence가 'manual'로 로드한 노드의 편집은 여기(diff)서 승격한다.
+       * 순서 이동만으로는 내용이 변하지 않으므로 배지가 붙지 않는다.
+       */
+      const withEditBadges = (prev: FlowGraph, next: FlowGraph): FlowGraph => {
+        const prevById = new Map(prev.nodes.map((node) => [node.id, node]));
+        const nodes = next.nodes.map((node) => {
+          if (node.origin === 'modified') return node;
+          const before = prevById.get(node.id);
+          if (!before) return node; // 새 노드(삽입/복제)는 'manual' 유지 — 사용자 작성
+          const changed =
+            before.enabled !== node.enabled ||
+            before.note !== node.note ||
+            JSON.stringify(before.params) !== JSON.stringify(node.params);
+          return changed ? { ...node, origin: 'modified' as const } : node;
+        });
+        return { nodes, edges: next.edges, robot: next.robot };
+      };
+
+      /**
+       * 편집 커밋: 라이브 시퀀스 교체 + 재생 정지 정책 집행 + 파생 UI 재동기화.
+       * 시퀀스 편집 정책(파일 헤더): armed였다면 unarm + player 커서 0 — 엔진(씬 물리)
+       * 은 계속 돈다. 다음 ▶ Play가 편집본을 처음부터 재생한다.
+       */
+      const commitFlowSequence = (seq: ControlSequence): void => {
+        const wasArmed = sequenceArmed;
+        currentSequence = seq;
+        if (wasArmed) {
+          sequenceArmed = false; // preStep 게이트 — 로드된 이전 시퀀스는 더 진행하지 않음
+          player.reset(); // 커서/goto 카운터 0 (다음 arm의 load가 어차피 재초기화)
+          showToast('시퀀스 수정됨 — 처음부터 재생됩니다', 'info');
+        }
+        // player.reset()의 커서 통지(위)가 남긴 상태 점까지 리셋 — 캔버스에도 반영
+        flowStatuses = {};
+        flowEverActiveNodeIds.clear();
+        flowCanvas.setStatuses({});
+        timelinePanel.setSequence(seq.steps.map((step) => step.kind));
+        jsonViewer.refresh();
+      };
+
+      /**
+       * 편집 파이프라인 코어 (§2.8 게이트): op(구조 검증 포함) → 씬 참조 무결성
+       * serializeGraph(scene) → '수정됨' 배지 → 커밋 → 캔버스/노드 폼 재동기화.
+       * 성공 null, 실패 시 한국어 오류 목록 반환 — 그래프/시퀀스는 변하지 않는다.
+       */
+      const runFlowOp = (op: (g: FlowGraph) => FlowCanvasOpResult): string[] | null => {
+        const structural = op(flowGraph);
+        if (!structural.ok || structural.graph === undefined) {
+          const errors =
+            structural.errors && structural.errors.length > 0
+              ? structural.errors
+              : ['플로우 편집이 거부되었습니다'];
+          lastFlowValidation = errors;
+          return errors;
+        }
+        // 씬 참조 무결성(로봇/엔티티/관절)까지 — F1 op의 구조 검증(씬 없음)을 보강하는
+        // UI 경로의 최종 §2.8 게이트. 원본 시퀀스의 id/loop를 복원해 직렬화한다.
+        const serialized = serializeGraph(structural.graph, editor.spec, {
+          id: flowSeqMeta.id,
+          ...(flowSeqMeta.loop !== undefined ? { loop: flowSeqMeta.loop } : {}),
+        });
+        if (!serialized.ok) {
+          lastFlowValidation = serialized.errors;
+          return serialized.errors;
+        }
+        flowGraph = withEditBadges(flowGraph, structural.graph);
+        lastFlowValidation = 'ok';
+        commitFlowSequence(serialized.sequence);
+        flowCanvas.render();
+        nodeEditor.refresh(); // 폼 편집 중(포커스)이면 내부 가드가 건너뛴다
+        return null;
+      };
+
+      /** 캔버스/파사드용 래퍼: 실패를 한국어 토스트 + 콘솔 로그로 표면화 (§2.8 피드백) */
+      const applyFlowOpWithToast = (op: (g: FlowGraph) => FlowCanvasOpResult): boolean => {
+        const errors = runFlowOp(op);
+        if (errors === null) return true;
+        const detail = errors.join('\n');
+        appLog('error', `플로우 편집 거부: ${detail}`);
+        showToast(`플로우 편집 거부됨:\n${detail}`, 'warn');
+        return false;
+      };
+
+      /**
+       * 노트 편집 op — F1(schema/flow-graph)에 setNodeNote가 없어 글루가 보완한다.
+       * note는 노드 필드(params 제외)이므로 updateNodeParams로는 닿지 않는다. 같은
+       * §2.8 파이프라인(직렬화 검증)을 거치며, 빈 문자열은 note 키 제거로 정규화한다.
+       */
+      const setNodeNoteOp =
+        (nodeId: string, note: string) =>
+        (g: FlowGraph): FlowCanvasOpResult => {
+          if (!g.nodes.some((n) => n.id === nodeId)) {
+            return { ok: false, errors: [`그래프에 id '${nodeId}' 노드가 없습니다`] };
+          }
+          const nodes = g.nodes.map((n) => {
+            if (n.id !== nodeId) return n;
+            const next: FlowNode = { ...n, params: structuredClone(n.params), ui: { ...n.ui } };
+            if (note === '') delete next.note;
+            else next.note = note;
+            return next;
+          });
+          const graph: FlowGraph = { nodes, edges: deriveEdges(nodes), robot: g.robot };
+          const serialized = serializeGraph(graph);
+          if (!serialized.ok) return { ok: false, errors: serialized.errors };
+          return { ok: true, graph };
+        };
+
+      // 노드 파라미터 인스펙터 폼 (UX §3.5 (B)) — 우측 스택, 기본 숨김(선택 중재가 표시)
+      const nodeEditor = mountNodeEditor(rightStack, {
+        getNode: (id) => flowGraph.nodes.find((n) => n.id === id) ?? null,
+        sceneContext: () => {
+          const robotId = flowGraph.robot;
+          const robotJoints = sceneHandle.robots.ids().includes(robotId)
+            ? sceneHandle.robots.get(robotId).joints.map((joint) => ({
+                name: joint.name,
+                ...(joint.limits ? { limits: joint.limits } : {}),
+              }))
+            : [];
+          const robotEntity = editor.spec.entities.find((e) => e.id === robotId);
+          return {
+            robot: robotId,
+            robotJoints,
+            entityIds: editor.spec.entities.map((e) => e.id),
+            labels: flowLabelNames(),
+            gripperAvailable:
+              robotEntity !== undefined &&
+              isRobotSpec(robotEntity) &&
+              robotEntity.gripper !== undefined,
+          };
+        },
+        // 폼 커밋: 오류는 폼 인라인 표시로 되돌린다 (토스트 아님 — node-editor 계약)
+        commitParams: (id, params) => runFlowOp((g) => updateNodeParams(g, id, params)),
+        setEnabled: (id, enabled) => {
+          applyFlowOpWithToast((g) => setNodeEnabled(g, id, enabled));
+        },
+        setNote: (id, note) => {
+          applyFlowOpWithToast(setNodeNoteOp(id, note));
+        },
+      });
+      built.flowNodeEditor = nodeEditor;
+      adoptIntoStack(nodeEditor.el);
+
+      /** 우측 스택 중재: 마지막 선택이 이긴다 — 노드 폼 ↔ 엔티티 폼 표시 전환 */
+      const showRightPanelFor = (panel: 'entity' | 'node'): void => {
+        nodeEditor.el.style.display = panel === 'node' ? '' : 'none';
+        entityEditor.el.style.display = panel === 'entity' ? '' : 'none';
+      };
+      showRightPanelFor('entity'); // 기본: 엔티티 폼 (기존 동작 유지)
+
+      // 캔버스 호스트 — workspace flowGraph 페인의 자리 표시 문구를 덮는 불투명 배경
+      // (캔버스 svg는 투명 — 배경이 없으면 문구가 비쳐 보인다). 씬 수명과 함께 제거.
+      const flowPaneHost = document.createElement('div');
+      Object.assign(flowPaneHost.style, {
+        position: 'absolute',
+        inset: '0',
+        background: COLOR.bgPanel,
+      } satisfies Partial<CSSStyleDeclaration>);
+      workspace.slots.flowGraph.appendChild(flowPaneHost);
+      built.flowPaneHost = flowPaneHost;
+
+      const flowCanvas = mountFlowCanvas(flowPaneHost, {
+        getGraph: () => flowGraph,
+        applyOp: applyFlowOpWithToast,
+        // 선택 중재 (마지막 선택 승리): 노드 선택 → 뷰포트 선택 해제 + 노드 폼 표시.
+        // interaction.select(null)의 onSelect(null) 에코는 패널을 바꾸지 않는다(아래).
+        onSelectNode: (id) => {
+          if (id !== null) {
+            interaction.select(null);
+            nodeEditor.showFor(id);
+            showRightPanelFor('node');
+          } else {
+            nodeEditor.showFor(null);
+            showRightPanelFor('entity');
+          }
+        },
+        paletteContext: flowPaletteContext,
+      });
+      built.flowCanvas = flowCanvas;
+
+      /**
+       * player 커서 → 캔버스 상태 점 (기본 동기 — Phase 10이 심화): 커서 앞 done ·
+       * 현재 active · 뒤 pending. 비활성 노드는 active로 표시하지 않는다(스킵은 같은
+       * tick에 통과 — "없는 것처럼" 시맨틱, player 계약). timeout 'error' 마킹은 보존.
+       */
+      const paintFlowStatuses = (index: number): void => {
+        const next: Record<string, NodeRunStatus> = {};
+        flowGraph.nodes.forEach((node, i) => {
+          if (i < index) next[node.id] = 'done';
+          else if (i === index && node.enabled) {
+            next[node.id] = 'active';
+            flowEverActiveNodeIds.add(node.id);
+          } else next[node.id] = 'pending';
+        });
+        for (const [id, status] of Object.entries(flowStatuses)) {
+          if (status === 'error' && id in next) next[id] = 'error';
+        }
+        flowStatuses = next;
+        flowCanvas.setStatuses(next);
+      };
+
+      // player 커서 통지 → 타임라인 + 캔버스 상태 (둘 다 같은 step 인덱스를 비춘다)
+      built.offStepChange = player.onStepChange((index) => {
+        timelinePanel.setActiveIndex(index);
+        paintFlowStatuses(index);
+      });
+
+      // waitForCollision timeout 경고 → 해당 노드 'error' (문구 계약: steps.ts가 상수로
+      // 고정 — WAIT_FOR_COLLISION_WARN_TAG/TIMEOUT_MARKER. 발행측 리워딩이 이 매칭을
+      // 조용히 끊지 못하도록 공유 상수로만 매칭한다. steps.test.ts가 문구를 핀한다.)
+      handlePlayerWarn = (msg): void => {
+        if (
+          !msg.includes(WAIT_FOR_COLLISION_WARN_TAG) ||
+          !msg.includes(WAIT_FOR_COLLISION_TIMEOUT_MARKER)
+        ) {
+          return;
+        }
+        const node = flowGraph.nodes[player.currentStepIndex];
+        if (node === undefined) return;
+        flowStatuses = { ...flowStatuses, [node.id]: 'error' };
+        flowCanvas.setStatuses(flowStatuses);
+      };
+
+      // 페인 표시 정책: 시퀀스 있는 씬 = 자동 표시, 없는 씬 = 숨김('플로우' 토글로 열기)
+      setFlowPaneVisible(validSequence !== null);
+
+      /** '플로우' 토글로 페인이 열렸을 때의 컨텍스트 안내 (로봇 없는 씬) */
+      const onFlowPaneShown = (): void => {
+        if (flowGraph.nodes.length === 0 && sceneHandle.robots.ids().length === 0) {
+          showToast(
+            '이 씬에는 로봇이 없습니다 — 시퀀스를 만들려면 먼저 로봇을 추가하세요',
+            'warn',
+          );
+        }
+      };
+
+      // ── 씬 편집 ↔ 플로우 재동기 (Phase 8 보강 — 편집/재생 잠김 방지) ──
+      // flowGraph.robot과 step 참조는 빌드 시점 스냅샷이라 씬 편집(rename/로봇 추가)과
+      // 어긋날 수 있다: (a) 로봇 rename 후 모든 플로우 편집이 "씬에 없는 엔티티"로
+      // 거부되고, (b) 로봇 없는 씬(robot '')에 로봇을 추가해도 편집이 영구 거부된다.
+      // SceneEditEvent에는 새 id만 실리므로 rename의 옛 id는 직전 통지 시점 id 목록과의
+      // 차집합으로 복원한다 (rename은 단일 엔티티 연산 — scene-editor.ts 계약).
+      let flowPrevEntityIds: string[] = editor.spec.entities.map((e) => e.id);
+
+      /** 재동기 그래프를 §2.8 파이프라인(씬 참조 무결성 직렬화)으로 커밋한다.
+       *  시스템 동기화이므로 '수정됨' 배지 diff는 걷지 않는다. 실패 시 그래프/시퀀스
+       *  불변 + 콘솔 오류 (이미 씬과 어긋나 있던 시퀀스 — 편집 거부/arm 거부가 막는다). */
+      const commitResyncedFlowGraph = (nextGraph: FlowGraph, reasonKo: string): void => {
+        const serialized = serializeGraph(nextGraph, editor.spec, {
+          id: flowSeqMeta.id,
+          ...(flowSeqMeta.loop !== undefined ? { loop: flowSeqMeta.loop } : {}),
+        });
+        if (!serialized.ok) {
+          appLog(
+            'error',
+            `${reasonKo} — 시퀀스 재직렬화 실패: ${serialized.errors.join(' / ')}`,
+          );
+          return;
+        }
+        flowGraph = nextGraph;
+        lastFlowValidation = 'ok';
+        commitFlowSequence(serialized.sequence);
+        flowCanvas.render();
+        nodeEditor.refresh();
+        appLog('info', reasonKo);
+      };
+
+      /** 씬 편집 통지 → 플로우 재동기 (editor.onChange 구독에서 호출) */
+      const resyncFlowWithSceneEdit = (e: SceneEditEvent): void => {
+        const currentIds = editor.spec.entities.map((en) => en.id);
+        const prevIds = flowPrevEntityIds;
+        flowPrevEntityIds = currentIds;
+
+        if (e.kind === 'rename') {
+          const currentSet = new Set(currentIds);
+          const oldId = prevIds.find((id) => !currentSet.has(id));
+          if (oldId === undefined) return;
+          const next = remapEntityId(flowGraph, oldId, e.entityId);
+          if (next === flowGraph) return; // 그래프에 옛 id 참조 없음 — 동일 참조 계약
+          if (next.nodes.length === 0) {
+            flowGraph = next; // 빈 그래프 — 기본 로봇만 추종 (직렬화 대상 없음)
+            return;
+          }
+          commitResyncedFlowGraph(
+            next,
+            `플로우 시퀀스의 '${oldId}' 참조를 '${e.entityId}'(으)로 갱신했습니다`,
+          );
+          return;
+        }
+
+        if (e.kind === 'add') {
+          // 기본 로봇이 무효(빈 문자열/죽은 참조)면 로봇 추가 시 첫 로봇을 채택해
+          // 편집을 되살린다 (유효한 기본 로봇은 절대 바꾸지 않는다).
+          const robotEntity = editor.spec.entities.find((en) => en.id === flowGraph.robot);
+          if (robotEntity !== undefined && isRobotSpec(robotEntity)) return;
+          const candidate = sceneHandle.robots.ids()[0];
+          if (candidate === undefined || candidate === flowGraph.robot) return;
+          if (flowGraph.nodes.length === 0) {
+            flowGraph = { ...flowGraph, robot: candidate };
+            appLog('info', `플로우 기본 로봇: '${candidate}' (씬에 추가된 첫 로봇 채택)`);
+            return;
+          }
+          commitResyncedFlowGraph(
+            { nodes: flowGraph.nodes, edges: flowGraph.edges, robot: candidate },
+            `플로우 기본 로봇을 '${candidate}'(으)로 채택했습니다`,
+          );
+        }
+      };
+
+      // Flow Graph 파사드 (게이트/자동화 — UI와 같은 runFlowOp 파이프라인만 사용)
+      const flowFacade: SimFlowGraphFacade = {
+        visible: () => flowPaneVisible,
+        nodeCount: () => flowGraph.nodes.length,
+        nodeIds: () => flowGraph.nodes.map((n) => n.id),
+        kinds: () => flowGraph.nodes.map((n) => n.kind),
+        params: (nodeId) => {
+          const node = flowGraph.nodes.find((n) => n.id === nodeId);
+          return node ? structuredClone(node.params) : null;
+        },
+        reorder: (nodeId, toIndex) => applyFlowOpWithToast((g) => moveNode(g, nodeId, toIndex)),
+        insertWait: (atIndex) =>
+          applyFlowOpWithToast((g) =>
+            insertNode(g, defaultNodeFor('wait', flowPaletteContext()), atIndex),
+          ),
+        remove: (nodeId) => applyFlowOpWithToast((g) => removeNode(g, nodeId)),
+        setEnabled: (nodeId, enabled) =>
+          applyFlowOpWithToast((g) => setNodeEnabled(g, nodeId, enabled)),
+        sequenceJson: () => JSON.stringify(currentSequence),
+        lastValidation: () =>
+          lastFlowValidation === 'ok' ? 'ok' : [...lastFlowValidation],
+        everActiveNodeIds: () => [...flowEverActiveNodeIds],
+        nodeStatuses: () => ({ ...flowStatuses }),
+      };
+
+      // 씬 전환 후 게이트/자동화가 보는 핸들은 항상 "이" 씬의 새 인스턴스들이다
+      window.__sim = {
+        engine,
+        world,
+        sceneHandle,
+        spec,
+        robots,
+        collision: collisionFacade,
+        editor: editorFacade,
+        history: historyFacade,
+        flowGraph: flowFacade,
+        ...(playerFacade ? { player: playerFacade } : {}),
+      };
+
       // ── 선택 동기화 (단일 경로): interaction이 진실, 나머지가 따라온다 ──
       // 클릭 픽킹·프로그램 select·픽킹 맵 재구축(setPickables의 stale 해제) 모두
       // 이 리스너를 통해 인스펙터/편집 폼에 전파된다. 각 모듈의 변경 가드가 루프를 막는다.
@@ -1372,6 +1907,11 @@ async function boot(): Promise<void> {
         inspector.select(id);
         entityEditor.showFor(id);
         if (id !== null) {
+          // 우측 스택 중재 (마지막 선택 승리): 엔티티 선택 → 노드 선택 해제 + 엔티티 폼.
+          // null(해제) 에코는 패널을 바꾸지 않는다 — 노드 선택이 유발한 해제와 공존.
+          flowCanvas.selectNode(null);
+          nodeEditor.showFor(null);
+          showRightPanelFor('entity');
           const node = visualNodeOf(id);
           if (node) pulseEntity(node);
         }
@@ -1381,6 +1921,7 @@ async function boot(): Promise<void> {
       // ── 편집 통지 → 파생 상태 재동기화 + 히스토리 기록 ────────────────
       built.offEditorChange = editor.onChange((e) => {
         rebuildPickables(); // add/remove/재빌드(치수·물리·개명)로 바뀐 노드 매핑 재구축
+        resyncFlowWithSceneEdit(e); // rename 참조 리매핑 · 기본 로봇 채택 (플로우 잠김 방지)
         inspector.refresh();
         viewportStatus.setEmptyHintVisible(editor.spec.entities.length === 0);
         if (e.kind === 'rename') {
@@ -1409,8 +1950,16 @@ async function boot(): Promise<void> {
 
       return {
         spec,
-        validSequence,
-        sequenceJson,
+        // 그래프 편집이 커밋될 때마다 라이브 시퀀스가 바뀐다 — getter로 항상 현재 진실
+        get validSequence() {
+          return currentSequence;
+        },
+        // 히스토리 재로드용: 편집된 라이브 시퀀스가 있으면 그것을(씬 undo가 시퀀스
+        // 편집을 잃지 않게), 없으면 원본 JSON을 재검증 대상으로 넘긴다
+        get sequenceJson() {
+          return currentSequence ?? sequenceJson;
+        },
+        onFlowPaneShown,
         editor,
         engine,
         uniquifyId,

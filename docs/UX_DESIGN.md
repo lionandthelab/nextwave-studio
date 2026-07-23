@@ -268,7 +268,8 @@ ControlSequence로 상호 변환된다(불변식).
 
 ```ts
 interface FlowNode {
-  id: string;                       // = ControlStep.id
+  id: string;                       // 그래프-로컬 안정 id ('n1','n2',… — fromSequence/
+                                    // nextNodeId가 발급. ControlStep에는 id 필드가 없다)
   kind: ControlStep['kind'];        // moveJoints | gripper | wait | ...
   params: Record<string, unknown>;  // 해당 step 필드 값
   enabled: boolean;                 // false면 실행 제외(순서 유지)
