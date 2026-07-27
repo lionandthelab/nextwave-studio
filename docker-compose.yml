@@ -1,0 +1,46 @@
+# robot-sim-web — Docker Compose
+#
+# 프로덕션(정적 서빙):   docker compose up -d          → http://localhost:8080
+# 개발(Vite HMR):        docker compose --profile dev up dev  → http://localhost:5173
+# 검증(CI):              docker compose --profile ci run --rm verify
+#
+# Windows / Linux / macOS에서 동일하게 동작한다. 호스트에 Node를 설치할 필요가 없다.
+
+services:
+  # 프로덕션 — 빌드된 정적 번들을 nginx로 서빙
+  app:
+    build:
+      context: .
+      target: runtime
+    image: robot-sim-web:latest
+    container_name: robot-sim-web
+    ports:
+      - "${APP_PORT:-8080}:80"
+    restart: unless-stopped
+
+  # 개발 — 소스를 bind mount, Vite HMR
+  # node_modules는 익명 볼륨으로 덮어써 호스트(OS별 바이너리)와 섞이지 않게 한다.
+  dev:
+    build:
+      context: .
+      target: dev
+    image: robot-sim-web:dev
+    container_name: robot-sim-web-dev
+    ports:
+      - "${DEV_PORT:-5173}:5173"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      # bind mount는 inotify 이벤트가 호스트에서 전파되지 않는다 → 폴링 감시
+      VITE_USE_POLLING: "true"
+    profiles: ["dev"]
+
+  # 검증 — typecheck + lint + 단위 테스트 (브라우저 게이트는 호스트에서 실행)
+  verify:
+    build:
+      context: .
+      target: verify
+    image: robot-sim-web:verify
+    command: ["npm", "run", "verify"]
+    profiles: ["ci"]

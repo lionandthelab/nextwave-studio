@@ -1,0 +1,34 @@
+# 빌드 컨텍스트 최소화 — 호스트 산출물이 이미지에 새지 않게 한다.
+# (특히 node_modules는 OS/아키텍처 의존 바이너리를 포함하므로 반드시 제외.
+#  컨테이너 안에서 npm ci로 다시 설치한다.)
+
+node_modules/
+dist/
+.vite/
+coverage/
+
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# 에이전트/툴 상태
+.omc/
+.claude/
+
+# 게이트·테스트 산출물
+gate-screenshot.png
+test-results/
+playwright-report/
+
+# 로컬 환경
+.env
+.env.local
+*.log
+.DS_Store
+Thumbs.db
+
+# 도커 자체 (이미지 안에서 필요 없음)
+Dockerfile
+docker-compose.yml
+.dockerignore

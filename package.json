@@ -20,7 +20,12 @@
     "gate:arm-sequence": "node scripts/gate-browser.mjs --expect=arm-sequence",
     "gate:scene-builder": "node scripts/gate-browser.mjs --expect=scene-builder",
     "gate:scene-switch": "node scripts/gate-browser.mjs --expect=scene-switch",
-    "gate": "npm run gate:build && npm run gate:orchestration && npm run gate:planner && npm run gate:flow-graph && npm run gate:arm-sequence && npm run gate:scene-builder && npm run gate:scene-switch"
+    "gate": "npm run gate:build && npm run gate:orchestration && npm run gate:planner && npm run gate:flow-graph && npm run gate:arm-sequence && npm run gate:scene-builder && npm run gate:scene-switch",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:dev": "docker compose --profile dev up --build dev",
+    "docker:verify": "docker compose --profile ci run --rm verify",
+    "docker:check": "node scripts/verify-container.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.113.0",

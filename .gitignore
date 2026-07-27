@@ -9,3 +9,4 @@ coverage/
 .omc/
 gate-screenshot.png
 test-results/
+docker-verify.png

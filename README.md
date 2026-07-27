@@ -38,6 +38,26 @@ JSON으로 선언해 로드하고, URDF 로봇 팔을 제어 시퀀스로 재생
 
 ## 실행법
 
+### Docker (OS 무관 — Windows / Linux / macOS 동일)
+
+호스트에 Node를 설치할 필요가 없다. 이미지 안에서 빌드까지 끝나고 nginx로 정적 서빙한다.
+
+```bash
+docker compose up -d          # 빌드 + 실행 → http://localhost:8080
+docker compose down           # 정지
+
+# 개발(HMR, 소스 bind mount)
+docker compose --profile dev up dev        # → http://localhost:5173
+# 검증(컨테이너 안에서 typecheck + lint + 단위 테스트)
+docker compose --profile ci run --rm verify
+```
+
+포트 변경은 `APP_PORT=9000 docker compose up -d`. 컨테이너 배포 형상을 실브라우저로
+검증하려면 `node scripts/verify-container.mjs`(= `npm run docker:check`).
+자세한 내용은 [`docs/USAGE.md` §10.2](docs/USAGE.md).
+
+### Node 직접 실행
+
 ```bash
 npm install
 npm run dev        # Vite 개발 서버 (기본 http://localhost:5173)
@@ -52,6 +72,9 @@ node scripts/gate-browser.mjs --expect=collision-testbed   # 등 표의 --expect
 
 게이트는 `dist/`를 프리뷰 서버로 띄워 실제 브라우저에서 물리 어서션을 검증하고
 `gate-screenshot.png`를 남긴다.
+
+> **사용법 전체는 [`docs/USAGE.md`](docs/USAGE.md)** — 화면 구성, 단축키, 씬 구성,
+> 플로우 그래프 편집, 자연어 플래너, 실행·재실행, 문제 해결까지 작업별 절차를 담았다.
 
 ## 조작법
 
@@ -122,10 +145,10 @@ MuJoCo WASM으로 물리 계층만 교체 가능한 지점, CLAUDE.md §7).
 3. **충돌은 EventQueue로만** — `world.step(eventQueue)` 유래 이벤트가 유일한 충돌
    진실. 메시 겹침 추정 금지.
 
-설계 문서: `docs/PRD.md`(목표·범위) · `docs/ARCHITECTURE.md`(계층·데이터 흐름) ·
-`docs/DATA_MODEL.md`(스키마 규범) · `docs/SIMULATION.md`(루프·player·충돌) ·
-`docs/UX_DESIGN.md`(화면 설계) · `docs/PLANNER.md`(자연어 플래너 설계) ·
-`docs/ROADMAP.md`(마일스톤·게이트).
+문서: **`docs/USAGE.md`(사용법 — 조작·작업 절차·문제 해결)** · `docs/PRD.md`(목표·범위) ·
+`docs/ARCHITECTURE.md`(계층·데이터 흐름) · `docs/DATA_MODEL.md`(스키마 규범) ·
+`docs/SIMULATION.md`(루프·player·충돌) · `docs/UX_DESIGN.md`(화면 설계) ·
+`docs/PLANNER.md`(자연어 플래너 설계) · `docs/ROADMAP.md`(마일스톤·게이트).
 
 ## 개발 하네스 (AI-native 방식)
 
