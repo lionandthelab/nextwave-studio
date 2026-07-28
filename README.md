@@ -145,7 +145,8 @@ MuJoCo WASM으로 물리 계층만 교체 가능한 지점, CLAUDE.md §7).
 3. **충돌은 EventQueue로만** — `world.step(eventQueue)` 유래 이벤트가 유일한 충돌
    진실. 메시 겹침 추정 금지.
 
-문서: **`docs/USAGE.md`(사용법 — 조작·작업 절차·문제 해결)** · `docs/PRD.md`(목표·범위) ·
+문서: **`docs/USAGE.md`(사용법 — 조작·작업 절차·문제 해결)** ·
+**`docs/TECH_STACK.md`(구현 기술 스택 한 장 요약)** · `docs/PRD.md`(목표·범위) ·
 `docs/ARCHITECTURE.md`(계층·데이터 흐름) · `docs/DATA_MODEL.md`(스키마 규범) ·
 `docs/SIMULATION.md`(루프·player·충돌) · `docs/UX_DESIGN.md`(화면 설계) ·
 `docs/PLANNER.md`(자연어 플래너 설계) · `docs/ROADMAP.md`(마일스톤·게이트).
