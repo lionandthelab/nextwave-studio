@@ -6,20 +6,33 @@
 // 반영한다(PLANNER.md §3 clarify 분기). 이 모듈은 core/planner를 import하지 않는다.
 //
 // 접근성(UX_DESIGN §9): role=dialog, 열릴 때 첫 포커스 이동, Escape=취소, Tab은 카드
-// 안에서 순환(trap-ish). 파괴적 동작이 아니므로 확인 없이 즉시 선택/취소한다.
+// 안에서 순환. 파괴적 동작이 아니므로 확인 없이 즉시 선택/취소한다.
+//
+// ── 포커스 트랩 단일 구현 (UX_AUDIT C-18) ────────────────────────────
+// 이 파일에만 있던 수제 focusable()/Tab 순환 로직은 `ui/a11y.ts`의 trapFocus로
+// **승격·교체**됐다 — 같은 패턴을 두 곳에서 각자 구현하면(import-dialog는 아예 없었다)
+// 규칙이 갈라진다. 동작 계약은 그대로다: 첫 포커스(옵션 있으면 첫 옵션, 없으면 자유입력)
+// · Escape=취소 · Tab 순환. **추가로 얻은 것**은 닫을 때의 포커스 복원이다(trapFocus가
+// 진입 전 활성 요소를 기억한다) — 명확화가 끝나면 커맨드바 입력으로 돌아온다.
 
 import {
+  BORDER,
+  BORDER_WIDTH,
   COLOR,
-  FONT,
   LAYOUT,
   RADIUS,
   SHADOW,
   SPACE,
+  SURFACE,
+  TYPE,
   Z_INDEX,
+  applyType,
   ensureThemeStyles,
   makeButton,
   styled,
 } from '../theme';
+import { trapFocus } from '../a11y';
+import type { FocusTrapHandle } from '../a11y';
 
 // ── 공개 타입 ───────────────────────────────────────────────────────
 
@@ -35,20 +48,13 @@ export interface ClarifyCardHandle {
 /** 카드 상단 오프셋(px) — 커맨드바 바로 아래 여백 */
 const CARD_TOP_PX = LAYOUT.belowBarTopPx;
 
-// ── 내부 헬퍼 ───────────────────────────────────────────────────────
-
-/** 카드 안 포커스 가능한 요소(순환 trap용) */
-function focusable(root: HTMLElement): HTMLElement[] {
-  const nodes = root.querySelectorAll<HTMLElement>('button, input, [tabindex]:not([tabindex="-1"])');
-  return Array.from(nodes).filter((el) => !el.hasAttribute('disabled') && el.tabIndex !== -1);
-}
-
 // ── 마운트 ──────────────────────────────────────────────────────────
 
 export function mountClarifyCard(host: HTMLElement): ClarifyCardHandle {
   ensureThemeStyles();
 
-  const card = styled(document.createElement('div'), {
+  const card = applyType(document.createElement('div'), TYPE.body);
+  styled(card, {
     position: 'fixed',
     top: `${CARD_TOP_PX}px`,
     left: '50%',
@@ -59,20 +65,21 @@ export function mountClarifyCard(host: HTMLElement): ClarifyCardHandle {
     display: 'none',
     flexDirection: 'column',
     gap: SPACE.md,
-    background: COLOR.bgPanel,
-    border: `1px solid ${COLOR.border}`,
+    background: SURFACE.overlay,
+    border: `${BORDER_WIDTH.hair} solid ${BORDER.default}`,
     borderRadius: RADIUS.md,
-    boxShadow: SHADOW.panel,
-    padding: `${SPACE.lg} ${SPACE.lg}`,
+    boxShadow: SHADOW.overlay,
+    padding: SPACE.xl,
     color: COLOR.text,
-    fontFamily: FONT.ui,
-    fontSize: '12px',
     boxSizing: 'border-box',
     pointerEvents: 'auto',
   });
   card.dataset.testid = 'clarify-card';
   card.setAttribute('role', 'dialog');
-  card.setAttribute('aria-modal', 'false');
+  // Tab이 실제로 카드 안에서 순환하므로 키보드/스크린리더에게는 이 카드가 모달이다.
+  // 선언과 동작을 일치시킨다 — `aria-modal="false"`인데 Tab이 갇혀 있으면 "빠져나갈 수
+  // 있다"고 안내한 뒤 빠져나가지 못하게 하는 셈이다 (UX_AUDIT C-18 모달 트랩 항목).
+  card.setAttribute('aria-modal', 'true');
   const titleId = 'rsw-clarify-title';
   card.setAttribute('aria-labelledby', titleId);
   // 카드 위 상호작용이 뷰포트 orbit으로 새지 않게 (패널 규약)
@@ -83,12 +90,8 @@ export function mountClarifyCard(host: HTMLElement): ClarifyCardHandle {
   }
 
   // 질문 텍스트
-  const question = styled(document.createElement('div'), {
-    color: COLOR.textStrong,
-    fontSize: '13px',
-    fontWeight: '600',
-    lineHeight: '1.5',
-  });
+  const question = applyType(document.createElement('div'), TYPE.subhead);
+  question.style.color = COLOR.textStrong;
   question.id = titleId;
 
   // 옵션 버튼 줄 (여러 개 — wrap)
@@ -135,10 +138,13 @@ export function mountClarifyCard(host: HTMLElement): ClarifyCardHandle {
 
   /** 현재 대기 중인 콜백 — 한 번만 발화(중복 방지) */
   let pending: ((choice: string | null) => void) | null = null;
+  /** 열려 있는 동안의 포커스 트랩 (release가 진입 전 포커스를 복원한다) */
+  let trap: FocusTrapHandle | null = null;
 
   const hideDom = (): void => {
     card.style.display = 'none';
-    window.removeEventListener('keydown', onKeyDown, true);
+    trap?.release();
+    trap = null;
     optionsRow.replaceChildren();
     freeInput.value = '';
   };
@@ -150,30 +156,6 @@ export function mountClarifyCard(host: HTMLElement): ClarifyCardHandle {
     hideDom();
     if (cb) cb(choice);
   };
-
-  function onKeyDown(e: KeyboardEvent): void {
-    if (card.style.display === 'none') return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      resolve(null);
-      return;
-    }
-    if (e.key === 'Tab') {
-      // 카드 안에서 포커스 순환 (trap-ish)
-      const items = focusable(card);
-      const first = items[0];
-      const last = items[items.length - 1];
-      if (!first || !last) return;
-      const active = document.activeElement as HTMLElement | null;
-      if (e.shiftKey && active === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
-  }
 
   freeSubmit.addEventListener('click', () => {
     const value = freeInput.value.trim();
@@ -216,10 +198,17 @@ export function mountClarifyCard(host: HTMLElement): ClarifyCardHandle {
     freeInput.value = '';
 
     card.style.display = 'flex';
-    window.addEventListener('keydown', onKeyDown, true);
-    // 첫 포커스: 옵션이 있으면 첫 옵션, 없으면 자유입력
+    // 재진입(미해결 카드를 새 질문으로 교체)이면 이전 트랩을 먼저 걷는다 —
+    // 그래야 "진입 전 포커스"가 이전 트랩 것으로 덮이지 않는다.
+    trap?.release();
+    // 첫 포커스: 옵션이 있으면 첫 옵션, 없으면 자유입력 (기존 계약 유지)
     const firstOption = optionsRow.querySelector<HTMLElement>('button');
-    (firstOption ?? freeInput).focus();
+    trap = trapFocus(card, {
+      initialFocus: firstOption ?? freeInput,
+      onEscape: () => {
+        resolve(null);
+      },
+    });
   };
 
   return {
@@ -231,7 +220,8 @@ export function mountClarifyCard(host: HTMLElement): ClarifyCardHandle {
       hideDom();
     },
     dispose: (): void => {
-      window.removeEventListener('keydown', onKeyDown, true);
+      trap?.release();
+      trap = null;
       pending = null;
       card.remove();
     },

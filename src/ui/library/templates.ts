@@ -23,6 +23,7 @@
 // (arm-and-boxes/pick-and-place)·render/meshes 기본 팔레트와 일관된 값을 상수로 쓴다.
 
 import type { ColliderGroup, ColliderShape, EntitySpec, RobotSpec, Vec3 } from '../../schema';
+import type { IconName } from '../icons';
 
 // ── 공개 타입 ───────────────────────────────────────────────────────
 
@@ -37,8 +38,15 @@ export interface LibraryTemplate {
   readonly section: TemplateSection;
   /** 카드 표기 라벨 (한국어 병기) */
   readonly labelKo: string;
-  /** 카드 아이콘 (이모지/기호 — UX_DESIGN §2 와이어프레임 표기와 일치) */
-  readonly icon: string;
+  /**
+   * 카드 아이콘 — **SVG 아이콘 이름**이다(UX_AUDIT C-13).
+   *
+   * 이전에는 `string`이라 이모지·기하문자(`▣ ● ◍ ⬭ ▭ ⌖ 🦾`)를 담았고, 그 결과 타일 6개는
+   * 밝은 회색 딩벳인데 `Arm-6`만 풀컬러 이모지라 크기·광학무게·색·베이스라인이 전부
+   * 달랐다. 타입을 `IconName`으로 좁히면 **컴파일러가 누락과 오타를 잡는다** — 새 템플릿을
+   * 추가하며 이모지를 다시 밀수입하는 경로가 구조적으로 막힌다.
+   */
+  readonly icon: IconName;
   /** 호버 설명 (한국어) */
   readonly descriptionKo: string;
   /** 기본 id 접두 — create()가 uniquify(idBase)로 id를 발급한다 */
@@ -210,7 +218,7 @@ export const LIBRARY_TEMPLATES: readonly LibraryTemplate[] = [
     key: 'box',
     section: 'objects',
     labelKo: 'Box · 박스',
-    icon: '▣',
+    icon: 'shapeBox',
     descriptionKo: '동적 박스 (10cm) — 드롭 후 인스펙터에서 W/H/L 조정',
     idBase: 'box',
     create: (uniquify) =>
@@ -225,7 +233,7 @@ export const LIBRARY_TEMPLATES: readonly LibraryTemplate[] = [
     key: 'sphere',
     section: 'objects',
     labelKo: 'Sphere · 구',
-    icon: '●',
+    icon: 'shapeSphere',
     descriptionKo: '동적 구 (반지름 5cm)',
     idBase: 'sphere',
     create: (uniquify) =>
@@ -240,7 +248,7 @@ export const LIBRARY_TEMPLATES: readonly LibraryTemplate[] = [
     key: 'cylinder',
     section: 'objects',
     labelKo: 'Cylinder · 원통',
-    icon: '◍',
+    icon: 'shapeCylinder',
     descriptionKo: '동적 원통 (반지름 5cm · 높이 10cm)',
     idBase: 'cylinder',
     create: (uniquify) =>
@@ -259,7 +267,7 @@ export const LIBRARY_TEMPLATES: readonly LibraryTemplate[] = [
     key: 'capsule',
     section: 'objects',
     labelKo: 'Capsule · 캡슐',
-    icon: '⬭',
+    icon: 'shapeCapsule',
     descriptionKo: '동적 캡슐 (반지름 3cm · 몸통 10cm)',
     idBase: 'capsule',
     create: (uniquify) =>
@@ -278,7 +286,7 @@ export const LIBRARY_TEMPLATES: readonly LibraryTemplate[] = [
     key: 'plane',
     section: 'objects',
     labelKo: 'Plane · 판',
-    icon: '▭',
+    icon: 'shapePlane',
     descriptionKo: '얇은 정적 판 (50cm 박스, ENV) — 받침/작업대 용도',
     idBase: 'plane',
     create: planeEntity,
@@ -287,7 +295,7 @@ export const LIBRARY_TEMPLATES: readonly LibraryTemplate[] = [
     key: 'sensor-zone',
     section: 'objects',
     labelKo: 'Sensor Zone · 감지 영역',
-    icon: '⌖',
+    icon: 'target',
     descriptionKo: '물리 반응 없이 진입/이탈만 감지하는 영역 (sensor)',
     idBase: 'sensor_zone',
     create: sensorZoneEntity,
@@ -296,7 +304,7 @@ export const LIBRARY_TEMPLATES: readonly LibraryTemplate[] = [
     key: 'arm-6',
     section: 'robots',
     labelKo: 'Arm-6 · 6축 로봇팔',
-    icon: '🦾',
+    icon: 'robotArm',
     descriptionKo: '6-DOF 로봇팔 + 평행 그리퍼 — home 포즈로 배치',
     idBase: 'arm',
     create: arm6Entity,

@@ -9,10 +9,12 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  TOAST_ACTION_DURATION_MULTIPLIER,
   TOAST_DURATION_DEFAULT_MS,
   TOAST_DURATION_ERROR_MS,
   kindLabelKo,
   resolveToastDurationMs,
+  toastAriaLabel,
 } from './toast';
 import { canGenerate, modeLabelKo } from '../command-bar/nl-input';
 import {
@@ -45,6 +47,43 @@ describe('resolveToastDurationMs', () => {
 
   it('detail만 있고 durationMs가 없으면 kind 기본값을 쓴다', () => {
     expect(resolveToastDurationMs('error', { detail: '사유' })).toBe(TOAST_DURATION_ERROR_MS);
+  });
+
+  // 액션 토스트: 읽고 → 되돌릴지 판단하고 → 조준하는 3단계가 4초 안에 끝나지 않는다.
+  // 사라지면 "복구 경로가 있었다"는 사실 자체가 전달되지 않는다 (UX_AUDIT C-4).
+  it('액션이 있으면 자동 사라짐이 2배로 늘어난다', () => {
+    const action = { label: '실행 취소', onClick: (): void => {} };
+    expect(resolveToastDurationMs('success', { action })).toBe(
+      TOAST_DURATION_DEFAULT_MS * TOAST_ACTION_DURATION_MULTIPLIER,
+    );
+    expect(resolveToastDurationMs('error', { action })).toBe(
+      TOAST_DURATION_ERROR_MS * TOAST_ACTION_DURATION_MULTIPLIER,
+    );
+    expect(TOAST_ACTION_DURATION_MULTIPLIER).toBeGreaterThanOrEqual(2);
+  });
+
+  it('명시 durationMs는 액션 배수보다 우선한다 (호출자가 최종 결정권)', () => {
+    const action = { label: '실행 취소', onClick: (): void => {} };
+    expect(resolveToastDurationMs('success', { action, durationMs: 1000 })).toBe(1000);
+    expect(resolveToastDurationMs('success', { action, durationMs: 0 })).toBe(0);
+  });
+});
+
+describe('toastAriaLabel', () => {
+  it('kind 접두 + 메시지 (색 없이 의미 전달 — UX_DESIGN §9)', () => {
+    expect(toastAriaLabel('error', '씬을 불러오지 못했습니다')).toBe(
+      '오류: 씬을 불러오지 못했습니다',
+    );
+  });
+
+  it('액션이 있으면 이름에 존재를 명시한다 — role=status의 aria-label이 내용을 대체하므로', () => {
+    expect(toastAriaLabel('success', '노드 삭제됨', '실행 취소')).toBe(
+      "성공: 노드 삭제됨 — '실행 취소' 버튼 있음",
+    );
+  });
+
+  it('빈 액션 라벨은 접미를 붙이지 않는다', () => {
+    expect(toastAriaLabel('info', '저장됨', '')).toBe('정보: 저장됨');
   });
 });
 

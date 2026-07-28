@@ -21,21 +21,36 @@
 // 상시 안내 문구를 노출하고, 씬 저장(💾) 경로의 경고 배선(collectAssetRefs +
 // ASSET_SAVE_WARNING_KO)은 통합자 몫이다.
 //
+// ── 포커스 트랩 (UX_AUDIT C-18 / F-A11Y-10) ──────────────────────────
+// `role="dialog"` + `aria-modal="true"`를 선언해 놓고 Tab이 배경으로 빠지면, 스크린리더
+// 에게는 "바깥은 없는 셈"인데 실제 포커스는 읽히지 않는 요소에 가 있는 유령 상태가 된다.
+// 3D 임포트는 형식·스케일·collider 전략을 결정하는 **파괴적 작업**이라 여기서 길을 잃는
+// 대가가 특히 크다(잘못 확정하면 씬에 들어간 뒤 삭제해야 한다). a11y.ts의 trapFocus를
+// 걸고 close()에서 release()한다 — release가 진입 전 포커스(라이브러리 카드)도 복원한다.
+//
 // 모듈 top-level에서는 DOM을 만지지 않는다 — 순수 함수(forcedEntityKind /
 // buildImportedEntitySpec / defaultEntityIdFromFileName / formatBboxSizeM)는 node
 // 테스트가 import해도 안전하다(theme.ts와 같은 규약).
 
 import {
+  BORDER,
+  BORDER_WIDTH,
+  COLLISION,
   COLOR,
-  FONT,
   RADIUS,
   SHADOW,
   SPACE,
+  SURFACE,
+  TYPE,
   Z_INDEX,
+  applyType,
   ensureThemeStyles,
   makeButton,
   styled,
 } from '../theme';
+import { makeIconButton } from '../icons';
+import { trapFocus } from '../a11y';
+import type { FocusTrapHandle } from '../a11y';
 import {
   extractTrimeshGeometry,
   parseModelFile,
@@ -55,6 +70,10 @@ import type {
 const DIALOG_WIDTH_PX = 360;
 /** 폼 라벨 컬럼 폭 — 인스펙터 계열 폼과 유사한 좌측 정렬 */
 const LABEL_COL_PX = 92;
+/** 스케일 입력 폭 */
+const SCALE_INPUT_WIDTH_PX = 80;
+/** 모달 스크림 — 배경이 조작 불가임을 시각으로도 알린다 (aria-modal의 시각 대응물) */
+const MODAL_SCRIM = 'rgba(0, 0, 0, 0.45)';
 /** 스케일 기본값 (UX §4.4 목업 "단위/스케일: [1.0] (m)") */
 const DEFAULT_SCALE = 1.0;
 /** 바운딩 크기 표시 소수 자릿수 (m) */
@@ -284,11 +303,11 @@ export function mountImportDialog(
   const overlay = styled(document.createElement('div'), {
     position: 'fixed',
     inset: '0',
-    zIndex: Z_INDEX.panel,
+    zIndex: Z_INDEX.modal,
     display: 'none',
     alignItems: 'center',
     justifyContent: 'center',
-    background: 'transparent',
+    background: MODAL_SCRIM,
     pointerEvents: 'auto',
   });
   overlay.dataset.testid = 'import-dialog';
@@ -299,20 +318,18 @@ export function mountImportDialog(
     });
   }
 
-  const panel = styled(document.createElement('div'), {
+  const panel = applyType(document.createElement('div'), TYPE.body);
+  styled(panel, {
     width: `${DIALOG_WIDTH_PX}px`,
     maxWidth: '92vw',
     maxHeight: '86vh',
     overflowY: 'auto',
-    background: COLOR.bgPanel,
-    border: `1px solid ${COLOR.border}`,
+    background: SURFACE.modal,
+    border: `${BORDER_WIDTH.hair} solid ${BORDER.default}`,
     borderRadius: RADIUS.md,
-    boxShadow: SHADOW.panel,
+    boxShadow: SHADOW.modal,
     color: COLOR.text,
-    fontFamily: FONT.ui,
-    fontSize: '12px',
-    lineHeight: '1.6',
-    padding: SPACE.lg,
+    padding: SPACE.xl,
     boxSizing: 'border-box',
     display: 'flex',
     flexDirection: 'column',
@@ -326,15 +343,13 @@ export function mountImportDialog(
   overlay.appendChild(panel);
 
   // ── 헤더 ─────────────────────────────────────────────────────────
-  const title = styled(document.createElement('strong'), {
-    color: COLOR.textStrong,
-    fontSize: '13px',
-  });
+  const title = applyType(document.createElement('h2'), TYPE.title);
+  styled(title, { margin: '0', color: COLOR.textStrong });
   title.textContent = '3D 파일 임포트';
-  const fileNameEl = styled(document.createElement('div'), {
+  const fileNameEl = applyType(document.createElement('div'), TYPE.monoBody);
+  styled(fileNameEl, {
     color: COLOR.muted,
-    fontFamily: FONT.mono,
-    fontSize: '11px',
+    marginBottom: SPACE.md,
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
@@ -349,7 +364,8 @@ export function mountImportDialog(
       alignItems: 'center',
       gap: SPACE.md,
     });
-    const label = styled(document.createElement('label'), {
+    const label = applyType(document.createElement('label'), TYPE.caption);
+    styled(label, {
       width: `${LABEL_COL_PX}px`,
       flexShrink: '0',
       color: COLOR.label,
@@ -361,8 +377,8 @@ export function mountImportDialog(
     return rowEl;
   };
   const readout = (testId: string): HTMLElement => {
-    const el = styled(document.createElement('span'), {
-      fontFamily: FONT.mono,
+    const el = applyType(document.createElement('span'), TYPE.monoReadout);
+    styled(el, {
       color: COLOR.textStrong,
       minWidth: '0',
       overflow: 'hidden',
@@ -404,7 +420,7 @@ export function mountImportDialog(
   scaleInput.step = SCALE_INPUT_STEP;
   scaleInput.min = SCALE_INPUT_MIN;
   scaleInput.title = '균일 스케일 — 원본 단위 → 미터 (예: mm 원본이면 0.001)';
-  styled(scaleInput, { width: '80px' });
+  styled(scaleInput, { width: `${SCALE_INPUT_WIDTH_PX}px` });
   const scaleUnit = styled(document.createElement('span'), { color: COLOR.muted });
   scaleUnit.textContent = '(m)';
   scaleWrap.appendChild(scaleInput);
@@ -430,10 +446,10 @@ export function mountImportDialog(
   panel.appendChild(row('Up-axis', upAxisSeg.el));
 
   // Collider 전략 (Convex Hull 기본 / AABB / Trimesh-정적)
-  const trimeshNote = styled(document.createElement('div'), {
+  const trimeshNote = applyType(document.createElement('div'), TYPE.caption);
+  styled(trimeshNote, {
     display: 'none',
     color: COLOR.muted,
-    fontSize: '11px',
     paddingLeft: `${LABEL_COL_PX}px`,
   });
   trimeshNote.dataset.testid = 'import-trimesh-note';
@@ -500,23 +516,24 @@ export function mountImportDialog(
   panel.appendChild(row('유형', kindSeg.el));
 
   // 세션 한정 에셋 상시 안내 (파일 헤더 참조)
-  const sessionNote = styled(document.createElement('div'), {
+  const sessionNote = applyType(document.createElement('div'), TYPE.caption);
+  styled(sessionNote, {
     color: COLOR.muted,
-    fontSize: '11px',
+    marginTop: SPACE.xs,
   });
   sessionNote.textContent =
     '※ 임포트 메시는 세션 한정입니다 — 씬 저장 시 메시 데이터가 파일에 내장되지 않습니다.';
   panel.appendChild(sessionNote);
 
   // ── 오류 표시 (파싱 실패 사유 / 폼 검증 — UX §7 "임포트 실패") ────
-  const errorBox = styled(document.createElement('div'), {
+  // 오류는 충돌 램프(COLLISION)를 쓴다 — 구 COLOR.error* 6값 분열의 단일 후계 (C-7)
+  const errorBox = applyType(document.createElement('div'), TYPE.monoBody);
+  styled(errorBox, {
     display: 'none',
-    background: COLOR.errorSoft,
-    border: `1px solid ${COLOR.errorBorder}`,
+    background: COLLISION.soft,
+    border: `${BORDER_WIDTH.hair} solid ${COLLISION.border}`,
     borderRadius: RADIUS.sm,
-    color: COLOR.errorText,
-    fontFamily: FONT.mono,
-    fontSize: '11px',
+    color: COLLISION.text,
     padding: `${SPACE.sm} ${SPACE.md}`,
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
@@ -540,8 +557,9 @@ export function mountImportDialog(
     gap: SPACE.sm,
     marginTop: SPACE.xs,
   });
-  const cancelButton = makeButton('취소', '임포트 취소', 'import-cancel');
-  const confirmButton = makeButton('추가', '씬에 엔티티로 추가', 'import-confirm', 'accent');
+  const cancelButton = makeIconButton('close', '취소', '임포트 취소 (Esc)', 'import-cancel', 'ghost');
+  // 이 화면의 유일한 주요 액션 — 액센트 '면'을 쓰는 primary는 1화면 1개다 (C-14)
+  const confirmButton = makeIconButton('plus', '추가', '씬에 엔티티로 추가', 'import-confirm', 'primary');
   footer.appendChild(cancelButton);
   footer.appendChild(confirmButton);
   panel.appendChild(footer);
@@ -552,10 +570,8 @@ export function mountImportDialog(
   let currentModel: ImportedModel | null = null;
   /** openWith 재호출 경합 가드 — 낡은 비동기 파싱 결과를 폐기한다 */
   let openToken = 0;
-
-  const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape') close();
-  };
+  /** 열려 있는 동안의 포커스 트랩 (Tab 순환 + Escape + 진입 전 포커스 복원) */
+  let trap: FocusTrapHandle | null = null;
 
   const setFormDisabled = (disabled: boolean): void => {
     idInput.disabled = disabled;
@@ -611,14 +627,19 @@ export function mountImportDialog(
 
   const show = (): void => {
     overlay.style.display = 'flex';
-    document.addEventListener('keydown', onKeyDown);
-    panel.focus();
+    // 재진입(다른 파일로 다시 열기)이면 이전 트랩을 먼저 걷는다 — 그래야 "진입 전
+    // 포커스"가 이전 트랩의 것으로 덮이지 않는다.
+    trap?.release();
+    // 파싱 중에는 폼이 전부 disabled라 포커스 가능한 요소가 취소/패널뿐이다 —
+    // panel(tabIndex=-1)을 초기 포커스로 두고, ready 단계에서 idInput으로 옮긴다.
+    trap = trapFocus(panel, { initialFocus: panel, onEscape: close });
   };
 
   const close = (): void => {
     openToken += 1; // 진행 중 파싱 결과 폐기
     overlay.style.display = 'none';
-    document.removeEventListener('keydown', onKeyDown);
+    trap?.release(); // Tab 트랩 해제 + 진입 전 포커스(라이브러리 카드 등) 복원
+    trap = null;
     currentModel = null; // 미확정 모델은 등록되지 않는다 — GC에 맡김
   };
 

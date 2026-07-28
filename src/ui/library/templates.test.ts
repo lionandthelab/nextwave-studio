@@ -86,6 +86,26 @@ describe('LIBRARY_TEMPLATES 공통 계약', () => {
     }
   });
 
+  it('아이콘은 SVG 아이콘 이름이다 — 이모지/딩벳 회귀 차단 (UX_AUDIT C-13)', () => {
+    // 타입(IconName)이 1차 방어지만, 문자열 리터럴 유니온이라 "그럴듯한" 오타는
+    // 컴파일러가 잡아도 **이모지를 다시 밀수입하는 습관**은 리뷰가 놓칠 수 있다.
+    // 아이콘 이름은 예외 없이 ASCII 식별자다.
+    for (const template of LIBRARY_TEMPLATES) {
+      expect(template.icon).toMatch(/^[a-zA-Z][a-zA-Z0-9]*$/);
+    }
+  });
+
+  it('아이콘은 형상/도메인 의미와 일치한다 (카드 6종 + 로봇)', () => {
+    const byKey = new Map(LIBRARY_TEMPLATES.map((t) => [t.key, t.icon]));
+    expect(byKey.get('box')).toBe('shapeBox');
+    expect(byKey.get('sphere')).toBe('shapeSphere');
+    expect(byKey.get('cylinder')).toBe('shapeCylinder');
+    expect(byKey.get('capsule')).toBe('shapeCapsule');
+    expect(byKey.get('plane')).toBe('shapePlane');
+    expect(byKey.get('sensor-zone')).toBe('target');
+    expect(byKey.get('arm-6')).toBe('robotArm');
+  });
+
   it('전 템플릿을 한 씬에 넣어도 유효하다 (uniquify로 id 충돌 없음)', () => {
     const entities = LIBRARY_TEMPLATES.map((t) => t.create(uniquify1));
     const result = validateScene(wrapInScene(entities));

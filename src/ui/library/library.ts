@@ -13,8 +13,14 @@
 //   drop 시 getData(TEMPLATE_MIME) → templateByKey(key) → template.create(uniquify)
 //   → onPlace(spec, { x: e.clientX, y: e.clientY }) — dropClient를 바닥 레이캐스트로
 //   변환해 배치하는 것은 뷰포트 몫이다 (UX §3.3 "라이브러리 드래그 프리뷰").
-// - 드래그 고스트: 카드 요소 자체가 기본 drag image로 쓰인다 (별도 프리뷰는 뷰포트의
-//   반투명 고스트가 담당 — 이 모듈은 페이로드만 책임진다).
+//
+// ── 드래그 피드백 (UX_AUDIT C-17) ────────────────────────────────────
+// 이전 헤더 주석은 "별도 프리뷰는 뷰포트의 반투명 고스트가 담당"이라며 책임을 넘겼지만
+// **뷰포트에 그 구현이 없었다** — 카드를 끄는 동안 화면에 아무 일도 일어나지 않았다.
+// 이제 `deps.onDragState(active, label)`로 드래그 시작/종료를 통지한다: 통합자가 이를
+// `viewport/drop-hint.ts`의 가장자리 하이라이트에 연결하면 "놓을 수 있다"는 어포던스가
+// 즉시 생긴다. **바닥 레이캐스트 지점의 반투명 고스트는 여전히 render 계층 몫**이다
+// (ui는 three를 모른다 — CLAUDE.md §3). 카드 요소 자체는 기본 drag image로 쓰인다.
 //
 // 계층 규칙 (CLAUDE.md §3): core/render를 모른다. 엔티티 생성(spec)은 templates.ts의
 // 순수 팩토리가, 실제 씬 편입은 통합자(SceneEditor)가 담당한다. id 유일화(uniquify)도
@@ -25,7 +31,23 @@
 
 import { LIBRARY_TEMPLATES, filterTemplates } from './templates';
 import type { LibraryTemplate, TemplateSection } from './templates';
-import { COLOR, FONT, RADIUS, SPACE, ensureThemeStyles, styled } from '../theme';
+import {
+  BORDER,
+  BORDER_WIDTH,
+  COLOR,
+  ICON,
+  MOTION,
+  RADIUS,
+  SPACE,
+  SURFACE,
+  TYPE,
+  applyType,
+  ensureThemeStyles,
+  makePanelHeader,
+  styled,
+  tr,
+} from '../theme';
+import { icon } from '../icons';
 import type { EntitySpec } from '../../schema';
 
 // ── 드래그 페이로드 MIME (통합자 뷰포트 드롭 핸들러와의 계약) ───────
@@ -44,11 +66,16 @@ export interface LibraryDeps {
   /** idBase → 씬-유일 id (예: 'box' → 'box_2') — 유일성 진실은 통합자/SceneEditor */
   uniquify(base: string): string;
   /**
-   * [Phase 7] Import 섹션의 ⬆ 카드 클릭 (UX §3.2 "Import ⬆: 카드 클릭 = 파일 선택").
+   * Import 섹션의 카드 클릭 (UX §3.2 "Import: 카드 클릭 = 파일 선택").
    * 파일 선택기/임포트 다이얼로그는 통합자 소유다. 미주입 시 Import 섹션은 렌더되지
    * 않는다(헤드리스/테스트 호환).
    */
   onImportRequest?(): void;
+  /**
+   * 카드 드래그 시작/종료 통지 (UX_AUDIT C-17 — 파일 헤더 "드래그 피드백").
+   * label은 끌고 있는 템플릿 이름(종료 시 null). 통합자가 뷰포트 드롭 힌트에 연결한다.
+   */
+  onDragState?(active: boolean, label: string | null): void;
 }
 
 export interface LibraryHandle {
@@ -60,11 +87,18 @@ export interface LibraryHandle {
 }
 
 // ── 섹션 정의 (UX §3.2 — Import 섹션은 3D 임포트 다이얼로그 소유자 몫) ──
+//
+// 라벨의 영/한 이중 표기는 **라이브러리 카드 한정 예외**다 (UX_AUDIT C-18 언어 정책):
+// 패널 크롬은 한국어로 통일하되, 프리미티브 이름(Box/Sphere)은 3D 도메인 식별자라
+// 영문을 유지하고 한국어를 병기한다.
 
 const SECTIONS: ReadonlyArray<{ readonly id: TemplateSection; readonly labelKo: string }> = [
   { id: 'objects', labelKo: 'Objects · 사물' },
   { id: 'robots', labelKo: 'Robots · 로봇' },
 ];
+
+/** 카드 그리드 최소 열 폭 (auto-fill) */
+const CARD_MIN_WIDTH_PX = 88;
 
 // ── 패널 전용 스타일 (카드 hover/포커스/드래그 — 토큰만 소비) ───────
 
@@ -79,22 +113,23 @@ function ensureLibraryStyles(): void {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 8px 4px 6px 4px;
-  background: ${COLOR.bgRaised};
+  gap: ${SPACE.sm};
+  padding: ${SPACE.md} ${SPACE.xs} ${SPACE.sm} ${SPACE.xs};
+  background: ${SURFACE.raised};
   color: ${COLOR.text};
-  border: 1px solid ${COLOR.borderStrong};
+  border: ${BORDER_WIDTH.hair} solid ${BORDER.strong};
   border-radius: ${RADIUS.sm};
-  font-family: inherit;
-  font-size: 11px;
-  line-height: 1.3;
+  font-family: var(--rsw-font-ui);
+  font-size: ${TYPE.caption.sizePx}px;
+  line-height: ${TYPE.caption.lineHeightPx}px;
+  font-weight: ${TYPE.caption.weight};
   cursor: grab;
   user-select: none;
-  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  transition: ${tr('background-color', MOTION.instant)}, ${tr('border-color', MOTION.instant)}, ${tr('color', MOTION.instant)};
 }
 .rsw-lib-card:hover {
-  background: #2b2f37;
-  border-color: #4a5058;
+  background: ${SURFACE.overlay};
+  border-color: ${BORDER.hover};
   color: ${COLOR.textStrong};
 }
 .rsw-lib-card:focus-visible {
@@ -102,14 +137,33 @@ function ensureLibraryStyles(): void {
   outline-offset: 1px;
 }
 .rsw-lib-card:active { cursor: grabbing; }
-.rsw-lib-card--dragging { opacity: 0.5; border-color: var(--rsw-accent); }
-.rsw-lib-card__icon { font-size: 20px; line-height: 1.2; }
+.rsw-lib-card--dragging { opacity: 0.5; border-color: var(--rsw-select); }
+/* 아이콘 크기는 SVG의 width/height 속성(ICON.xl)이 소유한다 — font-size로 크기를
+   정하던 이모지 시절의 잔재를 없앤다 (UX_AUDIT C-13). 색만 여기서 준다. */
+.rsw-lib-card__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: ${COLOR.label};
+}
+.rsw-lib-card:hover .rsw-lib-card__icon { color: ${COLOR.textStrong}; }
 .rsw-lib-card__label {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.rsw-lib-section {
+  display: flex;
+  align-items: center;
+  gap: ${SPACE.sm};
+  width: 100%;
+  margin: ${SPACE.xl} 0 ${SPACE.sm} 0;
+  padding: ${SPACE.xxs} ${SPACE.xs};
+  text-align: left;
+}
+.rsw-lib-section > svg { transition: ${tr('transform', MOTION.fast)}; }
+.rsw-lib-section--collapsed > svg { transform: rotate(-90deg); }
 `;
   document.head.appendChild(style);
 }
@@ -118,9 +172,10 @@ function ensureLibraryStyles(): void {
 
 /** muted 안내 줄 (빈 검색 결과 등) */
 function mutedLine(text: string): HTMLElement {
-  const el = styled(document.createElement('div'), {
+  const el = applyType(document.createElement('div'), TYPE.body);
+  styled(el, {
     color: COLOR.muted,
-    padding: '4px 2px',
+    padding: `${SPACE.xs} ${SPACE.xxs}`,
   });
   el.textContent = text;
   return el;
@@ -133,16 +188,14 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
   ensureThemeStyles();
   ensureLibraryStyles();
 
-  const panel = styled(document.createElement('div'), {
+  const panel = applyType(document.createElement('div'), TYPE.body);
+  styled(panel, {
     width: '100%',
     height: '100%',
     display: 'flex',
     flexDirection: 'column',
     minHeight: '0',
     color: COLOR.text,
-    fontFamily: FONT.ui,
-    fontSize: '12px',
-    lineHeight: '1.5',
     boxSizing: 'border-box',
   });
   panel.dataset.testid = 'library';
@@ -154,22 +207,23 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
     });
   }
 
-  // 헤더: 타이틀 + 검색 (UX §3.2 "검색/필터 상단 고정")
+  // 헤더: 공용 팩토리(UX_AUDIT C-18 — 수제 헤더 8곳 통일) + 검색 (UX §3.2 상단 고정)
   const header = styled(document.createElement('div'), {
     display: 'flex',
     flexDirection: 'column',
-    gap: SPACE.sm,
-    padding: `${SPACE.sm} 10px`,
-    borderBottom: `1px solid ${COLOR.borderSoft}`,
     flexShrink: '0',
+    borderBottom: `${BORDER_WIDTH.hair} solid ${BORDER.subtle}`,
   });
-  const title = styled(document.createElement('strong'), {
-    color: COLOR.textStrong,
-    fontSize: '13px',
+  const panelHeader = makePanelHeader('라이브러리', {
+    headingTag: 'h2',
+    collapsible: true,
+    testId: 'library-header',
   });
-  title.textContent = 'Library';
-  header.appendChild(title);
+  header.appendChild(panelHeader.el);
 
+  const searchRow = styled(document.createElement('div'), {
+    padding: `0 ${SPACE.lg} ${SPACE.md} ${SPACE.lg}`,
+  });
   const search = document.createElement('input');
   search.type = 'search';
   search.className = 'ui-input';
@@ -177,7 +231,8 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
   search.setAttribute('aria-label', '템플릿 검색');
   search.dataset.testid = 'library-search';
   styled(search, { width: '100%', boxSizing: 'border-box' });
-  header.appendChild(search);
+  searchRow.appendChild(search);
+  header.appendChild(searchRow);
   panel.appendChild(header);
 
   // 본문 (스크롤 영역): 섹션 + 카드 그리드
@@ -185,7 +240,7 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
     flex: '1 1 auto',
     minHeight: '0',
     overflowY: 'auto',
-    padding: `${SPACE.sm} 10px 10px 10px`,
+    padding: `0 ${SPACE.lg} ${SPACE.lg} ${SPACE.lg}`,
   });
   body.classList.add('ui-scroll');
   panel.appendChild(body);
@@ -205,14 +260,14 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
     card.title = template.descriptionKo; // 호버 설명 (UX §3.2 "호버 시 간단 설명")
     card.setAttribute('aria-label', `${template.labelKo} 추가 — ${template.descriptionKo}`);
 
-    const icon = document.createElement('span');
-    icon.className = 'rsw-lib-card__icon';
-    icon.textContent = template.icon;
-    icon.setAttribute('aria-hidden', 'true');
+    const iconWrap = document.createElement('span');
+    iconWrap.className = 'rsw-lib-card__icon';
+    iconWrap.setAttribute('aria-hidden', 'true');
+    iconWrap.appendChild(icon(template.icon, ICON.xl));
     const label = document.createElement('span');
     label.className = 'rsw-lib-card__label';
     label.textContent = template.labelKo;
-    card.appendChild(icon);
+    card.appendChild(iconWrap);
     card.appendChild(label);
 
     // (a) 클릭/Enter/Space → 뷰포트 중앙 배치 요청 (<button>이라 키보드는 click으로 온다)
@@ -227,9 +282,11 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
       e.dataTransfer.setData('text/plain', template.key);
       e.dataTransfer.effectAllowed = 'copy';
       card.classList.add('rsw-lib-card--dragging');
+      deps.onDragState?.(true, template.labelKo);
     });
     card.addEventListener('dragend', () => {
       card.classList.remove('rsw-lib-card--dragging');
+      deps.onDragState?.(false, null);
     });
 
     return card;
@@ -244,20 +301,22 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
       const templates = visible.filter((t) => t.section === section.id);
       const collapsed = sectionCollapsed.get(section.id) ?? false;
 
-      // 섹션 헤더 (접기 토글 — UX §3.2 "섹션 접기/펼치기")
-      const sectionHeader = document.createElement('button');
+      // 섹션 헤더 (접기 토글 — UX §3.2). 셰브론 글리프 2종(▾/▸) 대신 **한 셰브론의
+      // 회전**으로 통일한다 (UX_AUDIT C-18 — 한 화면에 규약이 둘이면 규약이 아니다).
+      const sectionHeader = applyType(document.createElement('button'), TYPE.bodyStrong);
       sectionHeader.type = 'button';
-      sectionHeader.className = 'ui-btn ui-btn--ghost';
+      sectionHeader.className = collapsed
+        ? 'ui-btn ui-btn--ghost rsw-lib-section rsw-lib-section--collapsed'
+        : 'ui-btn ui-btn--ghost rsw-lib-section';
       sectionHeader.dataset.testid = `library-section-${section.id}`;
-      sectionHeader.textContent = `${collapsed ? '▸' : '▾'} ${section.labelKo} (${templates.length})`;
+      sectionHeader.appendChild(icon('chevronDown', ICON.md));
+      const sectionLabel = document.createElement('span');
+      sectionLabel.textContent = `${section.labelKo} (${templates.length})`;
+      sectionHeader.appendChild(sectionLabel);
+      const sectionTitle = `${section.labelKo} — ${collapsed ? '펼치기' : '접기'}`;
+      sectionHeader.title = sectionTitle;
+      sectionHeader.setAttribute('aria-label', sectionTitle);
       sectionHeader.setAttribute('aria-expanded', String(!collapsed));
-      styled(sectionHeader, {
-        display: 'block',
-        width: '100%',
-        textAlign: 'left',
-        margin: `${SPACE.sm} 0 ${SPACE.xs} 0`,
-        padding: '2px 4px',
-      });
       sectionHeader.addEventListener('click', () => {
         sectionCollapsed.set(section.id, !collapsed);
         render();
@@ -272,8 +331,8 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
 
       const grid = styled(document.createElement('div'), {
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(88px, 1fr))',
-        gap: SPACE.sm,
+        gridTemplateColumns: `repeat(auto-fill, minmax(${CARD_MIN_WIDTH_PX}px, 1fr))`,
+        gap: SPACE.md,
       });
       grid.dataset.testid = `library-grid-${section.id}`;
       for (const template of templates) grid.appendChild(makeCard(template));
@@ -283,26 +342,27 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
     // Import 섹션 (UX §3.2) — 통합자가 onImportRequest를 주입한 경우에만 렌더.
     // 검색어와 무관하게 항상 노출한다(진입점 상실 방지 — 카드가 아닌 "동작" 섹션).
     if (deps.onImportRequest !== undefined) {
-      const importHeader = styled(document.createElement('div'), {
-        color: COLOR.muted,
-        margin: `${SPACE.sm} 0 ${SPACE.xs} 0`,
-        padding: '2px 4px',
-        fontWeight: '600',
+      const importHeader = applyType(document.createElement('div'), TYPE.bodyStrong);
+      styled(importHeader, {
+        color: COLOR.label,
+        margin: `${SPACE.xl} 0 ${SPACE.sm} 0`,
+        padding: `${SPACE.xxs} ${SPACE.xs}`,
       });
-      importHeader.textContent = 'Import · 3D 파일';
+      importHeader.textContent = '가져오기 · 3D 파일';
       body.appendChild(importHeader);
 
       const importCard = document.createElement('button');
       importCard.type = 'button';
       importCard.className = 'rsw-lib-card';
       importCard.dataset.testid = 'library-import-card';
-      importCard.title = '3D 파일 임포트 — glTF/glb · STL · OBJ (클릭해 파일 선택, 또는 파일을 뷰포트로 드래그)';
+      importCard.title =
+        '3D 파일 임포트 — glTF/glb · STL · OBJ (클릭해 파일 선택, 또는 파일을 뷰포트로 드래그)';
       importCard.setAttribute('aria-label', '3D 파일 임포트 — 클릭해 파일 선택');
       styled(importCard, { width: '100%', cursor: 'pointer' });
       const importIcon = document.createElement('span');
       importIcon.className = 'rsw-lib-card__icon';
-      importIcon.textContent = '⬆';
       importIcon.setAttribute('aria-hidden', 'true');
+      importIcon.appendChild(icon('upload', ICON.xl));
       const importLabel = document.createElement('span');
       importLabel.className = 'rsw-lib-card__label';
       importLabel.textContent = '3D 파일 임포트';
@@ -318,6 +378,12 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
   search.addEventListener('input', () => {
     query = search.value;
     render();
+  });
+
+  // 패널 헤더 접기 → 본문/검색 숨김 (좌 패널 세로 공간 회수)
+  panelHeader.onToggle((collapsed) => {
+    body.style.display = collapsed ? 'none' : '';
+    searchRow.style.display = collapsed ? 'none' : '';
   });
 
   host.appendChild(panel);

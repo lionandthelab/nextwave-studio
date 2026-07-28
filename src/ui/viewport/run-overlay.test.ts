@@ -7,9 +7,13 @@
 import { describe, expect, it } from 'vitest';
 import { COLOR } from '../theme';
 import {
+  COLLISION_ANNOUNCE_MIN_INTERVAL_MS,
   announceSignature,
   announceText,
+  formatCollisionAnnouncement,
+  formatCollisionCount,
   formatNodeProgress,
+  formatRunSummary,
   formatSimTime,
   normalizeEngineState,
   overlaySummary,
@@ -177,6 +181,81 @@ describe('overlaySummary', () => {
     expect(overlaySummary({ ...baseState, sceneName: '' })).toBe(
       'Running · node 3/7 · MoveJoints · simTime 2.34s',
     );
+  });
+
+  it('충돌 세그먼트는 맨 뒤에 붙는다 (기존 접두 세그먼트 계약 유지)', () => {
+    expect(overlaySummary({ ...baseState, collisionCount: 12 })).toBe(
+      'Running · node 3/7 · MoveJoints · simTime 2.34s · arm-and-boxes · 충돌 12건',
+    );
+  });
+
+  it('충돌 0건도 표시한다 — "감지가 돌고 있다"는 정보다', () => {
+    expect(overlaySummary({ ...baseState, collisionCount: 0 })).toBe(
+      'Running · node 3/7 · MoveJoints · simTime 2.34s · arm-and-boxes · 충돌 0건',
+    );
+  });
+
+  it('충돌 축 미배선(undefined)은 세그먼트를 만들지 않는다 (기존 소비자 문자열 불변)', () => {
+    expect(overlaySummary({ ...baseState, collisionCount: undefined })).toBe(
+      overlaySummary(baseState),
+    );
+  });
+});
+
+// ── 충돌 (UX_AUDIT C-7 — 제품의 존재 이유를 화면/음성에 등장시킨다) ──
+
+describe('formatCollisionCount', () => {
+  it('건수를 표시한다 — 0건도 포함 (사라지는 필드는 "감지 중"이라는 정보를 지운다)', () => {
+    expect(formatCollisionCount(0)).toBe('충돌 0건');
+    expect(formatCollisionCount(1)).toBe('충돌 1건');
+    expect(formatCollisionCount(12)).toBe('충돌 12건');
+  });
+
+  it('미주입(축 미배선)·비유한·음수는 null', () => {
+    expect(formatCollisionCount(undefined)).toBeNull();
+    expect(formatCollisionCount(Number.NaN)).toBeNull();
+    expect(formatCollisionCount(-3)).toBeNull();
+  });
+
+  it('소수는 floor 적용 (건수는 정수다)', () => {
+    expect(formatCollisionCount(2.9)).toBe('충돌 2건');
+  });
+});
+
+describe('formatCollisionAnnouncement', () => {
+  it('건수 + 최근 쌍 — 스트림이 아니라 요약을 읽는다', () => {
+    expect(formatCollisionAnnouncement(12, 'arm × box_a')).toBe('충돌 12건 · 최근 arm × box_a');
+  });
+
+  it('최근 쌍을 모르면 건수만', () => {
+    expect(formatCollisionAnnouncement(3, null)).toBe('충돌 3건');
+    expect(formatCollisionAnnouncement(3, undefined)).toBe('충돌 3건');
+    expect(formatCollisionAnnouncement(3, '')).toBe('충돌 3건');
+  });
+
+  it('충돌이 없으면 발화하지 않는다 (null)', () => {
+    expect(formatCollisionAnnouncement(0, 'arm × box_a')).toBeNull();
+    expect(formatCollisionAnnouncement(undefined, null)).toBeNull();
+  });
+});
+
+describe('formatRunSummary', () => {
+  it('재생 종료 1회 요약 — 0건도 명시한다(결과가 곧 정보다)', () => {
+    expect(formatRunSummary(12)).toBe('시퀀스 완료 · 충돌 총 12건');
+    expect(formatRunSummary(0)).toBe('시퀀스 완료 · 충돌 총 0건');
+    expect(formatRunSummary(undefined)).toBe('시퀀스 완료 · 충돌 총 0건');
+  });
+});
+
+describe('충돌 발화 스로틀 계약', () => {
+  it('최소 발화 간격은 3초 이상 — polite 큐 포화 방지의 유일한 장치', () => {
+    expect(COLLISION_ANNOUNCE_MIN_INTERVAL_MS).toBeGreaterThanOrEqual(3000);
+  });
+
+  it('충돌 건수는 announceSignature에 들어가지 않는다 (들어가면 스로틀이 무력해진다)', () => {
+    const base = announceSignature(baseState);
+    expect(announceSignature({ ...baseState, collisionCount: 99 })).toBe(base);
+    expect(announceSignature({ ...baseState, lastCollisionPair: 'arm × box_a' })).toBe(base);
   });
 });
 
