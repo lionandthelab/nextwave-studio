@@ -27,6 +27,9 @@ export class Renderer {
   private readonly controls: OrbitControls;
   private readonly host: HTMLElement;
   private readonly onResize: () => void;
+  /** 현재 씬의 기본 카메라 (Home 키가 되돌릴 지점) */
+  private sceneCamPosition: [number, number, number] = DEFAULT_CAMERA_POSITION;
+  private sceneCamTarget: [number, number, number] = DEFAULT_CAMERA_TARGET;
 
   constructor(host: HTMLElement, opts: RendererOptions = {}) {
     this.host = host;
@@ -42,6 +45,7 @@ export class Renderer {
     );
     const camPos = opts.cameraPosition ?? DEFAULT_CAMERA_POSITION;
     this.camera.position.set(...camPos);
+    this.sceneCamPosition = camPos;
 
     this.webgl = new THREE.WebGLRenderer({ antialias: true });
     this.webgl.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -53,6 +57,7 @@ export class Renderer {
     this.controls = new OrbitControls(this.camera, this.webgl.domElement);
     const target = opts.cameraTarget ?? DEFAULT_CAMERA_TARGET;
     this.controls.target.set(...target);
+    this.sceneCamTarget = target;
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.update();
@@ -98,6 +103,40 @@ export class Renderer {
     this.camera.updateProjectionMatrix();
     const target = opts.cameraTarget ?? DEFAULT_CAMERA_TARGET;
     this.controls.target.set(...target);
+    this.controls.update();
+    this.sceneCamPosition = camPos;
+    this.sceneCamTarget = target;
+  }
+
+  /**
+   * 대상 오브젝트를 화면에 담도록 카메라를 옮긴다 (F 키 · 충돌 로그 행 클릭).
+   *
+   * 구 구현에는 카메라 프레이밍이 아예 없어서, 충돌 로그 행의 "오브젝트 포커스"
+   * 안내가 실제로는 펄스만 시켰다 — 대상이 화면 밖이거나 로봇 뒤에 있으면 사용자는
+   * 아무것도 보지 못했다(UX_AUDIT: 레이블과 실제 동작 불일치).
+   *
+   * 시선 방향은 유지하고 거리만 바운딩 스피어에 맞춘다 — 사용자가 잡아 둔 각도를
+   * 빼앗지 않는다(Blender/Onshape의 frame-selected 관행).
+   */
+  frameObject(object: THREE.Object3D, paddingRatio = 1.9): void {
+    const box = new THREE.Box3().setFromObject(object);
+    if (box.isEmpty()) return;
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const radius = Math.max(sphere.radius, 0.05);
+    const halfFovRad = (this.camera.fov * Math.PI) / 360;
+    const distance = Math.max((radius * paddingRatio) / Math.tan(halfFovRad), 0.3);
+    const dir = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
+    if (dir.lengthSq() < 1e-8) dir.set(1, 1, 1);
+    dir.normalize();
+    this.controls.target.copy(sphere.center);
+    this.camera.position.copy(sphere.center).addScaledVector(dir, distance);
+    this.controls.update();
+  }
+
+  /** 씬의 기본 카메라로 되돌린다 (Home 키 — UX_DESIGN §9) */
+  resetCamera(): void {
+    this.camera.position.set(...this.sceneCamPosition);
+    this.controls.target.set(...this.sceneCamTarget);
     this.controls.update();
   }
 
