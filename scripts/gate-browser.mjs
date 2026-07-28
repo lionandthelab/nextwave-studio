@@ -1523,6 +1523,239 @@ async function main() {
         fail('two-arms: 방향키로 선택 오브젝트가 이동한다 (물리 반영)',
           `delta=${horizontalDelta.toFixed(4)}m before=${JSON.stringify(beforeNudge)} after=${JSON.stringify(afterNudge)}`);
       }
+
+      // ── 로봇도 오브젝트와 똑같이 이동한다 ★ 회귀 ───────────────────
+      // 사용자 보고: "오브젝트는 이동하는데 로봇이 이동을 안한다".
+      // 로봇은 물리 pose(kinematic 링크 바디)와 시각 pose(FK 그래프 루트)가 서로 다른
+      // 주체가 소유하므로 **둘이 함께** 움직였는지, 그리고 되감기(⏹ Stop → reset) 후에도
+      // 편집된 배치가 유지되는지까지 확인한다.
+      const ROBOT_ID = 'arm_left';
+      /** 엔티티의 물리(첫 바디)·시각(spec 위치/회전)·현재 선택 스냅샷 */
+      const robotSnapshotOf = (entityId) =>
+        page.evaluate((id) => {
+          const s = window.__sim;
+          const body = s.world.bodiesOfEntity(id)[0];
+          const entity = s.editor.serialize().entities.find((e) => e.id === id);
+          return {
+            physics: s.world.getPose(body).position,
+            spec: entity ? entity.transform.position : null,
+            rotation: entity ? (entity.transform.rotation ?? [0, 0, 0, 1]) : null,
+            selected: s.editor.selectedId(),
+          };
+        }, entityId);
+      const robotSnapshot = () => robotSnapshotOf(ROBOT_ID);
+
+      await page.evaluate((robotId) => window.__sim.editor.select(robotId), ROBOT_ID);
+      const robotBefore = await robotSnapshot();
+      await page.keyboard.press('ArrowRight');
+      await page.waitForTimeout(300);
+      const robotAfter = await robotSnapshot();
+
+      const robotPhysDelta = Math.hypot(
+        robotAfter.physics[0] - robotBefore.physics[0],
+        robotAfter.physics[2] - robotBefore.physics[2],
+      );
+      const robotSpecDelta =
+        robotBefore.spec && robotAfter.spec
+          ? Math.hypot(
+              robotAfter.spec[0] - robotBefore.spec[0],
+              robotAfter.spec[2] - robotBefore.spec[2],
+            )
+          : Number.NaN;
+      const robotMoved =
+        robotAfter.selected === ROBOT_ID &&
+        Math.abs(robotPhysDelta - NUDGE_EXPECTED_M) < NUDGE_TOLERANCE_M &&
+        Math.abs(robotSpecDelta - NUDGE_EXPECTED_M) < NUDGE_TOLERANCE_M;
+      if (robotMoved) {
+        pass('two-arms: 방향키로 로봇이 이동한다 — 물리+시각(spec) 동시 ★ 회귀',
+          `phys=${robotPhysDelta.toFixed(4)}m spec=${robotSpecDelta.toFixed(4)}m`);
+      } else {
+        fail('two-arms: 방향키로 로봇이 이동한다 — 물리+시각(spec) 동시 ★ 회귀',
+          `phys=${robotPhysDelta.toFixed(4)}m spec=${robotSpecDelta.toFixed(4)}m ` +
+          `before=${JSON.stringify(robotBefore)} after=${JSON.stringify(robotAfter)}`);
+      }
+
+      // 되감기(⏹ Stop)가 로봇 루트를 spec 배치로 되돌린다 ★ 회귀.
+      // 판별력을 위해 **시각 루트만** 어긋뜨린 뒤 reset을 부른다: 로봇 루트는 물리가
+      // 아니라 렌더 핸들이 소유하므로, 레코드에 initialPose가 없고 reset이 루트를
+      // 복구하지 않으면 커밋되지 않은 드래그 프리뷰가 영구히 남는다(원 결함).
+      const RESET_PERTURB_M = 0.4;
+      await page.evaluate(([robotId, offset]) => {
+        const record = window.__sim.sceneHandle.builtEntities.get(robotId);
+        const p = record.robot.handle; // 렌더 핸들 — spec/물리를 건드리지 않는 시각 경로
+        const entity = window.__sim.editor.serialize().entities.find((e) => e.id === robotId);
+        const base = entity.transform.position;
+        p.setRootTransform({
+          position: [base[0] + offset, base[1], base[2] + offset],
+          rotation: entity.transform.rotation ?? [0, 0, 0, 1],
+        });
+      }, [ROBOT_ID, RESET_PERTURB_M]);
+      await page.evaluate(() => window.__sim.orchestrator.stop());
+      await page.waitForTimeout(400);
+      const robotAfterReset = await robotSnapshot();
+      const resetDrift = Math.hypot(
+        robotAfterReset.physics[0] - robotAfter.physics[0],
+        robotAfterReset.physics[2] - robotAfter.physics[2],
+      );
+      if (resetDrift < NUDGE_TOLERANCE_M) {
+        pass('two-arms: 되감기(⏹ Stop)가 로봇 루트를 spec 배치로 복원한다 ★ 회귀',
+          `perturb=${RESET_PERTURB_M}m drift=${resetDrift.toFixed(4)}m pos=[${robotAfterReset.physics.map((n) => n.toFixed(3)).join(', ')}]`);
+      } else {
+        fail('two-arms: 되감기(⏹ Stop)가 로봇 루트를 spec 배치로 복원한다 ★ 회귀',
+          `drift=${resetDrift.toFixed(4)}m after=${JSON.stringify(robotAfter)} reset=${JSON.stringify(robotAfterReset)}`);
+      }
+
+      // 기즈모 앵커가 로봇의 **보이는 몸통**(시각 AABB 중심)에 붙는지 — 핸들을 못 잡아
+      // 카메라만 돌던 근본 원인의 회귀 가드. 좌표만 보면 attach 대상이 루트로 되돌아간
+      // 회귀를 못 잡으므로(앵커 좌표는 그대로다) attachedToAnchor를 함께 본다.
+      const ANCHOR_TOLERANCE_M = 0.01;
+      const dist3 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+      const probes = await page.evaluate((robotId) => {
+        const s = window.__sim;
+        s.editor.select(robotId);
+        const robot = s.editor.anchorProbe();
+        s.editor.select('witness_box');
+        const box = s.editor.anchorProbe();
+        s.editor.select(robotId);
+        return { robot, box };
+      }, ROBOT_ID);
+
+      const robotProbe = probes?.robot ?? null;
+      const boxProbe = probes?.box ?? null;
+      if (robotProbe && boxProbe) {
+        const robotAnchorGap = dist3(robotProbe.anchor, robotProbe.visualCenter);
+        const robotRootGap = dist3(robotProbe.rootOrigin, robotProbe.visualCenter);
+        const boxAnchorGap = dist3(boxProbe.anchor, boxProbe.visualCenter);
+        // 로봇: 앵커는 보이는 중심에 붙고(≈0), 루트 원점은 여전히 발밑이라 떨어져 있다.
+        // 오브젝트: 원래부터 0 — 두 경우 모두 "핸들이 보이는 몸통 위"라는 같은 계약.
+        if (
+          robotAnchorGap < ANCHOR_TOLERANCE_M &&
+          boxAnchorGap < ANCHOR_TOLERANCE_M &&
+          robotRootGap > ANCHOR_TOLERANCE_M &&
+          robotProbe.attachedToAnchor === true &&
+          boxProbe.attachedToAnchor === true
+        ) {
+          pass('two-arms: 기즈모가 로봇의 보이는 몸통 중심(앵커)에 붙는다 ★ 회귀',
+            `robotAnchorGap=${robotAnchorGap.toFixed(4)}m robotRootGap=${robotRootGap.toFixed(4)}m boxAnchorGap=${boxAnchorGap.toFixed(4)}m attached=${robotProbe.attachedToAnchor}`);
+        } else {
+          fail('two-arms: 기즈모가 로봇의 보이는 몸통 중심(앵커)에 붙는다 ★ 회귀',
+            JSON.stringify({ robotProbe, boxProbe }));
+        }
+      } else {
+        fail('two-arms: 기즈모가 로봇의 보이는 몸통 중심(앵커)에 붙는다 ★ 회귀',
+          `anchorProbe 미반환 robot=${JSON.stringify(robotProbe)} box=${JSON.stringify(boxProbe)}`);
+      }
+
+      // ── 사용자의 실제 제스처: 보이는 몸통을 마우스로 끌기 ★ 회귀 ────
+      // 원 결함("로봇이 이동을 안한다")은 이 경로에서만 재현됐다 — 파사드·방향키는
+      // 전부 정상이었다. 핸들이 몸통에서 벗어나면(attach(root) 회귀) 드래그가 기즈모에
+      // 잡히지 않고 OrbitControls로 흘러 **이동량 0**이 되므로 이 어서션이 적발한다.
+      const GIZMO_DRAG_MIN_M = 0.05; // 이보다 적게 움직이면 핸들을 못 잡은 것
+      const GIZMO_DRAG_PX = { dx: 90, dy: 30 };
+      /** 앵커 화면 좌표에서 (dx, dy)만큼 드래그하고 spec/물리 이동량을 잰다 */
+      const dragFromAnchor = async (entityId, dx, dy) => {
+        await page.evaluate((id) => window.__sim.editor.select(id), entityId);
+        await page.waitForTimeout(150);
+        const start = await page.evaluate(() => window.__sim.editor.anchorScreenPoint());
+        if (!start) return { moved: Number.NaN, spec: Number.NaN };
+        const before = await robotSnapshotOf(entityId);
+        await page.mouse.move(start[0], start[1]);
+        await page.mouse.down();
+        await page.mouse.move(start[0] + dx, start[1] + dy, { steps: 14 });
+        await page.mouse.up();
+        await page.waitForTimeout(350);
+        const after = await robotSnapshotOf(entityId);
+        return {
+          moved: Math.hypot(
+            after.physics[0] - before.physics[0],
+            after.physics[2] - before.physics[2],
+          ),
+          spec: Math.hypot(after.spec[0] - before.spec[0], after.spec[2] - before.spec[2]),
+        };
+      };
+
+      const robotDrag = await dragFromAnchor(ROBOT_ID, GIZMO_DRAG_PX.dx, GIZMO_DRAG_PX.dy);
+      const boxDrag = await dragFromAnchor('witness_box', GIZMO_DRAG_PX.dx, GIZMO_DRAG_PX.dy);
+      if (
+        robotDrag.moved > GIZMO_DRAG_MIN_M &&
+        robotDrag.spec > GIZMO_DRAG_MIN_M &&
+        boxDrag.moved > GIZMO_DRAG_MIN_M
+      ) {
+        pass('two-arms: 보이는 로봇 몸통을 마우스로 끌면 로봇이 이동한다 ★ 회귀',
+          `robot phys=${robotDrag.moved.toFixed(4)}m spec=${robotDrag.spec.toFixed(4)}m / box phys=${boxDrag.moved.toFixed(4)}m`);
+      } else {
+        fail('two-arms: 보이는 로봇 몸통을 마우스로 끌면 로봇이 이동한다 ★ 회귀',
+          `robot=${JSON.stringify(robotDrag)} box=${JSON.stringify(boxDrag)} (핸들을 못 잡으면 0m)`);
+      }
+
+      // ── 회전 기즈모는 로봇을 **제자리에서** 돌린다 ★ 회귀 ───────────
+      // 앵커를 피벗으로 루트를 역산하면 회전만 해도 베이스가 앵커를 중심으로 공전해
+      // 바닥에 서 있던 로봇이 최대 0.7 m 떠오른다. 피벗은 루트 원점(베이스)이어야 한다.
+      await page.evaluate((robotId) => window.__sim.editor.select(robotId), ROBOT_ID);
+      await page.waitForTimeout(150);
+      await page.keyboard.press('e'); // 회전 모드 (W/E/R — UX §3.3)
+      const canvasBox = await page.locator('canvas').boundingBox();
+      // TransformControls는 기즈모를 화면 크기 일정하게 그린다 — 회전 링의 화면 반경은
+      // 캔버스 높이에 비례한다(three r169: 0.5 * factor/4, factor = dist * 1.9 * tan(fov/2)).
+      const ringRadiusPx = 0.11875 * canvasBox.height;
+      const ROTATE_DRAG_PX = 140;
+      const ROTATE_MAX_POSITION_SHIFT_M = 0.01;
+      /**
+       * 채택 최소 회전량 (쿼터니언 성분 거리) — 판별력의 핵심.
+       * 0.1 ≈ 11.5°이고, 앵커 공전 결함이 남아 있으면 이때 베이스가
+       * 2·0.376·sin(θ/2) ≈ 0.075 m 밀린다(허용치 0.01 m의 7배). 회전이 이보다 작은
+       * 제스처는 "핸들을 스쳤다"로 보고 다음 후보를 계속 시도한다.
+       */
+      const ROTATE_MIN_DELTA = 0.1;
+      let rotateResult = null;
+      let rotateBest = null;
+      // 어느 링(X/Y/Z/E)을 잡게 될지는 카메라 각도에 달렸다 — 반경·방위를 훑어
+      // "충분히 큰 회전이 일어난" 첫 제스처를 채택한다(못 잡으면 FAIL — 조용한 통과 금지).
+      for (const scale of [0.8, 1.0, 1.2]) {
+        for (const angleDeg of [0, 90, 180, 270]) {
+          const anchor = await page.evaluate(() => window.__sim.editor.anchorScreenPoint());
+          const before = await robotSnapshotOf(ROBOT_ID);
+          const angleRad = (angleDeg * Math.PI) / 180;
+          const gx = anchor[0] + Math.cos(angleRad) * ringRadiusPx * scale;
+          const gy = anchor[1] + Math.sin(angleRad) * ringRadiusPx * scale;
+          // 접선 방향으로 끈다 (반경 방향 드래그는 회전각이 잘 안 생긴다)
+          const tx = -Math.sin(angleRad) * ROTATE_DRAG_PX;
+          const ty = Math.cos(angleRad) * ROTATE_DRAG_PX;
+          await page.mouse.move(gx, gy);
+          await page.mouse.down();
+          await page.mouse.move(gx + tx, gy + ty, { steps: 14 });
+          await page.mouse.up();
+          await page.waitForTimeout(250);
+          const after = await robotSnapshotOf(ROBOT_ID);
+          const rotationDelta = Math.hypot(
+            ...after.rotation.map((v, i) => v - before.rotation[i]),
+          );
+          const positionShift = Math.hypot(
+            after.spec[0] - before.spec[0],
+            after.spec[1] - before.spec[1],
+            after.spec[2] - before.spec[2],
+          );
+          if (rotateBest === null || rotationDelta > rotateBest.rotationDelta) {
+            rotateBest = { rotationDelta, positionShift, scale, angleDeg };
+          }
+          if (rotationDelta > ROTATE_MIN_DELTA) {
+            rotateResult = { rotationDelta, positionShift, scale, angleDeg };
+            break;
+          }
+        }
+        if (rotateResult !== null) break;
+      }
+      if (rotateResult === null) {
+        fail('two-arms: 회전 기즈모가 로봇을 제자리에서 돌린다 (베이스가 뜨지 않는다) ★ 회귀',
+          `충분한 회전(${ROTATE_MIN_DELTA})을 만드는 링 파지에 실패 — best=${JSON.stringify(rotateBest)} ringRadiusPx=${ringRadiusPx.toFixed(1)} canvas=${JSON.stringify(canvasBox)}`);
+      } else if (rotateResult.positionShift < ROTATE_MAX_POSITION_SHIFT_M) {
+        pass('two-arms: 회전 기즈모가 로봇을 제자리에서 돌린다 (베이스가 뜨지 않는다) ★ 회귀',
+          `dRot=${rotateResult.rotationDelta.toFixed(4)} posShift=${rotateResult.positionShift.toFixed(4)}m (ring×${rotateResult.scale} @${rotateResult.angleDeg}°)`);
+      } else {
+        fail('two-arms: 회전 기즈모가 로봇을 제자리에서 돌린다 (베이스가 뜨지 않는다) ★ 회귀',
+          `posShift=${rotateResult.positionShift.toFixed(4)}m dRot=${rotateResult.rotationDelta.toFixed(4)} — 회전이 베이스를 옮겼다(앵커 공전 회귀)`);
+      }
+      await page.keyboard.press('w'); // 이동 모드로 복귀 (다음 검증에 영향 없게)
     }
 
     // 페이지 에러는 씬별 상호작용까지 끝난 뒤 마지막에 판정한다

@@ -1319,3 +1319,181 @@ Phase 8 통합의 "알려진 한계"였던 "씬 편집이 라이브 시퀀스 �
 - 영향 파일: src/main.ts(computeOverlayState/refreshOverlay + 배선), src/ui/orchestrator.ts
   (stepOnce 제거), src/ui/orchestrator.test.ts(목 정리), scripts/gate-browser.mjs(오버레이 재래치
   + 트라이페인 오버레이 항), package.json(gate 스크립트), EXPERIMENTS.md(이 항목).
+
+
+---
+
+## 2026-07-28 — 버그 수정: "오브젝트는 이동하는데 로봇이 이동을 안한다"
+
+사용자 보고: 라이브러리에서 로봇팔 2대를 배치해 충돌 실험을 하던 중, 오브젝트는 드래그로
+옮겨지는데 로봇은 옮겨지지 않았다.
+
+### 결정 1 — 근본 원인은 이동 파이프라인이 아니라 **기즈모 앵커 기하**였다
+- 실측(?scene=two-arms-collision, 1600×950): `witness_box`는 기즈모 원점과 시각 메시 중심의
+  이격이 0 px인데, `arm_left`는 **376 mm(화면 115~201 px)** 떨어져 있었다. TransformControls는
+  attach한 객체의 **원점**에 핸들을 그리고, URDF 로봇의 시각 루트(outer Group) 원점은 베이스
+  링크 = 바닥(y=0)이기 때문이다. 핸들 유효 반경은 실측 ~70 px이라, 사용자가 보이는 몸통을
+  누르면 pointerdown이 기즈모에 잡히지 않고 OrbitControls로 흘러 **카메라만 돌았다**.
+- 즉 이동 경로(interaction.emitCommit → main.onTransformCommit → SceneEditor.updateTransform →
+  setRootTransform + teleportLinksToFk + tick)에는 결함이 없었다. 프로그램 select + 방향키가
+  정상 동작했던 것도, 조사자가 기즈모 **원점**을 계산해 끌었을 때 정상이었던 것도 이와 정합한다.
+- 수정: 기즈모를 선택 루트가 아니라 **씬에 상주하는 프록시 앵커 Object3D**에 붙이고, 앵커를
+  선택 시 계산한 시각 AABB 중심(선택 아웃라인 BoxHelper와 같은 박스)에 둔다. 드래그 중
+  objectChange마다 앵커 pose를 루트 pose로 역변환해 적용하므로 **commit 페이로드(=루트의 월드
+  트랜스폼) 계약은 그대로**다 — main.ts 글루와 core(SceneEditor)는 손대지 않았다.
+  앵커 오프셋은 선택 시 1회 고정한다(매 프레임 재계산하면 재생 중 FK 변화로 핸들이 흔들린다).
+- 대안 기각: `TransformControls.size` 확대는 376 mm 이격 자체를 해소하지 못해 단독 해법이 아니다.
+  선택 메시 자체를 잡고 끄는 지면 드래그는 orbit 제스처와 모호해져 보류(후속 검토).
+- 검증: 실브라우저 신뢰 마우스 드래그로 **보이는 몸통 중심**에서 90 px 끌기 —
+  수정 전 NOMOVE, 수정 후 `arm_left [-0.5,0,0] → [-0.2415,0,-0.031]`(0.26 m MOVED),
+  대조군 `witness_box` 0.19 m MOVED, pageErrors 0.
+
+### 결정 2 — 얇은 메시 픽킹은 **월드 AABB 2차 패스**로 관대하게
+- 로봇 링크는 얇아 화면 bbox 안을 클릭해도 광선이 링크 사이 빈틈을 지나간다(실측 명중률 26%,
+  박스 80%). 빗나간 클릭은 그대로 **조용한 선택 해제**가 되어, 이어지는 방향키가 아무 일도
+  하지 않는 실패 연쇄를 만들었다.
+- 수정: `pickAt`의 메시 raycast가 실패하면 각 pickable의 월드 AABB와 광선을 교차시켜 가장
+  가까운 것을 채택한다. AABB는 선택 아웃라인이 그리는 박스와 같으므로 "보이는 상자를
+  클릭하면 잡힌다"와 의미가 일치하고, 완전히 빈 곳 클릭의 선택 해제 동작은 유지된다.
+- 검증: 로봇 화면 bbox 격자 클릭 명중률 **26% → 100%**(121/121).
+
+### 결정 3 — 로봇 루트에도 "진실로 되돌리는 지점"을 만든다 (비로봇과 대칭화)
+- 발견된 비대칭: 로봇 빌드 레코드에는 `initialPose`가 없었고(`scene-loader` robot 분기),
+  `SceneEditor.updateTransform`의 로봇 분기도 이를 갱신하지 않았다. 로봇의 **루트 배치는 물리가
+  아니라 렌더 핸들(URDF outer 그룹)이 소유**하므로, 커밋되지 않은 드래그 프리뷰를 되돌릴 주체가
+  코드 어디에도 없었다 — 프리뷰가 다음 `tickAll`에서 kinematic 링크 바디로 역류하고 `reset()`
+  조차 복구하지 못했다(재현 테스트로 확인).
+- 수정: (a) `buildRobotEntity`가 `initialPose`를 설정, (b) `updateTransform` 로봇 분기가 이를
+  갱신, (c) `SceneHandle.reset()`의 로봇 분기가 `applyHome` 앞에 `setRootTransform(initialPose)`,
+  (d) `SceneEditor.resyncTransform(id)` 신설 — spec을 바꾸지 않고 물리/시각만 spec으로 재수렴
+  (검증·통지·undo 스냅샷 없음). main.ts의 `onDraggingChanged(false)`가 로봇에 대해 이를 호출해
+  비로봇의 `sync.bind` 재바인딩과 **같은 자가 치유**를 만든다. 스케일 거부 경로도 이를 재사용한다.
+- 왜 비로봇에는 resync를 걸지 않는가: 비로봇의 물리 pose는 살아있는 진실이다(낙하 중인 박스를
+  spec 위치로 되돌리면 오히려 물리를 깬다). 로봇 루트는 편집으로만 바뀌므로 spec이 곧 진실이다.
+
+### 결정 4 — 로봇 베이스 y는 UI가 0으로 클램프한다
+- 로봇 링크는 kinematicPosition이라 바닥(fixed ENV)과 겹쳐도 물리가 밀어내지 못한다. 실측:
+  y=−0.1로 커밋 후 2.5 s 재생·⏹ Stop 모두 −0.1000 유지(같은 조건의 dynamic 박스는 +0.0287로
+  자가 교정). 즉 "오브젝트는 잘 옮겨진 것처럼 보이고 로봇만 이상해 보이는" 상태가 된다.
+- 수정: 직접 조작 경로(기즈모 커밋·방향키 커밋·인스펙터 Transform 입력)에서 y를 0으로 클램프하고
+  한국어 토스트로 이유를 알린다. `__sim.editor.updateTransform` 파사드는 자동화용이라 그대로
+  통과시킨다(게이트가 임의 pose를 주입할 수 있어야 한다) — 이 비대칭은 의도된 것이다.
+- 대안 기각: core(SceneEditor)에서 클램프하면 데이터 계층이 요청과 다른 값을 커밋해 파사드
+  결정론이 깨진다. 규칙은 UI 정책으로 둔다.
+
+### 결정 5 — 발견성·피드백 (실패 연쇄를 끊는 쪽)
+- 우측 스택에 flex `order` 도입: **편집 폼이 항상 맨 위**. 로봇을 선택하면 관절 슬라이더 패널과
+  인스펙터의 관절 표가 길어져 `ee-pos-x`까지 최대 865 px 스크롤이 필요했다(오브젝트는 0 px) —
+  "로봇은 숫자로도 못 옮긴다"는 오해의 실제 원인이었다.
+- 뷰포트 실행 오버레이에 `선택 <id>` 리드아웃 상시 표시(선택 상태를 알 수 있는 곳이 스크롤될 수
+  있는 우측 패널뿐이었다). 선택 변경 시 `refreshOverlay()`로 rAF 지연 없이 갱신.
+- 선택 없이 방향키를 누르면 한국어 토스트(2 s 스로틀). 이전에는 완전 무음이었다.
+- 로봇 스케일 거부를 콘솔 로그뿐 아니라 토스트로도 표면화(다른 편집 실패는 이미 토스트였다).
+- 엔티티 편집 폼의 로봇 안내 문구를 제약형 → 능력형으로("로봇도 위 Transform으로 옮기고 회전할
+  수 있습니다 …").
+
+### 결정 6 — 인스펙터 Transform 커밋의 대상 고정 (별건 잠재 결함)
+- `commitPosition`/`commitRotation`이 `specOf()`(**현재 선택**)를 다시 조회했다. 입력을 커밋하지
+  않은 채 다른 엔티티를 선택하면 `content.replaceChildren()`가 포커스된 입력을 DOM에서 떼면서
+  지연 발화하는 native `change`가 **새로 선택된 엔티티**로 값을 커밋했다(엔티티 간 값 누출).
+- 수정: 폼이 만들어질 때의 id를 클로저로 고정하고, 그 폼의 대상이 아니면 조용히 무시한다.
+
+### 검증 (전부 실측)
+- `npm run verify`: tsc --noEmit 통과 · ESLint 경고 0 · vitest **36 files / 758 tests 전부 통과**
+  (기존 736 + 로봇 편집 계약 14 + 기즈모 앵커/픽킹 순수수학 8).
+- `npm run build` 성공.
+- 브라우저 게이트 **6종 ALL PASS**: two-arms(로봇 이동 3종 신규 어서션 포함) · arm ·
+  arm-sequence · scene-builder · orchestration · planner.
+- 임시 실브라우저 프로브(드래그·명중률)는 조사 후 삭제, 임시 디버그 훅도 원복(git status 확인).
+
+### 영향 파일
+`src/render/interaction.ts`(프록시 앵커 + 앵커 수학 순수 헬퍼 + AABB 픽킹 2차 패스 +
+onNudgeBlocked + anchorProbe), `src/render/interaction.test.ts`, `src/core/scene-loader.ts`
+(로봇 initialPose + reset 루트 복원), `src/core/scene-editor.ts`(로봇 initialPose 갱신 +
+resyncTransform + placeRobotRoot), `src/core/scene-edit-types.ts`(resyncTransform 계약),
+`src/core/robot-edit-contract.test.ts`(신규 — 수정 후 계약 고정), `src/main.ts`(드래그 훅 로봇
+재수렴 · y 클램프 · 스케일 거부 토스트 · 방향키 안내 · 우측 스택 order · 선택 리드아웃 ·
+anchorProbe 파사드), `src/ui/inspector/entity-editor.ts`(폼 대상 고정 + 안내 문구),
+`src/ui/viewport/run-overlay.ts`(선택 세그먼트), `scripts/gate-browser.mjs`(two-arms 로봇 이동·
+되감기 유지·앵커 위치 회귀), `docs/USAGE.md` §5.2/§5.3, `EXPERIMENTS.md`(이 항목).
+
+## 2026-07-28 — 위 수정의 적대적 재검증 후속 (회전 궤도 회귀 · 픽킹 과포획 · 게이트 판별력)
+
+앞 항목의 수정을 적대적 검증자들이 실브라우저로 재검증하면서 **그 수정이 만든 새 결함 2건과,
+회귀 가드가 사실상 비어 있었다는 점**이 드러났다. 아래는 그 후속 결정이다.
+
+### 결정 7 — 앵커는 "핸들 위치"일 뿐, 회전 피벗이 아니다 (궤도 회전 회귀 제거)
+- 회귀: 기즈모를 시각 AABB 중심의 프록시 앵커에 붙인 뒤, 루트를 `root = anchor − R(anchorRot)·offset`
+  으로 역산했다. three r169 `TransformControls`는 rotate 모드에서 `object.quaternion`만 바꾸므로
+  (`TransformControls.js` pointerMove의 rotate 분기 — position은 절대 건드리지 않는다) 이전
+  `attach(root)`에서는 회전이 위치를 바꾸지 않았는데, 역산 식에서는 앵커 회전만 바뀌어도 루트가
+  앵커를 중심으로 **공전**한다. 변위 = 2·offset·sin(θ/2) → 로봇(offset 0.376 m) 기준 15° ≈ 0.10 m,
+  90° ≈ 0.53 m. 실측: 회전 드래그 한 번에 베이스가 y=0.72 m까지 떠올랐다(바닥 클램프는 y<0만 막는다).
+- 수정: 앵커 → 루트 전달을 **델타 전달**로 바꿨다.
+  `rootPos = rootStart + (anchorNow − anchorStart)`, 회전/스케일은 앵커 값 복사.
+  드래그 시작 시 앵커의 회전/스케일 = 루트의 월드 회전/스케일이므로 이는 `attach(root)`의 의미를
+  정확히 보존한다 — "핸들만 다른 자리에 그린" 것과 같다. 회전 피벗은 루트 원점(로봇 베이스)이며,
+  바닥에 고정된 팔의 자연스러운 피벗이기도 하다.
+- 부수 효과: 앵커 오프셋을 로컬 좌표로 들고 다닐 이유가 사라져 `anchorOffsetLocal` /
+  `anchorPositionFromRoot` / `anchorWorldDelta` / `rotateVec3ByQuat`을 제거하고, 앵커는 매 프레임
+  시각 AABB 중심에 직접 놓는다(`placeAnchorAtVisualCenter`). 이로써 "선택 시 1회 고정" 때문에
+  재생 중 핸들이 몸통에서 0.435 m 떨어지던 별건 결함도 함께 사라졌다(BoxHelper.update와 같은
+  비용의 프레임 작업 1회 추가).
+
+### 결정 8 — 월드 AABB 픽킹 2차 패스를 화면 좌표 여유(6 px)로 교체
+- 회귀: `pickByBounds()`는 각 pickable의 **월드 AABB**와 광선을 교차시켰다. AABB는 3D 상자여서
+  비스듬한 카메라에서 실루엣보다 훨씬 넓은 화면 영역을 덮는다 — 실측으로 캔버스 격자 1000점 중
+  229점이 팔 하나에 흡수됐고, 두 팔 사이의 빈 공간에서 **엉뚱한 팔**이 선택됐다. "빈 곳 클릭 =
+  선택 해제"(UX_DESIGN §3.3)라는 규범이 깨지고, 조준하지 않은 로봇이 방향키에 반응하게 된다.
+- 수정: 정확 raycast가 빗나가면 `CLICK_TOLERANCE_PX`(6 px) 반경 8방위로만 재조준한다. 여유가
+  화면 좌표에 갇히므로 실루엣 근처에서만 관대해지고 규범은 유지된다. 실측(수정 후, 캔버스 격자
+  960점): null 932 · arm_left 15 · arm_right 12 · box 1 — 빈 곳은 전부 선택 해제.
+- 기각한 대안: AABB 유지 + 거리 가중치(여전히 빈 하늘을 선택), 실루엣 마스크 렌더(비용 과다).
+
+### 결정 9 — 브라우저 게이트에 "사용자의 실제 제스처"를 넣는다 (판별력 확보)
+- 문제: 앞 항목의 신규 어서션 3건이 전부 판별력이 없었다. 앵커 어서션은 `anchorProbe().anchor`와
+  `visualCenter`를 비교했는데 둘 다 같은 코드로 같은 박스에서 나온 값이라 **동어반복**이었고,
+  나머지 2건은 방향키/파사드 경로만 타서 드래그 편집이 통째로 죽어도 초록불이었다.
+- 수정(게이트 two-arms):
+  1. `anchorScreenPoint()`(신규 검증 표면)로 **핸들 화면 좌표를 얻어 합성 마우스로 드래그**하고
+     spec·물리 이동량을 잰다 — 사용자가 보고한 그 제스처다.
+  2. 회전 링을 반경·방위로 훑어 충분한 회전(Δq > 0.1 ≈ 11.5°)을 만든 뒤 **위치가 안 변했는지**
+     확인한다(공전 회귀가 남아 있으면 0.075 m 이상 밀린다 — 허용치 0.01 m).
+  3. 되감기 어서션은 **시각 루트만 0.4 m 어긋뜨린 뒤** reset을 부른다(원 결함의 재현 조건).
+  4. 앵커 어서션에 `attachedToAnchor`(gizmo.object === 앵커)를 추가 — 좌표만으로는 attach 대상이
+     루트로 되돌아간 회귀를 잡을 수 없었다.
+- 되돌림 실험으로 판별력을 확인했다(전부 실측):
+  `attach(root)` 복원 → 3건 FAIL(드래그 이동 0 m) · reset 루트 복원 제거 → 1건 FAIL(drift 0.566 m) ·
+  궤도 회전식 복원 → 1건 FAIL(posShift 0.159 m). 수정본은 12건 ALL PASS.
+
+### 결정 10 — 우 패널 폭을 확정한다 (내용이 레이아웃을 밀지 않게)
+- 원인: 워크스페이스 그리드의 열 5는 `auto` 트랙인데 `rightWrap`에 width가 없어 **스택 내용의
+  max-content**가 열 폭이 됐다(좌 패널은 `paintLeftCollapse`가 처음부터 width를 준다 — 우측만
+  누락). 로봇 안내 문구를 한 줄 늘리자 폭이 247 → 750 px로 벌어졌고, 그리드는 좁아졌는데 캔버스는
+  resize 통지를 못 받아 패널 아래로 밀려 들어가 그 띠에서 라이브러리 드롭이 조용히 무시됐다.
+- 수정: `rightWrap`에 `WORKSPACE_SIZES.right.defaultPx`(UX §2 "~280px")를 처음부터 부여한다.
+  폭 변경은 스플리터만 한다. 안내 문구도 짧게 줄이고 `whiteSpace: normal`을 명시했다.
+  실측(수정 후, 1600×950): 선택 없음/로봇/오브젝트 **모두 280 px**, 캔버스 가림 0 px.
+
+### 결정 11 — 관절 슬라이더 패널을 로봇 구성 변화에 재구성한다
+- 문제: 패널이 빌드 시점 스냅샷이라 라이브러리로 추가한 로봇은 슬라이더가 없었다 — 사용자
+  시나리오("빈 씬 → 팔 2대 → 관절로 충돌")의 **종착점이 UI만으로는 막혀 있었다**.
+- 수정: `editor.onChange`에서 로봇 id 목록 시그니처가 바뀌면 패널을 다시 만든다. 슬라이더 초기값은
+  core 진실(`readJoints`)에서 읽으므로 재마운트로 값이 튀지 않고, flex `order` 덕에 DOM에 나중에
+  붙어도 스택 위치는 그대로다. 실측: 빈 씬 → 카드 2회 실제 드래그앤드롭 → 슬라이더 0 → **16개**,
+  그 슬라이더 DOM 조작으로 관절이 구동되고 충돌 로그가 쌓인다(pageErrors 0).
+
+### 검증 (전부 실측)
+- `npm run verify`: tsc --noEmit 통과 · ESLint 경고 0 · vitest **36 files / 759 tests 전부 통과**.
+- `npm run build` 성공.
+- 브라우저 게이트 **7종 ALL PASS**: two-arms(12건 — 신규 제스처 어서션 포함) · arm ·
+  arm-sequence · scene-builder · orchestration · planner · scene-switch.
+- 임시 실브라우저 프로브는 저장소 밖(scratchpad)에서 실행하고 삭제했다.
+
+### 영향 파일
+`src/render/interaction.ts`(델타 전달 · 앵커 매 프레임 갱신 · 6 px 재조준 픽킹 ·
+`anchorScreenPoint`/`attachedToAnchor`), `src/render/interaction.test.ts`(궤도 회전을 계약으로
+고정하던 테스트를 **회전은 위치를 바꾸지 않는다**로 뒤집음 + ndcToClient/여유 반경),
+`src/ui/workspace.ts`(우 패널 폭 확정), `src/ui/inspector/entity-editor.ts`(안내 문구 축약 + 줄바꿈),
+`src/main.ts`(관절 패널 재구성 · anchorScreenPoint 파사드), `scripts/gate-browser.mjs`(two-arms
+제스처/회전/되감기 판별력), `docs/USAGE.md` §5.2, `EXPERIMENTS.md`(이 항목).

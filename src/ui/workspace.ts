@@ -388,11 +388,17 @@ export function mountWorkspace(host: HTMLElement): WorkspaceHandle {
   centerWrap.appendChild(flowGraphPane);
 
   // ── 행 2 열 5: 우 패널 스택 ───────────────────────────────────────
+  // width를 처음부터 확정한다: 열 5는 auto 트랙이라 폭을 비워 두면 스택 안 **내용의
+  // max-content**가 열 폭이 된다 — 긴 안내 문구 한 줄이나 넓은 폼이 들어오는 순간
+  // 패널이 UX §2의 "~280px"을 넘어 뷰포트를 잠식하고(실측: 로봇 선택 시 247 → 750 px),
+  // 그리드는 좁아졌는데 캔버스는 resize 통지를 못 받아 패널 아래로 밀려 들어가
+  // 그 띠에서 드롭·클릭이 패널에 먹힌다. 폭 변경은 스플리터만 한다(setSize).
   const rightWrap = styled(document.createElement('div'), {
     gridRow: '2',
     gridColumn: '5',
     display: 'flex',
     flexDirection: 'column',
+    width: `${rightWidthPx}px`,
     minWidth: '0',
     minHeight: '0',
     overflow: 'hidden',

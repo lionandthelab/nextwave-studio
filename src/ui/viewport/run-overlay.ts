@@ -28,6 +28,8 @@ const OVERLAY_LEFT_PX = 12;
 const SIM_TIME_DECIMALS = 2;
 /** 세그먼트 구분자 (시각 라인 · 요약 텍스트 공용) */
 const SEGMENT_SEP = ' · ';
+/** 선택 리드아웃 접두어 — '선택 arm_left' */
+const SELECTION_PREFIX = '선택 ';
 
 // ── 공개 타입 (통합자 계약) ─────────────────────────────────────────
 
@@ -50,6 +52,12 @@ export interface RunOverlayState {
   nodeCount: number | null;
   /** 씬 이름 (spec.name) */
   sceneName: string;
+  /**
+   * 현재 뷰포트 선택 엔티티 id (없으면 null). 선택 상태를 알 수 있는 곳이 스크롤될 수
+   * 있는 우측 패널뿐이면, 빈 곳 클릭으로 선택이 풀린 줄 모른 채 방향키만 누르는
+   * 실패 연쇄가 생긴다 — 뷰포트에 상시 표시한다 (UX_DESIGN §3.3 선택 피드백).
+   */
+  selectedEntityId?: string | null;
 }
 
 export interface RunOverlayHandle {
@@ -138,9 +146,19 @@ export function timeSecToNodeIndex(timeSec: number, boundaries: readonly number[
   return index;
 }
 
+/** '선택 <id>' 리드아웃 세그먼트 (선택 없으면 null — 세그먼트 미표시) */
+export function formatSelection(selectedEntityId: string | null | undefined): string | null {
+  if (selectedEntityId === null || selectedEntityId === undefined || selectedEntityId === '') {
+    return null;
+  }
+  return `${SELECTION_PREFIX}${selectedEntityId}`;
+}
+
 /**
  * 시각 라인/aria 요약 텍스트(선행 ● 점 제외). 세그먼트: 상태 · [node N/M] ·
- * [activeNodeLabel] · simTime · scene. 진행이 없으면 노드/라벨 세그먼트는 생략한다.
+ * [activeNodeLabel] · simTime · scene · [선택 id]. 진행이 없으면 노드/라벨 세그먼트는
+ * 생략한다. 선택 세그먼트는 맨 뒤 — 기존 접두 세그먼트를 보는 소비자(파사드 overlayText
+ * 검사)의 계약을 바꾸지 않는다.
  */
 export function overlaySummary(s: RunOverlayState): string {
   const parts: string[] = [stateLabel(s.engineState)];
@@ -151,16 +169,21 @@ export function overlaySummary(s: RunOverlayState): string {
   }
   parts.push(formatSimTime(s.simTimeSec));
   if (s.sceneName !== '') parts.push(s.sceneName);
+  const selection = formatSelection(s.selectedEntityId);
+  if (selection !== null) parts.push(selection);
   return parts.join(SEGMENT_SEP);
 }
 
 /**
  * 스크린리더 announce 시그니처 — simTime을 제외한 "의미 있는 전이"만 담는다(재생 상태·
- * 노드 진행·활성 노드 변화). 이 값이 바뀔 때만 live 영역을 갱신해 rAF마다의 범람을 막는다.
+ * 노드 진행·활성 노드·선택 변화). 이 값이 바뀔 때만 live 영역을 갱신해 rAF마다의 범람을 막는다.
  */
 export function announceSignature(s: RunOverlayState): string {
   const progress = formatNodeProgress(s.nodeIndex, s.nodeCount);
-  return `${normalizeEngineState(s.engineState)}|${progress ?? ''}|${s.activeNodeLabel ?? ''}`;
+  return (
+    `${normalizeEngineState(s.engineState)}|${progress ?? ''}|${s.activeNodeLabel ?? ''}` +
+    `|${s.selectedEntityId ?? ''}`
+  );
 }
 
 /** announce 텍스트 (시그니처가 바뀐 순간 live 영역에 넣는 concise 문구 — simTime 없음) */
@@ -171,6 +194,8 @@ export function announceText(s: RunOverlayState): string {
     parts.push(progress);
     if (s.activeNodeLabel !== null && s.activeNodeLabel !== '') parts.push(s.activeNodeLabel);
   }
+  const selection = formatSelection(s.selectedEntityId);
+  if (selection !== null) parts.push(selection);
   return parts.join(SEGMENT_SEP);
 }
 
@@ -261,6 +286,17 @@ export function mountRunOverlay(host: HTMLElement): RunOverlayHandle {
     maxWidth: '220px',
   });
 
+  // 선택 리드아웃 '선택 arm_left' — 선택이 없으면 숨김 (RunOverlayState 주석)
+  const selectionSep = sep();
+  const selectionEl = styled(document.createElement('span'), {
+    fontFamily: FONT.mono,
+    color: COLOR.accentText,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    maxWidth: '220px',
+  });
+  selectionEl.dataset.testid = 'run-overlay-selection';
+
   line.appendChild(stateWrap);
   line.appendChild(nodeSep);
   line.appendChild(nodeEl);
@@ -268,6 +304,8 @@ export function mountRunOverlay(host: HTMLElement): RunOverlayHandle {
   line.appendChild(timeEl);
   line.appendChild(sceneSep);
   line.appendChild(sceneEl);
+  line.appendChild(selectionSep);
+  line.appendChild(selectionEl);
 
   // sr-only live 영역 — "의미 있는 전이"에서만 갱신 (aria-live polite, 범람 방지)
   const liveRegion = styled(document.createElement('span'), SR_ONLY_STYLE);
@@ -314,7 +352,18 @@ export function mountRunOverlay(host: HTMLElement): RunOverlayHandle {
       sceneSep.style.display = 'none';
     }
 
-    // 스크린리더: 시그니처(상태/노드/라벨) 변화 시에만 갱신 (simTime rAF 범람 차단)
+    const selection = formatSelection(s.selectedEntityId);
+    if (selection !== null) {
+      selectionEl.textContent = selection;
+      selectionEl.title = selection;
+      selectionEl.style.display = '';
+      selectionSep.style.display = '';
+    } else {
+      selectionEl.style.display = 'none';
+      selectionSep.style.display = 'none';
+    }
+
+    // 스크린리더: 시그니처(상태/노드/라벨/선택) 변화 시에만 갱신 (simTime rAF 범람 차단)
     const signature = announceSignature(s);
     if (signature !== lastSignature) {
       lastSignature = signature;

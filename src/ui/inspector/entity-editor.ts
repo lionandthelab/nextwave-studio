@@ -732,11 +732,20 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
   };
 
   // ── Transform 섹션 (position + rotation 오일러 입력 → 쿼터니언 커밋) ─
-  const buildTransformSection = (): HTMLElement => {
+  //
+  // formId: 이 폼이 만들어질 때의 대상 id를 클로저로 고정한다. specOf()(현재 선택)를
+  // 다시 조회하면, 편집 중이던 입력을 커밋하지 않은 채 다른 엔티티를 선택하는 순간
+  // buildForm의 replaceChildren()이 포커스된 입력을 DOM에서 떼면서 지연 발화하는 native
+  // change가 **새로 선택된 엔티티**로 값을 커밋한다(엔티티 간 값 누출). 폼 대상이
+  // 아니면 조용히 무시한다 — 그 폼은 이미 사라진 뷰다.
+  const buildTransformSection = (formId: string): HTMLElement => {
     const { section, body } = makeSection('Transform', 'ee-sec-transform');
 
+    /** 이 폼이 담당하는 엔티티의 현재 spec (선택이 바뀌었으면 null — 커밋 무시) */
+    const formSpec = (): EntitySpec | null => (currentId === formId ? deps.getEntity(formId) : null);
+
     function commitPosition(): void {
-      const spec = specOf();
+      const spec = formSpec();
       if (spec === null) return;
       const base = spec.transform.position;
       const next: Vec3 = [
@@ -751,7 +760,7 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
     }
 
     function commitRotation(): void {
-      const spec = specOf();
+      const spec = formSpec();
       if (spec === null) return;
       const baseEuler = quatToEulerDegXYZ(spec.transform.rotation ?? IDENTITY_QUAT);
       const eulerDeg: [number, number, number] = [
@@ -1160,16 +1169,22 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
       return;
     }
     content.appendChild(buildNameSection());
-    content.appendChild(buildTransformSection());
+    content.appendChild(buildTransformSection(spec.id));
     if (deps.isRobot(spec.id)) {
-      // 로봇: 물리/치수는 URDF 유도 — 이름/Transform만 편집 (요구 §2 Robot)
+      // 로봇: 물리/치수는 URDF 유도 — 이름/Transform만 편집 (요구 §2 Robot).
+      // 문구는 능력형으로 쓴다: 제약만 읽히면 "로봇은 못 옮기는구나"로 오해해 위의
+      // Transform 입력을 시도조차 하지 않는다(사용자 보고의 실패 연쇄).
       const note = styled(document.createElement('div'), {
         color: COLOR.muted,
         fontSize: '11px',
         padding: '4px',
+        // 줄바꿈을 명시한다: 이 문구의 한 줄 길이가 우측 스택(폭 auto 열)의 max-content를
+        // 밀어 올려 패널이 캔버스를 덮는 회귀가 있었다 (실측 583 → 750 px).
+        whiteSpace: 'normal',
+        overflowWrap: 'anywhere',
       });
       note.dataset.testid = 'ee-robot-note';
-      note.textContent = '로봇 물리는 URDF에서 유도됩니다 — 이름/Transform만 편집 가능합니다';
+      note.textContent = '로봇도 위 Transform으로 옮기고 회전할 수 있습니다. 치수·Physics는 URDF 유도.';
       content.appendChild(note);
     } else {
       const dimForm = primitiveFormStateOf(spec);

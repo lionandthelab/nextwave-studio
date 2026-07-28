@@ -238,12 +238,26 @@ const COLLISION_RECENT_DEFAULT_LIMIT = 50;
 const RIGHT_STACK_GAP_PX = 8;
 /** 우측 패널 스택 안쪽 여백 */
 const RIGHT_STACK_PADDING_PX = 8;
+/**
+ * 우측 스택 표시 순서 (flex order — DOM 마운트 순서와 분리).
+ * 선택 대상을 "편집"하는 폼이 항상 맨 위다: 로봇을 선택하면 관절 슬라이더 패널과
+ * 인스펙터의 관절 표가 길어져 편집 폼이 화면 밖으로 밀려나기 때문이다(adoptIntoStack 주석).
+ */
+const RIGHT_STACK_ORDER = { editForm: 0, inspector: 1, jointPanel: 2 } as const;
 /** 인스펙터 값 갱신 스로틀 주기 (playing 중 — inspector.ts 헤더의 "주기 결정권은 통합자") */
 const INSPECTOR_REFRESH_INTERVAL_MS = 150;
 /** 앱 토스트 자동 숨김 (ms) */
 const TOAST_AUTO_HIDE_MS = 5000;
 /** 스케일 기즈모 → 치수 변환 시 half 치수 하한 (entity-editor 전체 치수 하한의 절반) */
 const MIN_HALF_DIMENSION_M = DIMENSION_MIN_M / 2;
+/**
+ * 로봇 베이스 y 하한 (m). 로봇 링크는 kinematicPosition이라 바닥과 겹쳐도 물리가
+ * 밀어내지 못한다(dynamic 오브젝트와 달리 자가 교정 없음) — 직접 조작 경로에서
+ * UI가 바닥면(y=0) 아래로 내려가는 것을 막는다.
+ */
+const ROBOT_BASE_MIN_Y_M = 0;
+/** 방향키 안내 토스트 최소 간격 (ms) — 키를 누르고 있어도 토스트가 쌓이지 않게 */
+const NUDGE_HINT_THROTTLE_MS = 2000;
 
 // ── 자동화/AI-native 훅 (Playwright 게이트 · 추후 ui 계층이 사용) ────
 
@@ -310,6 +324,23 @@ export interface SimEditorFacade {
   pickableIds(): string[];
   selectedId(): string | null;
   select(id: string | null): void;
+  /**
+   * 검증용: 현재 선택의 기즈모 앵커 · 시각 AABB 중심 · 루트 원점(월드 좌표) +
+   * 기즈모가 실제로 그 앵커에 붙어 있는지. "기즈모 핸들이 보이는 몸통에 붙는가"의
+   * 회귀 가드 — 로봇처럼 루트 원점이 발밑인 대상에서 앵커가 시각 중심에 오는지 확인한다.
+   */
+  anchorProbe(): {
+    anchor: Vec3;
+    visualCenter: Vec3;
+    rootOrigin: Vec3;
+    attachedToAnchor: boolean;
+  } | null;
+
+  /**
+   * 검증용: 기즈모 핸들의 화면(클라이언트 px) 좌표. 게이트가 사용자의 실제 제스처
+   * (보이는 몸통을 마우스로 끌기)를 합성 마우스로 재현하는 조준점이다.
+   */
+  anchorScreenPoint(): [number, number] | null;
 }
 
 /** Undo/Redo 파사드 (앱 수명 SceneHistory 위의 얇은 표면) */
@@ -1264,6 +1295,22 @@ async function boot(): Promise<void> {
       built.gizmoBar = gizmoBar;
       paintGizmoBar();
 
+      const isRobotEntity = (id: string): boolean => sceneHandle.robots.ids().includes(id);
+
+      /**
+       * 커밋되지 않은 드래그 프리뷰를 버리고 시각/물리를 spec 진실로 되돌린다.
+       * 비로봇은 sync 재바인딩이 자가 치유하지만 로봇의 시각 루트는 RenderSync 대상이
+       * 아니라 FK 그래프 자체여서 되돌리는 주체가 없다 (scene-editor.resyncTransform 주석).
+       * 실패는 조용히 삼키지 않고 콘솔에 남긴다 — 여기서 던지면 드래그 훅이 죽는다.
+       */
+      const resyncFromSpec = (id: string): void => {
+        try {
+          editor.resyncTransform(id);
+        } catch (err) {
+          appLog('error', err instanceof Error ? err.message : String(err));
+        }
+      };
+
       // 기즈모 드래그 수명 훅 (render/interaction.ts 헤더 "물리와의 관계"):
       // - 시작: playing이면 일시정지(로봇 루트 드래그가 preStep tickAll로 물리에
       //   새는 것 방지) + 대상 바디의 sync 바인딩 해제(드래그 프리뷰가 RenderSync
@@ -1271,14 +1318,37 @@ async function boot(): Promise<void> {
       // - 종료: commit(teleport) "이후" 통지되므로 재바인딩의 prev 스냅샷이 곧
       //   teleport된 물리 pose다 — 다음 프레임부터 시각이 물리 진실로 재수렴.
       //   commit이 실패/스킵된 경우에도 재바인딩이 시각을 물리 pose로 되돌린다.
+      //   로봇은 그 자가 치유 경로가 없으므로 spec으로 명시 재수렴시킨다(대칭화).
       interaction.onDraggingChanged((dragging, id) => {
         if (dragging) pauseForEditIfPlaying('기즈모 편집');
         if (id === null) return;
         const record = sceneHandle.builtEntities.get(id);
-        if (!record || record.bodyId === undefined || !record.bound || !record.node) return;
+        if (!record) return;
+        if (record.robot) {
+          // commit이 발행됐으면 spec이 이미 새 값이라 무해한 재적용(no-op)이 된다.
+          if (!dragging) resyncFromSpec(id);
+          return;
+        }
+        if (record.bodyId === undefined || !record.bound || !record.node) return;
         if (dragging) sync.unbind(record.bodyId);
         else sync.bind(record.bodyId, record.node);
       });
+
+      /**
+       * 로봇 베이스가 바닥 아래로 내려가지 않도록 y를 클램프한다.
+       * 로봇 링크는 kinematicPosition이라 바닥(fixed ENV)과 겹쳐도 물리가 밀어내지
+       * 못한다 — dynamic 오브젝트와 달리 자가 교정이 없어 영구히 바닥에 박힌다.
+       * 직접 조작 경로(기즈모·방향키·인스펙터 입력)에서 UI가 막고 이유를 알린다.
+       * (파사드 __sim.editor.updateTransform은 자동화용이라 그대로 통과시킨다)
+       */
+      const clampRobotBaseY = (id: string, position: Vec3): Vec3 => {
+        if (!isRobotEntity(id) || position[1] >= ROBOT_BASE_MIN_Y_M) return position;
+        showToast(
+          `'${id}': 로봇 베이스는 바닥 아래로 내려갈 수 없습니다 — y를 ${ROBOT_BASE_MIN_Y_M}로 맞췄습니다`,
+          'warn',
+        );
+        return [position[0], ROBOT_BASE_MIN_Y_M, position[2]];
+      };
 
       // 기즈모 commit → SceneEditor 라우팅 (render/interaction.ts 헤더 계약):
       // 드래그 중은 순수 시각 프리뷰, commit 시점에 물리(teleport)로 정합된다.
@@ -1290,10 +1360,15 @@ async function boot(): Promise<void> {
               ? entity.visual.primitive
               : undefined;
           if (entity === undefined || primitive === undefined) {
-            // 비프리미티브(로봇·임포트 메시): 스케일 커밋 거부 + 시각 스케일 원복 (UX §3.3)
+            // 비프리미티브(로봇·임포트 메시): 스케일 커밋 거부 + 시각 원복 (UX §3.3).
+            // 원복은 scale뿐 아니라 position/rotation까지 spec으로 되돌린다 — 스케일
+            // 기즈모 드래그도 대상을 조금 움직일 수 있기 때문이다.
             const node = pickables.get(id);
             if (node) node.scale.set(1, 1, 1);
-            appLog('warn', `'${id}': 스케일 기즈모는 프리미티브 전용입니다 — 원복했습니다`);
+            resyncFromSpec(id);
+            const msg = `'${id}': 스케일 기즈모는 프리미티브 전용입니다 — 원복했습니다`;
+            appLog('warn', msg);
+            showToast(msg, 'warn'); // 콘솔 탭에만 남기면 사용자는 이유를 모른다
             return;
           }
           // 스케일 배율 → 치수 편집으로 변환. updateDimensions가 엔티티를 스케일 1의
@@ -1301,9 +1376,18 @@ async function boot(): Promise<void> {
           runEdit(() => editor.updateDimensions(id, scaleShape(primitive, commit.scale)));
           return;
         }
-        runEdit(() =>
-          editor.updateTransform(id, { position: commit.position, rotation: commit.rotation }),
-        );
+        const position = clampRobotBaseY(id, commit.position);
+        runEdit(() => editor.updateTransform(id, { position, rotation: commit.rotation }));
+      });
+
+      // 방향키 이동이 거부된 이유를 한국어로 표면화 (조용한 무시 금지 — UX §9).
+      // 키를 누르는 동안 매번 발화하므로 스로틀한다.
+      let lastNudgeHintMs = 0;
+      interaction.onNudgeBlocked(() => {
+        const now = performance.now();
+        if (now - lastNudgeHintMs < NUDGE_HINT_THROTTLE_MS) return;
+        lastNudgeHintMs = now;
+        showToast('이동할 대상이 없습니다 — 뷰포트에서 클릭하거나 인스펙터 목록에서 선택하세요', 'info');
       });
 
       // ── UI: 하단 독 (Timeline | Collision Log | Console) — 워크스페이스 독 슬롯 ──
@@ -1534,6 +1618,9 @@ async function boot(): Promise<void> {
           nodeIndex: sequenceArmed && currentSequence ? player.currentStepIndex : null,
           nodeCount: sequenceArmed && currentSequence ? player.stepCount : null,
           sceneName: spec.name,
+          // 선택 상태를 뷰포트에 상시 노출 — 우측 패널은 스크롤로 가려질 수 있고,
+          // 선택이 풀린 줄 모른 채 방향키를 누르는 실패 연쇄가 여기서 끊긴다.
+          selectedEntityId: interaction.selectedId,
         };
       };
 
@@ -1721,6 +1808,8 @@ async function boot(): Promise<void> {
         select: (id) => {
           interaction.select(id);
         },
+        anchorProbe: () => interaction.anchorProbe(),
+        anchorScreenPoint: () => interaction.anchorScreenPoint(),
       };
 
       // (window.__sim 배선은 flow 파사드까지 조립된 뒤 — 아래 Flow Graph 섹션 끝)
@@ -1742,8 +1831,14 @@ async function boot(): Promise<void> {
       /** 패널을 스택 흐름(static)으로 편입 — 모듈 기본 절대 배치/자체 폭 제약을 해제.
        *  zIndex도 auto로 되돌린다: 단독 마운트 기본값(Z_INDEX.panel=100)이 flex 아이템
        *  으로 남으면 {} JSON 슬라이드 패널(95) 위에 그려져 클릭을 가로챈다 — 우측
-       *  스택은 슬라이드 패널보다 아래가 규약이다 (ui/theme.ts Z_INDEX 주석). */
-      const adoptIntoStack = (panelEl: HTMLElement): void => {
+       *  스택은 슬라이드 패널보다 아래가 규약이다 (ui/theme.ts Z_INDEX 주석).
+       *
+       *  order: DOM 순서와 무관하게 **편집 폼이 항상 스택 맨 위**에 오게 한다. 마운트
+       *  순서(관절 패널 → 인스펙터 → 편집 폼)를 그대로 그리면 로봇 선택 시 관절 슬라이더
+       *  와 읽기 전용 관절 표가 편집 폼을 화면 밖으로 밀어낸다(실측: 1600×950에서
+       *  ee-pos-x까지 최대 865 px 스크롤 — 로봇의 Transform 입력이 사실상 도달 불가).
+       *  오브젝트는 같은 자리에서 스크롤 0 px이었다 — 그 비대칭을 없앤다. */
+      const adoptIntoStack = (panelEl: HTMLElement, order: number): void => {
         Object.assign(panelEl.style, {
           position: 'static',
           top: 'auto',
@@ -1754,34 +1849,44 @@ async function boot(): Promise<void> {
           minHeight: '0',
           flex: '0 1 auto',
           zIndex: 'auto',
+          order: String(order),
         } satisfies Partial<CSSStyleDeclaration>);
       };
 
       // 로봇이 있는 씬이면 임시 관절 패널 마운트 (ROADMAP Phase 3 "슬라이더 수동 제어").
-      // 주의: 씬 편집으로 나중에 추가된 로봇은 이 패널에 나타나지 않는다 — 관절 확인은
-      // 인스펙터가, 정식 관절 편집 UI는 후속 Phase가 맡는다 (빌드 시점 스냅샷 UI).
-      const jointPanel =
-        sceneHandle.robots.ids().length > 0
-          ? mountJointPanel(
-              rightStack,
-              sceneHandle.robots.ids().map((robotId) => ({
-                id: robotId,
-                joints: sceneHandle.robots.get(robotId).joints,
-              })),
-              {
-                setJoint: robots.setJoint,
-                readJoints: robots.readJoints,
-                applyHome: (robotId) => {
-                  sceneHandle.robots.get(robotId).applyHome();
-                  refreshRobotVisualWhenNotPlaying(robotId);
-                },
-              },
-            )
-          : null;
-      if (jointPanel) {
-        built.jointPanel = jointPanel;
-        adoptIntoStack(jointPanel.el);
-      }
+      // 로봇 구성이 바뀌면(라이브러리 드롭으로 추가·삭제·개명) 패널을 다시 만든다 —
+      // 빌드 시점 스냅샷으로 두면 "빈 씬에 팔 2대를 놓고 관절을 움직여 충돌시킨다"는
+      // 시나리오가 UI만으로는 끝까지 갈 수 없다(패널 자체가 생기지 않았다).
+      // 슬라이더 초기값은 core 진실(readJoints)에서 읽으므로 재마운트로 값이 튀지 않는다.
+      let robotSetSignature = '';
+      const syncJointPanel = (): void => {
+        const ids = sceneHandle.robots.ids();
+        const signature = ids.join(' ');
+        if (signature === robotSetSignature) return;
+        robotSetSignature = signature;
+        built.jointPanel?.dispose();
+        built.jointPanel = undefined;
+        if (ids.length === 0) return;
+        const panel = mountJointPanel(
+          rightStack,
+          ids.map((robotId) => ({
+            id: robotId,
+            joints: sceneHandle.robots.get(robotId).joints,
+          })),
+          {
+            setJoint: robots.setJoint,
+            readJoints: robots.readJoints,
+            applyHome: (robotId) => {
+              sceneHandle.robots.get(robotId).applyHome();
+              refreshRobotVisualWhenNotPlaying(robotId);
+            },
+          },
+        );
+        built.jointPanel = panel;
+        // DOM 순서가 아니라 flex order가 스택 위치를 정한다 — 나중에 붙어도 맨 아래다
+        adoptIntoStack(panel.el, RIGHT_STACK_ORDER.jointPanel);
+      };
+      syncJointPanel();
 
       // 인스펙터 (읽기: 엔티티 목록·선택·트랜스폼/관절 상태) — 목록은 편집 스펙 기준
       const inspector = mountInspector(rightStack, {
@@ -1814,7 +1919,7 @@ async function boot(): Promise<void> {
         },
       });
       built.inspector = inspector;
-      adoptIntoStack(inspector.el);
+      adoptIntoStack(inspector.el, RIGHT_STACK_ORDER.inspector);
       inspectorRef = inspector;
 
       // 엔티티 편집 폼 (UX §3.5 (A) — 이름/Transform/Dimensions/Physics 쓰기)
@@ -1823,9 +1928,11 @@ async function boot(): Promise<void> {
           const entity = editor.spec.entities.find((e) => e.id === id);
           return entity ? structuredClone(entity) : null;
         },
-        isRobot: (id) => sceneHandle.robots.ids().includes(id),
+        isRobot: isRobotEntity,
         updateTransform: (id, transform) => {
-          runEdit(() => editor.updateTransform(id, transform));
+          // 기즈모/방향키와 같은 규칙 — 로봇 베이스 y 하한 (clampRobotBaseY 주석)
+          const position = clampRobotBaseY(id, transform.position);
+          runEdit(() => editor.updateTransform(id, { ...transform, position }));
         },
         updateDimensions: (id, shape) => {
           runEdit(() => editor.updateDimensions(id, shape));
@@ -1844,7 +1951,7 @@ async function boot(): Promise<void> {
         },
       });
       built.entityEditor = entityEditor;
-      adoptIntoStack(entityEditor.el);
+      adoptIntoStack(entityEditor.el, RIGHT_STACK_ORDER.editForm);
 
       // ── Flow Graph 글루 (Phase 8): 편집 파이프라인 + 캔버스/노드 폼 + 상태 동기 ──
       // 파일 헤더의 Flow Graph 절이 규범이다. 그래프 상태는 위 라이브 시퀀스 블록의
@@ -2013,7 +2120,7 @@ async function boot(): Promise<void> {
         },
       });
       built.flowNodeEditor = nodeEditor;
-      adoptIntoStack(nodeEditor.el);
+      adoptIntoStack(nodeEditor.el, RIGHT_STACK_ORDER.editForm);
 
       /** 우측 스택 중재: 마지막 선택이 이긴다 — 노드 폼 ↔ 엔티티 폼 표시 전환 */
       const showRightPanelFor = (panel: 'entity' | 'node'): void => {
@@ -2476,6 +2583,7 @@ async function boot(): Promise<void> {
       interaction.onSelect((id) => {
         inspector.select(id);
         entityEditor.showFor(id);
+        refreshOverlay(); // 선택 리드아웃('선택 <id>')을 rAF 지연 없이 즉시 반영
         if (id !== null) {
           // 우측 스택 중재 (마지막 선택 승리): 엔티티 선택 → 노드 선택 해제 + 엔티티 폼.
           // null(해제) 에코는 패널을 바꾸지 않는다 — 노드 선택이 유발한 해제와 공존.
@@ -2491,6 +2599,7 @@ async function boot(): Promise<void> {
       // ── 편집 통지 → 파생 상태 재동기화 + 히스토리 기록 ────────────────
       built.offEditorChange = editor.onChange((e) => {
         rebuildPickables(); // add/remove/재빌드(치수·물리·개명)로 바뀐 노드 매핑 재구축
+        syncJointPanel(); // 로봇 추가/삭제/개명 → 관절 슬라이더 패널 재구성
         resyncFlowWithSceneEdit(e); // rename 참조 리매핑 · 기본 로봇 채택 (플로우 잠김 방지)
         inspector.refresh();
         viewportStatus.setEmptyHintVisible(editor.spec.entities.length === 0);

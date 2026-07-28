@@ -444,13 +444,18 @@ async function buildRobotEntity(
     packages: spec.urdfPackages,
   });
   try {
-    handle.setRootTransform({
+    const rootPose: Pose = {
       position: cloneVec3(spec.transform.position),
       rotation: cloneQuat(spec.transform.rotation ?? IDENTITY_QUAT),
-    });
+    };
+    handle.setRootTransform(rootPose);
     const binding = attachRobotPhysics(spec, handle, deps);
     return {
       entityId: spec.id,
+      // 로봇 루트에도 "진실로 되돌리는 지점"을 남긴다 — 비로봇과 대칭.
+      // 로봇의 루트 배치는 물리가 아니라 렌더 핸들(URDF outer 그룹)이 들고 있어서,
+      // 이 스냅샷이 없으면 커밋되지 않은 드래그 프리뷰를 reset()도 되돌리지 못한다.
+      initialPose: { position: cloneVec3(rootPose.position), rotation: cloneQuat(rootPose.rotation) },
       bound: false,
       robot: { handle, binding },
       dispose: (): void => {
@@ -585,6 +590,10 @@ export class SceneLoader {
       reset: (): void => {
         for (const b of built.values()) {
           if (b.robot) {
+            // 0) 루트 배치를 initialPose(= 스펙의 편집 상태)로 복원한다. 로봇의 루트는
+            //    렌더 핸들이 소유하므로 물리 teleport로는 되돌릴 수 없다 — 커밋되지 않은
+            //    기즈모 드래그 프리뷰가 남았더라도 되감기가 진실로 되돌린다.
+            if (b.initialPose) b.robot.handle.setRootTransform(b.initialPose);
             // 관절 상태(단일 진실)를 home으로 복원한 뒤:
             // 1) teleportLinksToFk — 링크 바디를 home FK pose로 "즉시" 정렬. tick()만
             //    쓰면 다음 스텝까지 물리 pose가 리셋 전 상태로 남고, 첫 스텝이

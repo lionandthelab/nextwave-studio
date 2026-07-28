@@ -167,11 +167,10 @@ export class SceneEditorImpl implements SceneEditor {
     const pose = poseFromTransform(this.entityAt(next, index).transform);
 
     if (record.robot) {
-      record.robot.handle.setRootTransform(pose);
-      record.robot.binding.teleportLinksToFk(); // 링크 바디 즉시 정렬 (편집 전용)
-      record.robot.binding.tick(); // 다음 스텝 kinematic 목표 재-push (스윕 속도 0)
-      // prev 스냅샷 갱신 — SceneHandle.reset()과 동일 계약 (아래 비로봇 분기 주석 참조)
-      this.sync.commit();
+      this.placeRobotRoot(record, pose);
+      // reset()이 편집된 배치로 돌아가도록 레코드의 초기 pose도 갱신 — 비로봇과 대칭.
+      // (로봇 루트는 물리가 아니라 렌더 핸들이 소유하므로 이 스냅샷이 유일한 복원점이다)
+      record.initialPose = poseFromTransform(this.entityAt(next, index).transform);
     } else if (record.bodyId !== undefined) {
       for (const bodyId of this.world.bodiesOfEntity(id)) {
         this.world.teleport(bodyId, pose);
@@ -191,6 +190,50 @@ export class SceneEditorImpl implements SceneEditor {
 
     this.currentSpec = next;
     this.emit('transform', id);
+  }
+
+  /**
+   * spec을 바꾸지 않고 물리/시각만 spec.transform으로 재수렴시킨다 (편집 통지 없음).
+   *
+   * 용도: 기즈모 드래그는 드래그 "중" 시각 노드를 직접 움직이는 순수 프리뷰인데
+   * (render/interaction.ts 헤더), 그 드래그가 commit으로 이어지지 않는 경우가 있다 —
+   * 움직임 없는 no-op 드래그, 로봇의 스케일 커밋 거부, runEdit이 삼킨 편집 실패.
+   * 비로봇은 통합자가 RenderSync 바인딩을 되살리면 다음 프레임에 물리 진실이 시각을
+   * 덮어써 자가 치유되지만, **로봇의 시각 루트는 RenderSync 대상이 아니라 FK 그래프
+   * 자체**여서 되돌리는 주체가 없다 — 프리뷰가 그대로 남고 다음 tickAll에서 kinematic
+   * 링크 바디로 역류한다. 그 비대칭을 없애는 것이 이 연산이다.
+   *
+   * spec은 진실 그대로이므로 검증/undo 스냅샷/onChange가 필요 없다(순수 복원).
+   */
+  resyncTransform(id: string): void {
+    const index = this.requireEntityIndex(id);
+    const record = this.requireRecord(id);
+    const pose = poseFromTransform(this.entityAt(this.currentSpec, index).transform);
+
+    if (record.robot) {
+      this.placeRobotRoot(record, pose);
+    } else if (record.bodyId !== undefined) {
+      for (const bodyId of this.world.bodiesOfEntity(id)) {
+        this.world.teleport(bodyId, pose);
+      }
+      this.sync.commit();
+    } else if (record.node) {
+      this.renderApi.setPose(record.node, pose.position, pose.rotation);
+    }
+  }
+
+  /**
+   * 로봇 루트 배치의 단일 경로 (updateTransform / resyncTransform 공용):
+   * 렌더 핸들의 루트 트랜스폼 → 링크 바디 즉시 정렬(편집 전용 teleport) → 다음 스텝
+   * kinematic 목표 재-push(스윕 속도 0) → sync prev 스냅샷 갱신.
+   */
+  private placeRobotRoot(record: BuiltEntityHandle, pose: Pose): void {
+    if (!record.robot) return;
+    record.robot.handle.setRootTransform(pose);
+    record.robot.binding.teleportLinksToFk();
+    record.robot.binding.tick();
+    // prev 스냅샷 갱신 — SceneHandle.reset()과 동일 계약 (비로봇 분기 주석 참조)
+    this.sync.commit();
   }
 
   /**

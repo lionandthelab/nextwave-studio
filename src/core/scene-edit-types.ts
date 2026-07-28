@@ -34,6 +34,13 @@ export interface SceneEditor {
   /** 배치 편집: spec.transform 갱신 + 물리 teleport + 시각 반영 */
   updateTransform(id: string, transform: Transform): void;
 
+  /**
+   * spec을 바꾸지 않고 물리/시각만 현재 spec.transform으로 재수렴시킨다 (통지 없음).
+   * 커밋되지 않은 기즈모 드래그 프리뷰를 버리는 용도 — 특히 로봇의 시각 루트는
+   * RenderSync가 되돌려주지 않으므로 이 연산이 유일한 복원 경로다(scene-editor.ts 주석).
+   */
+  resyncTransform(id: string): void;
+
   /** 치수 편집: 프리미티브 shape 교체 — 시각 메시 + collider 동시 재생성 (UX §3.5) */
   updateDimensions(id: string, shape: ColliderShape): void;
 
