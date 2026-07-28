@@ -442,6 +442,8 @@ export function mountWorkspace(host: HTMLElement): WorkspaceHandle {
   let leftAutoCollapsed = false;
   let rightAutoCollapsed = false;
   let dockAutoCollapsed = false;
+  /** 자동 규칙이 그래프를 strip으로 내렸는가 — 창이 다시 커지면 되돌린다 */
+  let flowAutoStripped = false;
 
   const persist = (): void => {
     writePersistedLayout({
@@ -839,8 +841,9 @@ export function mountWorkspace(host: HTMLElement): WorkspaceHandle {
     persistDebounced();
     notifyResize();
   };
-  const setFlowMode = (mode: FlowMode): void => {
+  const setFlowMode = (mode: FlowMode, fromAuto = false): void => {
     if (mode === flowMode) return;
+    if (!fromAuto) flowAutoStripped = false;
     flowMode = mode;
     paintFlow();
     persistDebounced();
@@ -902,9 +905,17 @@ export function mountWorkspace(host: HTMLElement): WorkspaceHandle {
       setDockCollapsed(false, true);
     }
 
-    // 좁은 화면에서 full 그래프는 뷰포트를 다시 압살한다 — strip으로 강등
-    if (rect.height < BREAKPOINT.autoCollapseDockPx && flowMode === 'full') {
-      setFlowMode('strip');
+    // 좁은 화면에서 full 그래프는 뷰포트를 다시 압살한다 — strip으로 강등.
+    // **되돌릴 수 있어야 한다**: 자동으로 내린 것만 자동으로 올린다(사용자가 직접 strip을
+    // 고른 경우는 건드리지 않는다). 편도 전이는 창을 잠깐 줄였다 키운 사용자에게
+    // 영구 손실로 보인다.
+    const wantStrip = rect.height < BREAKPOINT.autoCollapseDockPx;
+    if (wantStrip && flowMode === 'full') {
+      flowAutoStripped = true;
+      setFlowMode('strip', true);
+    } else if (!wantStrip && flowMode === 'strip' && flowAutoStripped) {
+      flowAutoStripped = false;
+      setFlowMode('full', true);
     }
 
     root.dataset.compactBar = String(want.compactBar);
@@ -967,7 +978,9 @@ export function mountWorkspace(host: HTMLElement): WorkspaceHandle {
       setDockCollapsed(c);
     },
     isDockCollapsed: (): boolean => dockCollapsed,
-    setFlowMode,
+    setFlowMode: (mode: FlowMode): void => {
+      setFlowMode(mode);
+    },
     getFlowMode: (): FlowMode => flowMode,
     setFlowGraphVisible: (visible: boolean): void => {
       setFlowMode(visible ? 'full' : 'off');

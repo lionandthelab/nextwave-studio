@@ -1944,41 +1944,37 @@ async function boot(): Promise<void> {
       // 재생 컨트롤은 Orchestrator를 경유한다(§5): Play/Pause/Stop/Step/속도가 모두 노드 단위
       // 오케스트레이션 계층을 통과해 파사드·사람 조작이 같은 진실을 본다. ⏭ Step은 물리 1
       // tick이 아니라 "노드 1개"다(§5) — 물리-tick 프레임 스텝(engine.stepOnce)은 UI에서 내린다.
-      // 실행은 레이아웃의 1급 상태다 (UX_AUDIT C-9): ▶Play가 그래프를 56px 노드 스트립으로
-      // 접어 뷰포트를 넓히고, ⏹Stop이 복원한다. UX_DESIGN §2 "실행 중 뷰포트 우선 확장,
-      // 그래프는 최소 높이 유지" + §8 "실행 중 Viewport+활성 노드 스트립"의 구현이다.
-      // §1의 동시 가시성 원칙은 유지된다 — 그래프가 사라지는 게 아니라 얇아진다.
-      let flowModeBeforeRun: 'full' | 'strip' | 'off' | null = null;
-      const enterRunLayout = (): void => {
-        document.body.dataset.runState = 'running';
-        if (flowModeBeforeRun !== null) return;
-        const mode = workspace.getFlowMode();
-        if (mode !== 'full') return;
-        flowModeBeforeRun = mode;
-        workspace.setFlowMode('strip');
-      };
-      const exitRunLayout = (idle: boolean): void => {
-        document.body.dataset.runState = idle ? 'idle' : 'paused';
-        if (!idle || flowModeBeforeRun === null) return;
-        workspace.setFlowMode(flowModeBeforeRun);
-        flowModeBeforeRun = null;
+      /**
+       * 실행 상태를 body에 반영한다 (커맨드바 하단 액센트 진행 스트립의 소스).
+       *
+       * **재생이 그래프 페인 크기를 바꾸지 않는다.** 이전 구현은 ▶Play에서 flowMode를
+       * strip(56px)으로 접었는데, 노드가 갑자기 쪼그라들어 읽던 내용을 잃는 대가가
+       * 뷰포트 몇십 px보다 컸다. 페인 크기는 사용자가 스플리터로 정한 값 그대로 둔다.
+       *
+       * 그리고 이 함수는 **Play/Pause/Stop 콜백이 아니라 tick의 진실에서 호출된다** —
+       * 콜백에만 걸면 시퀀스가 자연 종료될 때(사용자가 아무것도 누르지 않았을 때)
+       * 아무도 상태를 되돌리지 않아 영원히 '실행 중'으로 남는다.
+       */
+      const paintRunState = (seqRunning: boolean, engineState: EngineState): void => {
+        document.body.dataset.runState = seqRunning
+          ? 'running'
+          : engineState === 'paused'
+            ? 'paused'
+            : 'idle';
       };
 
       const playbackControls = {
         play: (): void => {
           armSequenceIfAvailable();
           orchestrator.play();
-          enterRunLayout();
           refreshOverlay(); // engine.play() 직후 동기 갱신 — rAF 지연 없이 'Running · node k/n' 전이 (§5)
         },
         pause: (): void => {
           orchestrator.pause();
-          exitRunLayout(false);
           refreshOverlay(); // 'Paused' 전이를 즉시 반영 (정지에는 onActiveNode 방출이 없다)
         },
         stop: (): void => {
           orchestrator.stop();
-          exitRunLayout(true);
           refreshOverlay(); // 'Idle' 전이를 즉시 반영
         },
         stepOnce: (): void => {
@@ -2169,6 +2165,13 @@ async function boot(): Promise<void> {
         // 접촉점 마커 감쇠 — 벽시계 기준이라 일시정지 중에도 자연스럽게 사라진다
         contactMarkers.update(performance.now());
         paintGizmoBar(); // W/E/R 단축키로 바뀐 모드를 버튼 상태에 반영 (변경 시에만 DOM)
+        // 시퀀스 진행의 단일 진실 — 물리 엔진 상태와 분리된다. 물리는 시퀀스가 done이
+        // 된 뒤에도 계속 돌기 때문에(오브젝트가 계속 정착해야 한다), 이걸 engineState로
+        // 판정하면 완주 후에도 영원히 '실행 중'으로 남는다.
+        const seqRunningNow =
+          sequenceArmed && info.state === 'playing' && player.status === 'running';
+        const seqDoneNow = sequenceArmed && player.status === 'done';
+        paintRunState(seqRunningNow, info.state);
         playbackBar.update({
           engineState: info.state,
           simTimeSec: info.simTimeSec,
@@ -2184,6 +2187,8 @@ async function boot(): Promise<void> {
                 // 미arm(편집 직후 포함) 상태에서는 player가 이전 시퀀스를 물고 있을 수
                 // 있다 — 총 step 수는 항상 현재 라이브 시퀀스 기준으로 보인다 (Phase 8)
                 stepCount: sequenceArmed ? player.stepCount : currentSequence.steps.length,
+                running: seqRunningNow,
+                done: seqDoneNow,
               }
             : undefined,
         });

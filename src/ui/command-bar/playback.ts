@@ -71,9 +71,20 @@ export interface PlaybackStatusInfo {
   simTimeSec: number;
   /** 시퀀스가 있는 씬이면 진행 상태 (없으면 미표시) */
   sequence?: {
+    /** 사람이 읽는 표시 문자열 ('running' / '대기 (▶ Play)' 등) */
     status: string;
     stepIndex: number;
     stepCount: number;
+    /**
+     * 시퀀스가 **실제로 진행 중인가** — 표시 문자열과 분리된 기계 판독 값.
+     *
+     * 물리 엔진(engineState)은 시퀀스가 끝나도 계속 돈다(오브젝트가 계속 정착해야 하므로
+     * 의도된 동작이다). 그래서 트랜스포트의 "지금 실행 중인가"를 engineState로 판정하면
+     * 시퀀스가 done이 된 뒤에도 영원히 실행 중으로 남는다.
+     */
+    running: boolean;
+    /** 끝까지 완주했는가 — Play가 "다시 실행"의 의미가 되는 지점 */
+    done: boolean;
   };
 }
 
@@ -90,6 +101,24 @@ export interface PlaybackBarHandle {
 }
 
 // ── 순수 헬퍼 (DOM 비의존 — node 테스트 대상) ───────────────────────
+
+/**
+ * Space(재생/일시정지 토글)가 지금 무엇을 해야 하는가 — 순수 판정.
+ *
+ * **시퀀스가 있으면 시퀀스 진행 여부가 기준이다.** 물리 엔진은 시퀀스가 done이 된 뒤에도
+ * 계속 도는 것이 정상이므로(오브젝트가 계속 정착해야 한다), engineState로 판정하면 완주
+ * 직후 Space가 "다시 실행"이 아니라 "물리 일시정지"가 된다 — 사용자에게는 앱이 영원히
+ * 실행 중인 것처럼 보인다.
+ *
+ * @param sequenceRunning 시퀀스 진행 여부. 시퀀스가 없는 씬이면 null.
+ */
+export function nextTransportAction(
+  sequenceRunning: boolean | null,
+  engineState: PlaybackStatusInfo['engineState'],
+): 'play' | 'pause' {
+  if (sequenceRunning !== null) return sequenceRunning ? 'pause' : 'play';
+  return engineState === 'playing' ? 'pause' : 'play';
+}
 
 /** 물리 루프 상태 → 리드아웃 텍스트 ("물리 가동" 등 — 점은 별도 요소) */
 export function physicsStateLabel(state: PlaybackStatusInfo['engineState']): string {
@@ -226,21 +255,43 @@ export function mountPlaybackBar(
   // 중에도** 가로채지 않는다 — 구 isTypingTarget은 버튼 포커스 중 Space까지 삼켜
   // 충돌 로그 행을 키보드로 여는 순간 시뮬이 재생됐다 (UX_AUDIT C-6).
   let lastEngineState: PlaybackStatusInfo['engineState'] = 'idle';
+  /** 시퀀스 진행 여부 — 시퀀스가 있는 씬에서는 이것이 토글의 진실이다 */
+  let lastSequenceRunning: boolean | null = null;
   //
   // 키 바인딩 자체는 **여기서 하지 않는다.** 전역 단축키의 단일 소유자는 ui/shortcuts.ts의
   // 라우터이고(UX_AUDIT C-6), 이 모듈은 "무엇을 할지"만 제공한다. 통합자가
   // `shortcuts.register({ keys: 'Space', run: () => playbackBar.togglePlay() })`로 잇는다.
   const togglePlay = (): void => {
-    // 낙관적 로컬 갱신: lastEngineState는 update()가 rAF당 1회만 새로고침하므로,
-    // 같은 프레임 안의 연속 Space가 stale 상태를 읽어 토글 대신 play/pause를
-    // 반복 호출하는 것을 막는다. 다음 update()가 엔진 진실로 되맞춘다.
-    if (lastEngineState === 'playing') {
+    // 낙관적 로컬 갱신: update()가 rAF당 1회만 새로고침하므로, 같은 프레임 안의 연속
+    // Space가 stale 상태를 읽어 토글 대신 play/pause를 반복 호출하는 것을 막는다.
+    // 다음 update()가 진실로 되맞춘다.
+    //
+    // 시퀀스가 있는 씬에서는 **시퀀스 진행 여부**가 토글의 기준이다 — 물리는 시퀀스가
+    // done이 된 뒤에도 계속 돌기 때문에, engineState로 판정하면 완주 후 Space가
+    // "다시 실행"이 아니라 "물리 일시정지"가 된다.
+    if (nextTransportAction(lastSequenceRunning, lastEngineState) === 'pause') {
       controls.pause();
+      if (lastSequenceRunning !== null) lastSequenceRunning = false;
       lastEngineState = 'paused';
     } else {
       controls.play();
+      if (lastSequenceRunning !== null) lastSequenceRunning = true;
       lastEngineState = 'playing';
     }
+  };
+
+  /**
+   * 트랜스포트 강조 전환 — 액센트 면(--primary)은 "지금 눌러야 할 것" 하나만 갖는다.
+   * 시퀀스가 돌면 ⏸ 일시정지가, 멈춰 있으면 ▶ 재생이 주요 액션이다.
+   */
+  const paintTransport = (running: boolean, done: boolean): void => {
+    playButton.classList.toggle('ui-btn--primary', !running);
+    pauseButton.classList.toggle('ui-btn--primary', running);
+    const playTitle = done ? '다시 실행 (Space)' : '재생 (Space)';
+    playButton.title = playTitle;
+    playButton.setAttribute('aria-label', playTitle);
+    const label = playButton.querySelector('.ui-btn__label');
+    if (label !== null) label.textContent = done ? '다시 실행' : '재생';
   };
 
   const update = (info: PlaybackStatusInfo): void => {
@@ -254,11 +305,15 @@ export function mountPlaybackBar(
       `${physicsStateLabel(info.engineState)} · ${statusTime.textContent}`,
     );
     if (info.sequence) {
-      const { status, stepIndex, stepCount } = info.sequence;
+      const { status, stepIndex, stepCount, running, done } = info.sequence;
       const shown = Math.min(stepIndex + 1, stepCount);
       sequenceReadout.textContent = `시퀀스 ${status} · step ${shown}/${stepCount}`;
+      lastSequenceRunning = running;
+      paintTransport(running, done);
     } else {
       sequenceReadout.textContent = '';
+      lastSequenceRunning = null;
+      paintTransport(info.engineState === 'playing', false);
     }
   };
 
