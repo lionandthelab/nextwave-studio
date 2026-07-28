@@ -9,17 +9,26 @@
 // 보안 고지(불변식 §2.9 정신의 투명성): 키는 이 브라우저에만 저장되고 Anthropic 호출에만
 // 쓰인다는 점을 명시하고, 공용 PC 경고를 항상 보인다.
 
+import { trapFocus } from '../a11y';
+import type { FocusTrapHandle } from '../a11y';
+import { makeIconButton } from '../icons';
 import {
+  BORDER,
+  COLLISION,
   COLOR,
   FONT,
   RADIUS,
   SHADOW,
   SPACE,
+  SURFACE,
+  TYPE,
   Z_INDEX,
+  applyType,
   ensureThemeStyles,
   makeButton,
   styled,
 } from '../theme';
+import { COMMAND_BAR_PRIORITY, setCommandBarPriority } from './scene-controls';
 
 // ── 공개 타입 (플래너 백엔드 설정 형상) ─────────────────────────────
 
@@ -87,9 +96,9 @@ function fieldLabel(text: string): HTMLLabelElement {
   const label = styled(document.createElement('label'), {
     display: 'block',
     color: COLOR.label,
-    fontSize: '11px',
     marginBottom: SPACE.xs,
   });
+  applyType(label, TYPE.caption);
   label.textContent = text;
   return label;
 }
@@ -102,15 +111,21 @@ export function mountPlannerSettings(
 ): PlannerSettingsHandle {
   ensureThemeStyles();
 
-  // ⚙ 버튼 (커맨드바 우측)
-  const gearButton = makeButton('⚙', '플래너 설정 (백엔드·API 키·모델)', 'planner-settings-open');
+  // 설정 버튼 (커맨드바 행 A 우측) — 라벨 없는 아이콘 버튼이라 어떤 밀도에서도 폭이 같다
+  const gearButton = makeIconButton(
+    'settings',
+    '',
+    '플래너 설정 (백엔드·API 키·모델)',
+    'planner-settings-open',
+  );
+  setCommandBarPriority(gearButton, COMMAND_BAR_PRIORITY.misc);
   host.appendChild(gearButton);
 
   // 백드롭 + 다이얼로그 (기본 숨김)
   const backdrop = styled(document.createElement('div'), {
     position: 'fixed',
     inset: '0',
-    zIndex: Z_INDEX.overlay,
+    zIndex: Z_INDEX.modal, // SURFACE.modal과 짝 (Z_INDEX.overlay는 치명적 오류 화면용)
     display: 'none',
     alignItems: 'center',
     justifyContent: 'center',
@@ -125,16 +140,16 @@ export function mountPlannerSettings(
     overflowY: 'auto',
     display: 'flex',
     flexDirection: 'column',
-    gap: SPACE.lg,
-    background: COLOR.bgPanel,
-    border: `1px solid ${COLOR.border}`,
-    borderRadius: RADIUS.md,
-    boxShadow: SHADOW.panel,
-    padding: `${SPACE.lg} ${SPACE.lg}`,
+    gap: SPACE.xl,
+    background: SURFACE.modal,
+    border: `1px solid ${BORDER.default}`,
+    borderRadius: RADIUS.lg,
+    boxShadow: SHADOW.modal,
+    padding: SPACE.xxl,
     color: COLOR.text,
-    fontSize: '12px',
     boxSizing: 'border-box',
   });
+  applyType(dialog, TYPE.body);
   dialog.className = 'ui-scroll';
   dialog.dataset.testid = 'planner-settings';
   dialog.setAttribute('role', 'dialog');
@@ -148,11 +163,11 @@ export function mountPlannerSettings(
     });
   }
 
-  const heading = styled(document.createElement('div'), {
+  const heading = styled(document.createElement('h2'), {
+    margin: '0',
     color: COLOR.textStrong,
-    fontSize: '14px',
-    fontWeight: '600',
   });
+  applyType(heading, TYPE.display);
   heading.id = dlgTitleId;
   heading.textContent = '플래너 설정';
   dialog.appendChild(heading);
@@ -239,14 +254,13 @@ export function mountPlannerSettings(
 
   const notice = styled(document.createElement('p'), {
     margin: '0',
-    padding: `${SPACE.sm} ${SPACE.md}`,
+    padding: `${SPACE.md} ${SPACE.lg}`,
     background: COLOR.infoSoft,
-    border: `1px solid ${COLOR.border}`,
+    border: `1px solid ${BORDER.default}`,
     borderRadius: RADIUS.sm,
     color: COLOR.muted,
-    fontSize: '11px',
-    lineHeight: '1.6',
   });
+  applyType(notice, TYPE.caption);
   notice.dataset.testid = 'planner-key-notice';
   notice.textContent = KEY_NOTICE_KO;
 
@@ -258,10 +272,9 @@ export function mountPlannerSettings(
   // 검증 오류(인라인)
   const errorText = styled(document.createElement('div'), {
     display: 'none',
-    color: COLOR.errorText,
-    fontSize: '11px',
-    lineHeight: '1.5',
+    color: COLLISION.text,
   });
+  applyType(errorText, TYPE.caption);
   errorText.dataset.testid = 'planner-settings-error';
   errorText.setAttribute('role', 'alert');
   dialog.appendChild(errorText);
@@ -272,8 +285,10 @@ export function mountPlannerSettings(
     justifyContent: 'flex-end',
     gap: SPACE.sm,
   });
-  const cancelButton = makeButton('취소', '변경 취소', 'planner-settings-cancel', 'ghost');
-  const saveButton = makeButton('저장', '설정 저장', 'planner-settings-save', 'accent');
+  const cancelButton = makeButton('취소', '변경 취소 (Esc)', 'planner-settings-cancel', 'ghost');
+  // 이 다이얼로그의 주요 액션 — 액센트 **면**(primary). 구 `--accent`는 보더만 칠해
+  // 취소 버튼과 시각 무게가 같았다 (UX_AUDIT C-14).
+  const saveButton = makeButton('저장', '설정 저장', 'planner-settings-save', 'primary');
   footer.appendChild(cancelButton);
   footer.appendChild(saveButton);
   dialog.appendChild(footer);
@@ -294,18 +309,20 @@ export function mountPlannerSettings(
   ruleRadio.input.addEventListener('change', syncBackendVisibility);
   anthropicRadio.input.addEventListener('change', syncBackendVisibility);
 
-  const close = (): void => {
-    backdrop.style.display = 'none';
-    window.removeEventListener('keydown', onKeyDown, true);
-  };
+  // ── 포커스 트랩 (UX_AUDIT C-18) ───────────────────────────────────
+  // `role="dialog"` + `aria-modal="true"`를 선언해 놓고 Tab이 배경으로 빠지고 닫을 때
+  // 포커스 복원이 없었다. 같은 코드베이스의 clarify-card는 이미 트랩을 걸고 있었다 —
+  // 방법을 몰라서가 아니라 여기서만 빠뜨린 것이라, 공용 프리미티브(a11y.trapFocus)로
+  // 통일한다. release()가 진입 전 포커스(⚙ 버튼)까지 되돌려 준다.
 
-  function onKeyDown(e: KeyboardEvent): void {
+  let trap: FocusTrapHandle | null = null;
+
+  const close = (): void => {
     if (backdrop.style.display === 'none') return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      close();
-    }
-  }
+    backdrop.style.display = 'none';
+    trap?.release(); // Tab 트랩 해제 + 진입 전 포커스 복원
+    trap = null;
+  };
 
   const open = (): void => {
     const cfg = deps.get();
@@ -316,9 +333,12 @@ export function mountPlannerSettings(
     errorText.style.display = 'none';
     syncBackendVisibility();
     backdrop.style.display = 'flex';
-    window.addEventListener('keydown', onKeyDown, true);
-    // 첫 포커스: 현재 백엔드 radio
-    (cfg.backend === 'anthropic' ? anthropicRadio.input : ruleRadio.input).focus();
+    // 첫 포커스: 현재 백엔드 radio. Escape 처리도 트랩이 소유한다.
+    trap?.release();
+    trap = trapFocus(dialog, {
+      initialFocus: cfg.backend === 'anthropic' ? anthropicRadio.input : ruleRadio.input,
+      onEscape: close,
+    });
   };
 
   gearButton.addEventListener('click', open);
@@ -347,7 +367,8 @@ export function mountPlannerSettings(
   return {
     open,
     dispose: (): void => {
-      window.removeEventListener('keydown', onKeyDown, true);
+      trap?.release();
+      trap = null;
       gearButton.remove();
       backdrop.remove();
     },

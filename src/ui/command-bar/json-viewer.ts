@@ -9,17 +9,19 @@
 // 글루가 refresh()를 호출한다(그래프 편집이 생기는 Phase 8에서 구독 훅으로 확장).
 // 시퀀스가 없는 씬은 '시퀀스 없음' 빈 상태를 보인다 (UX_DESIGN §7).
 
+import { makeIconButton } from '../icons';
 import {
   COLOR,
-  FONT,
   LAYOUT,
   SHADOW,
   SPACE,
+  TYPE,
   Z_INDEX,
+  applyType,
   ensureThemeStyles,
-  makeButton,
   styled,
 } from '../theme';
+import { COMMAND_BAR_PRIORITY, setCommandBarPriority } from './scene-controls';
 import type { ControlSequence } from '../../schema';
 
 // ── 상수 (매직넘버 금지 — CLAUDE.md §4, 시각 토큰은 ui/theme.ts) ────
@@ -60,13 +62,16 @@ export function mountJsonViewer(
   getSequence: () => ControlSequence | null,
 ): JsonViewerHandle {
   ensureThemeStyles();
-  // 토글 버튼 — 열림 상태는 .ui-btn--active + aria-pressed로 표현
-  const toggleButton = makeButton(
-    '{} JSON',
+  // 토글 버튼 — 열림 상태는 .ui-btn--active + aria-pressed로 표현한다.
+  // 액센트는 **토글 상태 전용**이다: 액센트 면(primary)은 ▶ 재생/생성의 몫 (C-14).
+  const toggleButton = makeIconButton(
+    'braces',
+    'JSON',
     '현재 ControlSequence 원본 JSON 보기 (읽기 전용)',
     'json-toggle',
   );
   toggleButton.setAttribute('aria-pressed', 'false');
+  setCommandBarPriority(toggleButton, COMMAND_BAR_PRIORITY.view);
   buttonHost.appendChild(toggleButton);
 
   // 슬라이드 패널 (우측, 기본 닫힘)
@@ -85,13 +90,12 @@ export function mountJsonViewer(
     borderBottom: `1px solid ${COLOR.border}`,
     boxShadow: SHADOW.panel,
     color: COLOR.text,
-    fontFamily: FONT.ui,
-    fontSize: '12px',
     boxSizing: 'border-box',
     transform: 'translateX(100%)',
     transition: PANEL_TRANSITION,
     pointerEvents: 'auto',
   });
+  applyType(panel, TYPE.body);
   panel.dataset.testid = 'json-viewer';
   panel.setAttribute('aria-hidden', 'true');
   // 닫힌(화면 밖) 패널의 복사/닫기 버튼이 Tab 순서에 남지 않게 — aria-hidden 영역으로
@@ -115,17 +119,18 @@ export function mountJsonViewer(
   });
   const headerTitle = styled(document.createElement('span'), {
     color: COLOR.textStrong,
-    fontWeight: '600',
     flex: '1',
+    minWidth: '0',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
   });
+  applyType(headerTitle, TYPE.bodyStrong);
   headerTitle.textContent = 'ControlSequence JSON (읽기 전용)';
 
-  const copyButton = makeButton('복사', 'JSON을 클립보드에 복사', 'json-copy');
+  const copyButton = makeIconButton('copy', '복사', 'JSON을 클립보드에 복사', 'json-copy');
 
-  const closeButton = makeButton('✕', '닫기', 'json-close', 'ghost');
+  const closeButton = makeIconButton('close', '', 'JSON 패널 닫기 (Esc)', 'json-close', 'ghost');
 
   header.appendChild(headerTitle);
   header.appendChild(copyButton);
@@ -136,14 +141,12 @@ export function mountJsonViewer(
   const pre = styled(document.createElement('pre'), {
     flex: '1',
     margin: '0',
-    padding: `${SPACE.md} 10px`,
+    padding: `${SPACE.md} ${SPACE.lg}`,
     overflow: 'auto',
     whiteSpace: 'pre',
-    fontFamily: FONT.mono,
-    fontSize: '11px',
-    lineHeight: '1.6',
     color: COLOR.text,
   });
+  applyType(pre, TYPE.monoBody);
   pre.dataset.testid = 'json-content';
   pre.classList.add('ui-scroll');
 
@@ -153,11 +156,11 @@ export function mountJsonViewer(
     display: 'none',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: `0 ${SPACE.lg}`,
+    padding: `0 ${SPACE.xxl}`,
     color: COLOR.muted,
     textAlign: 'center',
-    lineHeight: '1.8',
   });
+  applyType(emptyState, TYPE.body);
   emptyState.textContent =
     '이 씬에는 시퀀스가 없습니다 — {scene, sequence} 봉투 JSON을 업로드하면 여기 표시됩니다';
   emptyState.dataset.testid = 'json-empty';
@@ -192,14 +195,24 @@ export function mountJsonViewer(
     toggleButton.setAttribute('aria-pressed', String(open));
   };
 
-  const setOpen = (next: boolean): void => {
+  /** 열려 있을 때만 Escape로 닫는다 (버튼 title의 '(Esc)' 약속을 실제로 지킨다) */
+  const onKeyDown = (e: KeyboardEvent): void => {
+    if (e.key !== 'Escape' || !open) return;
+    e.preventDefault();
+    setOpen(false);
+    toggleButton.focus();
+  };
+
+  function setOpen(next: boolean): void {
     open = next;
     if (open) renderContent(); // 열 때마다 현재 진실로 갱신
     panel.style.transform = open ? 'translateX(0)' : 'translateX(100%)';
     panel.setAttribute('aria-hidden', String(!open));
     panel.inert = !open; // 닫힘 = 포커스/상호작용 불가 (트랜스폼 애니메이션은 유지)
+    if (open) window.addEventListener('keydown', onKeyDown);
+    else window.removeEventListener('keydown', onKeyDown);
     paintToggle();
-  };
+  }
 
   toggleButton.addEventListener('click', () => {
     setOpen(!open);
@@ -208,11 +221,16 @@ export function mountJsonViewer(
     setOpen(false);
   });
 
+  // 라벨 스팬만 갈아 끼운다 — 버튼 내용을 통째로 바꾸면 아이콘이 사라지고
+  // `.ui-btn--icon-only` 축약도 깨진다 (UX_AUDIT C-13).
+  const copyLabel = copyButton.querySelector<HTMLElement>('.ui-btn__label');
   const flashCopyLabel = (label: string): void => {
-    copyButton.textContent = label;
+    if (copyLabel !== null) copyLabel.textContent = label;
+    copyButton.title = label;
     if (copyFlashTimer !== null) clearTimeout(copyFlashTimer);
     copyFlashTimer = setTimeout(() => {
-      copyButton.textContent = '복사';
+      if (copyLabel !== null) copyLabel.textContent = '복사';
+      copyButton.title = 'JSON을 클립보드에 복사';
       copyFlashTimer = null;
     }, COPY_FLASH_MS);
   };
@@ -247,6 +265,7 @@ export function mountJsonViewer(
     },
     dispose: (): void => {
       if (copyFlashTimer !== null) clearTimeout(copyFlashTimer);
+      window.removeEventListener('keydown', onKeyDown);
       toggleButton.remove();
       panel.remove();
     },
