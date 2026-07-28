@@ -12,6 +12,9 @@ import {
   COMMIT_MIN_DELTA,
   isTypingTarget,
   keyToGizmoMode,
+  keyToNudgeAxis,
+  NUDGE_FINE_STEP_M,
+  NUDGE_STEP_M,
   rayGroundPoint,
   rayGroundT,
   ROTATION_SNAP_DEG,
@@ -238,5 +241,30 @@ describe('transformsAlmostEqual', () => {
     const b = identity();
     b.rotation = [-0.5, -0.5, -0.5, -0.5];
     expect(transformsAlmostEqual(a, b)).toBe(true);
+  });
+});
+
+describe('keyToNudgeAxis — 방향키 오브젝트 이동 (UX §3.3)', () => {
+  it('방향키는 카메라 기준 수평 축으로 매핑된다', () => {
+    expect(keyToNudgeAxis('ArrowRight')).toEqual({ kind: 'right', sign: 1 });
+    expect(keyToNudgeAxis('ArrowLeft')).toEqual({ kind: 'right', sign: -1 });
+    expect(keyToNudgeAxis('ArrowUp')).toEqual({ kind: 'forward', sign: 1 });
+    expect(keyToNudgeAxis('ArrowDown')).toEqual({ kind: 'forward', sign: -1 });
+  });
+
+  it('PageUp/PageDown은 월드 수직 축이다', () => {
+    expect(keyToNudgeAxis('PageUp')).toEqual({ kind: 'vertical', sign: 1 });
+    expect(keyToNudgeAxis('PageDown')).toEqual({ kind: 'vertical', sign: -1 });
+  });
+
+  it('이동 키가 아니면 null (기즈모 단축키·타이핑과 충돌하지 않는다)', () => {
+    for (const key of ['w', 'e', 'r', 'a', 'Enter', ' ', 'Escape', 'Delete']) {
+      expect(keyToNudgeAxis(key)).toBeNull();
+    }
+  });
+
+  it('미세 이동 폭은 기본 이동보다 작고, 기본 이동은 스냅 격자와 같다', () => {
+    expect(NUDGE_FINE_STEP_M).toBeLessThan(NUDGE_STEP_M);
+    expect(NUDGE_STEP_M).toBe(TRANSLATION_SNAP_M);
   });
 });

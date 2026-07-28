@@ -610,6 +610,62 @@ CLAUDE.md/docs에 반영). 새 항목은 아래에 추가하고 기존 항목은
 - 영향 파일: src/main.ts(인스펙터 배선 + 우측 스택), src/ui/inspector/joint-panel.ts
   (접기 헤더·el 노출), scripts/gate-browser.mjs(scene-switch 모드), EXPERIMENTS.md
 
+## [2026-07-28] 로봇↔로봇 충돌 결함 수정: 그룹 필터 ≠ 자기 충돌
+
+- 상태: 결정됨 (supersedes Phase 3의 "selfCollision=false → 필터에서 ROBOT 제외")
+- 맥락: 사용자가 로봇팔 두 대를 닿게 배치했으나 충돌 이벤트가 전혀 발행되지 않고
+  그대로 겹쳐 지나갔다
+- 원인: scene-loader가 `selfCollision=false`(기본)일 때 링크 collider의 collidesWith에서
+  ROBOT 그룹을 통째로 제외했다. 모든 로봇 링크는 같은 ROBOT 그룹이므로, 필터에 ROBOT이
+  없으면 **자기 링크뿐 아니라 다른 로봇과도** narrow-phase에 도달하지 못한다.
+  "self-collision"과 "robot-robot collision"을 그룹 하나로 뭉뚱그린 설계 오류
+- 선택: 두 개념을 분리한다.
+  (1) 링크 collider는 **항상** ROBOT을 필터에 포함 → 다른 로봇과 충돌한다.
+  (2) 자기 링크 억제는 **엔티티 단위**로 처리 — 로봇 한 대의 모든 링크는 하나의
+      EntityId를 공유하므로 "같은 엔티티 접촉(a===b)" = self-collision이다.
+      `PhysicsWorld.setSelfContactEnabled(entityId, enabled)` 추가, 기본 억제.
+- 근거: Rapier 그룹 비트마스크는 16개뿐이고 **로봇 개체를 구분하지 못한다**. 예약 슬롯
+  (4–14)을 로봇마다 배정하는 대안은 로봇 수 상한(~11)이 생기고, Phase 7 런타임 씬 편집으로
+  로봇이 추가될 때마다 모든 로봇의 필터를 재계산해야 해 취약하다. 엔티티 id 기반 판정은
+  개수 제한이 없고 핸들↔엔티티 매핑(§2.4 "유일한 진실")을 그대로 재사용한다.
+- 트레이드오프: 인접 링크 쌍이 narrow-phase까지는 도달해 접촉 계산 비용이 남는다(이벤트만
+  억제). 링크 8개 규모에서는 무시할 수준이며, 필요해지면 인접 쌍 필터를 별도 도입한다.
+  `PhysicsWorld` 계약에 메서드 1개 추가(테스트 목 2곳 갱신).
+- 측정치: 신규 게이트 `--expect=two-arms` — arm_left×arm_right start 이벤트 t≈6.7s 감지,
+  접촉점 [0.190, 0.300, -0.015] 보강, 자기 링크 접촉 0건. 단위 테스트 7종 추가.
+  기존 게이트 12종 전부 회귀 없음(특히 obstacle-avoidance의 "arm×pillar 0건" 유지).
+- 영향받는 파일/문서: src/core/types.ts, src/core/world.ts, src/core/scene-loader.ts,
+  src/core/world-robot-robot-contact.test.ts, src/core/scene-loader.test.ts,
+  src/assets/scenes/two-arms-collision.scene.json, scripts/gate-browser.mjs, docs/USAGE.md
+
+## [2026-07-28] 충돌 시각화 강화: 물리 접촉점 + 3D 마커
+
+- 상태: 결정됨
+- 맥락: 충돌이 감지돼도 "어디서" 부딪혔는지 알 수 없었다(엔티티 전체 펄스만 존재).
+  로봇 링크처럼 큰 물체끼리는 전체 펄스가 위치 정보를 주지 못한다
+- 선택: (1) `RapierWorld.step()`이 start 접촉에 한해 `world.contactPair`로 매니폴드를
+  조회해 월드 접촉점·법선을 `ContactEvent.point/normal`에 채운다(DATA_MODEL §7의 선택 필드가
+  드디어 채워진다). (2) `render/contact-marker.ts` — 접촉점에 빨강 구 + 퍼지는 링을 띄운다.
+  `depthTest: false`로 로봇 내부 접촉도 가려지지 않고, 24개 고정 풀을 재사용해 할당이 없다.
+- 근거: sensor는 매니폴드가 없고 stop 시점엔 이미 분리돼 조회 불가 — start·contact에만
+  보강한다. 조회 실패해도 감지 자체에는 영향이 없다(부가 정보)
+- 트레이드오프: 접촉 시작마다 매니폴드 1회 조회 비용. 대표 접촉점 1개만 쓴다(전체 매니폴드
+  시각화는 과함). 마커 감쇠는 물리 시간이 아닌 벽시계 기준 — 일시정지 중에도 사라진다
+- 영향받는 파일/문서: src/core/world.ts, src/render/contact-marker.ts, src/main.ts, docs/USAGE.md
+
+## [2026-07-28] 방향키 오브젝트 이동 (기즈모 커밋 경로 재사용)
+
+- 상태: 결정됨
+- 맥락: 사용자가 "물체를 옮기는 방법이 없다"고 보고. 기즈모는 정상 동작했으나(선택 API
+  검증됨) 클릭→모드 전환→축 드래그를 알아야 해 발견성이 낮았다
+- 선택: 방향키(카메라 기준 수평)·PageUp/PageDown(월드 Y)로 선택 오브젝트를 이동한다.
+  기본 5cm(스냅 격자와 동일), Shift 병용 시 1cm. **기즈모 드래그와 같은 커밋 경로**
+  (`onTransformCommit`)로 발행해 통합자의 물리 teleport 처리가 갈리지 않는다
+- 근거: 카메라 기준 이동은 화면에서 보이는 방향과 일치해 직관적이다(월드축 고정은 카메라를
+  돌리면 어긋난다). 시각 노드를 직접 옮기지 않고 커밋만 발행 — 물리가 진실이라는 §2.1 유지
+- 트레이드오프: 방향키가 브라우저 스크롤을 막는다(선택 상태에서만 preventDefault)
+- 영향받는 파일/문서: src/render/interaction.ts, src/render/interaction.test.ts, docs/USAGE.md
+
 <!-- 이후 결정은 여기에 추가 -->
 
 ## [2026-07-23] Phase 6: UI 디자인 폴리시 패스 — 디자인 토큰(ui/theme.ts) + 시각 언어 통일

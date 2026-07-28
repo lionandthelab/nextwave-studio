@@ -1,0 +1,64 @@
+{
+  "name": "two-arms-collision",
+  "version": 1,
+  "gravity": [0, -9.81, 0],
+  "timestepHz": 240,
+  "environment": { "ground": true, "skyColor": "#1b1e23" },
+  "camera": { "position": [0.15, 0.75, 1.25], "target": [0, 0.32, 0] },
+  "entities": [
+    {
+      "id": "arm_left",
+      "type": "robot",
+      "transform": { "position": [-0.5, 0, 0] },
+      "visual": { "kind": "urdf", "ref": "assets/robots/arm6/arm6.urdf" },
+      "urdf": "assets/robots/arm6/arm6.urdf",
+      "controller": "sequence",
+      "linkColliders": "fromVisual",
+      "selfCollision": false,
+      "home": { "joint1": 0.0, "joint2": -0.6, "joint3": 1.2, "joint5": -0.6 },
+      "gripper": {
+        "joints": ["finger_left_joint", "finger_right_joint"],
+        "open": 0.03,
+        "close": 0.0
+      }
+    },
+    {
+      "id": "arm_right",
+      "type": "robot",
+      "transform": { "position": [0.5, 0, 0] },
+      "visual": { "kind": "urdf", "ref": "assets/robots/arm6/arm6.urdf" },
+      "urdf": "assets/robots/arm6/arm6.urdf",
+      "controller": "sequence",
+      "linkColliders": "fromVisual",
+      "selfCollision": false,
+      "home": { "joint1": 3.1416, "joint2": -0.6, "joint3": 1.2, "joint5": -0.6 },
+      "gripper": {
+        "joints": ["finger_left_joint", "finger_right_joint"],
+        "open": 0.03,
+        "close": 0.0
+      }
+    },
+    {
+      "id": "witness_box",
+      "type": "object",
+      "transform": { "position": [0.0, 0.03, 0.45] },
+      "visual": {
+        "kind": "primitive",
+        "primitive": { "kind": "box", "halfExtents": [0.03, 0.03, 0.03] },
+        "color": "#c0392b"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": { "kind": "box", "halfExtents": [0.03, 0.03, 0.03] },
+            "friction": 0.6,
+            "group": "OBJECT",
+            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "emitEvents": true
+          }
+        ]
+      }
+    }
+  ]
+}

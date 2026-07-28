@@ -138,14 +138,15 @@ const IDENTITY_QUAT: Quat = [0, 0, 0, 1];
 const ROBOT_LINK_FRICTION = 0.8;
 
 /**
- * selfCollision=false(기본): ROBOT 그룹을 필터에서 아예 제외한다. 링크는 전부 같은
- * ROBOT 그룹이므로 필터에 ROBOT이 없으면 링크끼리는 narrow-phase에 도달하지 않는다
- * — URDF 인접 링크 쌍별 필터링이 불필요해진다 (CLAUDE.md §5 "self-collision 기본 비활성").
+ * 로봇 링크 collider의 상호작용 대상 — **항상 ROBOT을 포함한다**.
+ *
+ * 로봇 링크는 전부 ROBOT 그룹이므로, 여기서 ROBOT을 빼면 자기 링크뿐 아니라
+ * **다른 로봇과의 충돌까지 통째로 사라진다**(로봇 두 대가 서로 통과). 그룹 비트는
+ * "어느 로봇인지"를 구분하지 못하므로, 자기 링크 억제는 그룹이 아니라 엔티티 단위로
+ * 처리한다 — 로봇 한 대의 모든 링크는 같은 EntityId를 공유하므로 "같은 엔티티 접촉"이
+ * 곧 self-collision이다 (world.setSelfContactEnabled, CLAUDE.md §5).
  */
-const ROBOT_COLLIDES_WITH: readonly ColliderGroup[] = ['ENV', 'OBJECT'];
-
-/** selfCollision=true: ROBOT 그룹 포함 — 모든 링크 쌍이 충돌 대상이 된다(인접 링크 포함 주의) */
-const ROBOT_COLLIDES_WITH_SELF: readonly ColliderGroup[] = ['ENV', 'OBJECT', 'ROBOT'];
+const ROBOT_COLLIDES_WITH: readonly ColliderGroup[] = ['ENV', 'OBJECT', 'ROBOT'];
 
 /** RobotSpec.linkColliders 미지정 시 기본 정책 (DATA_MODEL.md §4.1) */
 const DEFAULT_LINK_COLLIDER_POLICY: NonNullable<RobotSpec['linkColliders']> = 'fromVisual';
@@ -384,9 +385,10 @@ export function attachRobotPhysics(
   const policy = spec.linkColliders ?? DEFAULT_LINK_COLLIDER_POLICY;
   if (policy !== 'none') {
     const homePoses = handle.readLinkPoses();
-    const collidesWith: ColliderGroup[] = [
-      ...(spec.selfCollision ? ROBOT_COLLIDES_WITH_SELF : ROBOT_COLLIDES_WITH),
-    ];
+    const collidesWith: ColliderGroup[] = [...ROBOT_COLLIDES_WITH];
+    // 자기 링크(같은 EntityId) 접촉 발행 여부 — 기본 false로 URDF 인접 링크의 상시
+    // 접촉 노이즈를 억제한다. 다른 로봇과의 충돌은 이 설정과 무관하게 항상 발행된다.
+    world.setSelfContactEnabled(spec.id, spec.selfCollision === true);
     for (const [linkName, colliderDefs] of handle.linkColliders) {
       const pose = homePoses.get(linkName);
       if (!pose) {

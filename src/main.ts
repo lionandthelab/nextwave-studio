@@ -88,6 +88,8 @@ import { RenderSync } from './core/sync';
 import type { PhysicsWorld, Pose } from './core/types';
 import { initPhysics, RapierWorld } from './core/world';
 import { pulseEntity } from './render/highlight';
+import { mountContactMarkers } from './render/contact-marker';
+import type { ContactMarkers } from './render/contact-marker';
 import {
   isTypingTarget,
   ROTATION_SNAP_DEG,
@@ -194,6 +196,8 @@ import armAndBoxesSceneJson from './assets/scenes/arm-and-boxes.scene.json';
 import pickAndPlaceSceneJson from './assets/scenes/pick-and-place.scene.json';
 import obstacleAvoidanceSceneJson from './assets/scenes/obstacle-avoidance.scene.json';
 import collisionTestbedSceneJson from './assets/scenes/collision-testbed.scene.json';
+import twoArmsCollisionSceneJson from './assets/scenes/two-arms-collision.scene.json';
+import twoArmsCollisionSequenceJson from './assets/sequences/two-arms-collision.sequence.json';
 import armTouchBoxSequenceJson from './assets/sequences/arm-touch-box.sequence.json';
 import pickAndPlaceSequenceJson from './assets/sequences/pick-and-place.sequence.json';
 import obstacleAvoidanceSequenceJson from './assets/sequences/obstacle-avoidance.sequence.json';
@@ -218,6 +222,11 @@ const SCENE_REGISTRY: Readonly<Record<string, SceneRegistryEntry>> = {
     sequence: obstacleAvoidanceSequenceJson,
   },
   'collision-testbed': { scene: collisionTestbedSceneJson },
+  // 로봇↔로봇 충돌 데모 — 두 팔이 중앙에서 만나 접촉한다 (ROBOT×ROBOT 회귀 시연)
+  'two-arms-collision': {
+    scene: twoArmsCollisionSceneJson,
+    sequence: twoArmsCollisionSequenceJson,
+  },
 };
 
 const DEFAULT_SCENE_NAME = 'arm-and-boxes';
@@ -987,6 +996,7 @@ async function boot(): Promise<void> {
       autoPauseControl?: HTMLElement;
       viewportStatus?: ReturnType<typeof mountViewportStatus>;
       runOverlay?: ReturnType<typeof mountRunOverlay>;
+      contactMarkers?: ContactMarkers;
       orchestrator?: Orchestrator;
       offTick?: () => void;
       offEditorChange?: () => void;
@@ -1016,6 +1026,7 @@ async function boot(): Promise<void> {
       built.autoPauseControl?.remove();
       built.viewportStatus?.dispose();
       built.runOverlay?.dispose();
+      built.contactMarkers?.dispose();
       // flow 캔버스는 앱 수명 페인(workspace.slots.flowGraph) 안에 산다 — 씬 몫만 제거
       built.flowCanvas?.dispose();
       built.flowPaneHost?.remove();
@@ -1337,10 +1348,18 @@ async function boot(): Promise<void> {
         height: '100%',
       } satisfies Partial<CSSStyleDeclaration>);
 
-      // 충돌 → 로그 패널 행 추가 + start 시 관련 오브젝트 빨강 펄스 (UX_DESIGN §3.3/§3.6)
+      // 충돌 접촉점 마커 — 씬 루트에 부착(월드 좌표 그대로). 씬 수명과 함께 정리된다.
+      const contactMarkers = mountContactMarkers(render.scene);
+      built.contactMarkers = contactMarkers;
+
+      // 충돌 → 로그 패널 행 추가 + start 시 관련 오브젝트 빨강 펄스 + 접촉점 마커
+      // (UX_DESIGN §3.3 "충돌 오브젝트 하이라이트 + 접촉점 마커" / §3.6 로그)
       built.offMonitor = monitor.subscribe((e) => {
         collisionPanel.addEvent(e);
         if (e.phase !== 'start') return;
+        // "어디서" 부딪혔는지 — 물리에서 온 월드 접촉점 (sensor는 접촉점이 없다)
+        if (e.point) contactMarkers.spawn(e.point, e.normal);
+        // "무엇이" 부딪혔는지 — 관련 엔티티 펄스
         for (const entityId of [e.a, e.b]) {
           if (entityId === GROUND_ENTITY_ID) continue; // 바닥 전체 펄스는 소음 — 제외
           const node = visualNodeOf(entityId);
@@ -1397,6 +1416,7 @@ async function boot(): Promise<void> {
         sceneHandle.reset();
         monitor.clear();
         collisionPanel.clear();
+        contactMarkers.clear(); // 이전 실행의 접촉 마커가 되감기 후 남지 않게
         armFromStart();
       };
 
@@ -1542,6 +1562,8 @@ async function boot(): Promise<void> {
       // rAF당 1회: 재생 바 + 타임라인 리드아웃 + 상호작용 헬퍼 갱신 (물리 tick과 분리)
       built.offTick = engine.onTick((info) => {
         interaction.update(); // BoxHelper 아웃라인이 이동/애니메이션 중 선택 대상을 따라간다
+        // 접촉점 마커 감쇠 — 벽시계 기준이라 일시정지 중에도 자연스럽게 사라진다
+        contactMarkers.update(performance.now());
         paintGizmoBar(); // W/E/R 단축키로 바뀐 모드를 버튼 상태에 반영 (변경 시에만 DOM)
         playbackBar.update({
           engineState: info.state,

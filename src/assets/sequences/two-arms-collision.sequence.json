@@ -1,0 +1,44 @@
+{
+  "id": "two-arms-collision",
+  "robot": "arm_left",
+  "loop": false,
+  "steps": [
+    {
+      "kind": "moveJoints",
+      "robot": "arm_left",
+      "targets": { "joint2": 1.35, "joint3": 0.0, "joint5": 0.0 },
+      "durationSec": 2.5,
+      "easing": "easeInOut",
+      "note": "왼쪽 팔을 오른쪽(+X)으로 수평 전개"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "arm_right",
+      "targets": { "joint2": 1.35, "joint3": 0.0, "joint5": 0.0 },
+      "durationSec": 2.5,
+      "easing": "easeInOut",
+      "note": "오른쪽 팔을 왼쪽(-X)으로 수평 전개 — 두 팔이 중앙에서 만난다"
+    },
+    {
+      "kind": "waitForCollision",
+      "between": ["arm_left", "arm_right"],
+      "timeoutSec": 8,
+      "note": "로봇↔로봇 접촉 대기 — 접촉점 마커와 빨강 펄스가 보인다"
+    },
+    { "kind": "wait", "durationSec": 1.0, "note": "충돌 상태 관찰" },
+    {
+      "kind": "moveJoints",
+      "robot": "arm_left",
+      "targets": { "joint2": -0.6, "joint3": 1.2, "joint5": -0.6 },
+      "durationSec": 2.0,
+      "note": "왼쪽 팔 복귀"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "arm_right",
+      "targets": { "joint2": -0.6, "joint3": 1.2, "joint5": -0.6 },
+      "durationSec": 2.0,
+      "note": "오른쪽 팔 복귀"
+    }
+  ]
+}

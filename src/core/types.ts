@@ -70,6 +70,18 @@ export interface PhysicsWorld {
   /** 물리 1스텝 전진 + 충돌 이벤트 반환 */
   step(): ContactEvent[];
 
+  /**
+   * 같은 엔티티에 속한 collider끼리의 접촉 이벤트 발행 여부 (기본 false).
+   *
+   * 로봇 한 대의 모든 링크는 하나의 EntityId를 공유하므로, "같은 엔티티 접촉" = 자기
+   * 충돌(self-collision)이다. 기본 false는 URDF 인접 링크가 구조상 항상 겹쳐 발생시키는
+   * 상시 접촉 노이즈를 억제한다 (CLAUDE.md §5 "self-collision 기본 비활성").
+   *
+   * **서로 다른 엔티티(다른 로봇) 간 충돌은 이 설정과 무관하게 항상 발행된다** —
+   * 그룹 비트마스크는 로봇 개체를 구분하지 못하므로 그룹이 아닌 엔티티 단위로 가른다.
+   */
+  setSelfContactEnabled(entityId: EntityId, enabled: boolean): void;
+
   /** collider 핸들 → 엔티티 id (충돌 이벤트 변환용) */
   entityOfCollider(collider: ColliderId): EntityId | undefined;
 

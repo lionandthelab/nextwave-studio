@@ -60,6 +60,7 @@ const SCENE_BY_EXPECT = {
   'flow-graph': 'arm-and-boxes', // Phase 8 Flow Graph — 시퀀스 있는 씬 위에서 그래프 편집 검증
   planner: 'arm-and-boxes', // Phase 9 NL Planner — 규칙 기반(오프라인) 백엔드로 결정론 검증
   orchestration: 'arm-and-boxes', // Phase 10 실행 오케스트레이션 — arm-touch-box 시퀀스 위에서 트라이페인 동기 검증
+  'two-arms': 'two-arms-collision', // 로봇↔로봇 충돌 회귀 — 두 팔이 중앙에서 접촉
 };
 
 // --expect=arm 어서션 상수
@@ -1442,6 +1443,86 @@ async function main() {
 
       // 다음 검증(공통 페이지 에러)을 위해 정지로 리셋
       await orchStop();
+    }
+
+    // ── 로봇↔로봇 충돌 회귀 (--expect=two-arms) ─────────────────────
+    // 결함: ROBOT 그룹이 링크 필터에서 빠져 있어 두 로봇이 서로 통과했다.
+    // 여기서는 (a) 실제 충돌 이벤트 발행, (b) 접촉점 좌표 보강, (c) 자기 링크 노이즈
+    // 억제, (d) 방향키 오브젝트 이동을 실브라우저에서 확인한다.
+    if (expectArg === 'two-arms') {
+      const TWO_ARMS_BUDGET_MS = 30000;
+      await page.evaluate(() => window.__sim.orchestrator.play());
+
+      const deadline = Date.now() + TWO_ARMS_BUDGET_MS;
+      let snapshot = null;
+      while (Date.now() < deadline) {
+        snapshot = await page.evaluate(() => {
+          const all = window.__sim.collision.recent(100);
+          const isPairOf = (e, x, y) => (e.a === x && e.b === y) || (e.a === y && e.b === x);
+          return {
+            robotPairStarts: all.filter(
+              (e) => e.phase === 'start' && isPairOf(e, 'arm_left', 'arm_right'),
+            ),
+            selfContacts: all.filter((e) => e.a === e.b),
+            status: window.__sim.player.status,
+          };
+        });
+        if (snapshot.robotPairStarts.length > 0) break;
+        await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+      }
+
+      const starts = snapshot?.robotPairStarts ?? [];
+      if (starts.length > 0) {
+        pass('two-arms: 로봇↔로봇 충돌이 감지된다 ★ 회귀',
+          `starts=${starts.length} t=${starts[0].timeSec.toFixed(3)}s`);
+      } else {
+        fail('two-arms: 로봇↔로봇 충돌이 감지된다 ★ 회귀', JSON.stringify(snapshot));
+      }
+
+      // 접촉점 보강 — 마커를 띄울 월드 좌표가 실려야 한다
+      const withPoint = starts.find((e) => Array.isArray(e.point) && e.point.length === 3);
+      if (withPoint) {
+        pass('two-arms: 접촉 이벤트에 월드 접촉점이 실린다 (접촉 마커 입력)',
+          `point=[${withPoint.point.map((n) => n.toFixed(3)).join(', ')}]`);
+      } else {
+        fail('two-arms: 접촉 이벤트에 월드 접촉점이 실린다 (접촉 마커 입력)',
+          JSON.stringify(starts.slice(0, 3)));
+      }
+
+      // 자기 링크(같은 EntityId) 접촉은 selfCollision=false이므로 로그에 없어야 한다
+      if ((snapshot?.selfContacts ?? []).length === 0) {
+        pass('two-arms: 자기 링크 접촉은 억제된다 (selfCollision=false)');
+      } else {
+        fail('two-arms: 자기 링크 접촉은 억제된다 (selfCollision=false)',
+          JSON.stringify(snapshot.selfContacts.slice(0, 3)));
+      }
+
+      // 방향키 오브젝트 이동 — 선택 후 ArrowRight 1회 = NUDGE_STEP_M(0.05m)
+      await page.evaluate(() => window.__sim.orchestrator.stop());
+      await page.waitForTimeout(300);
+      const NUDGE_EXPECTED_M = 0.05;
+      const NUDGE_TOLERANCE_M = 0.005;
+      const posOf = () =>
+        page.evaluate(() => {
+          const s = window.__sim;
+          return s.world.getPose(s.world.bodiesOfEntity('witness_box')[0]).position;
+        });
+      await page.evaluate(() => window.__sim.editor.select('witness_box'));
+      const beforeNudge = await posOf();
+      await page.keyboard.press('ArrowRight');
+      await page.waitForTimeout(300);
+      const afterNudge = await posOf();
+      const horizontalDelta = Math.hypot(
+        afterNudge[0] - beforeNudge[0],
+        afterNudge[2] - beforeNudge[2],
+      );
+      if (Math.abs(horizontalDelta - NUDGE_EXPECTED_M) < NUDGE_TOLERANCE_M) {
+        pass('two-arms: 방향키로 선택 오브젝트가 이동한다 (물리 반영)',
+          `delta=${horizontalDelta.toFixed(4)}m`);
+      } else {
+        fail('two-arms: 방향키로 선택 오브젝트가 이동한다 (물리 반영)',
+          `delta=${horizontalDelta.toFixed(4)}m before=${JSON.stringify(beforeNudge)} after=${JSON.stringify(afterNudge)}`);
+      }
     }
 
     // 페이지 에러는 씬별 상호작용까지 끝난 뒤 마지막에 판정한다

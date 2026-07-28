@@ -17,7 +17,7 @@ JSON으로 선언해 로드하고, URDF 로봇 팔을 제어 시퀀스로 재생
 | 스키마 검증 | zod (`SceneSpec` / `ControlSequence` 런타임 검증) |
 | 빌드/테스트 | Vite + TypeScript strict + vitest + Playwright 게이트 |
 
-## 데모 씬 5종
+## 데모 씬 6종
 
 `?scene=<이름>` 쿼리 파라미터 또는 커맨드바의 씬 select로 전환한다.
 각 씬은 `scripts/gate-browser.mjs`의 자동 게이트로 검증된다.
@@ -29,6 +29,7 @@ JSON으로 선언해 로드하고, URDF 로봇 팔을 제어 시퀀스로 재생
 | `pick-and-place` | 팔이 cargo를 밀어 drop_zone(센서 영역)으로 옮기는 9-step 시퀀스 | `pick-and-place`: arm×cargo 접촉 start + cargo×drop_zone 센서 start + 시간 예산 내 done |
 | `obstacle-avoidance` | 기둥을 위로 넘어가는 회피 경로 후 목표 박스 접촉 | `obstacle-avoidance`: arm×pillar 이벤트 **0건** + arm×target_box 접촉 start + done |
 | `collision-testbed` | 로봇 없는 물리 쇼케이스 — 반발 공 바운스, 저마찰 미끄럼 + 센서 게이트 통과, 구름 공의 스택 전도 | `collision-testbed`: 접촉 쌍 ≥3종 + 센서 start ≥1 + 전 바디 정착 |
+| `two-arms-collision` | 로봇팔 2대가 중앙에서 접촉 — 로봇↔로봇 충돌 감지 + 접촉점 마커 | `two-arms`: arm_left×arm_right 접촉 start + 접촉점 좌표 + 자기 링크 억제 + 방향키 이동 |
 
 추가로 씬이 아닌 **기능 게이트**가 저작·실행 계층을 검증한다: `--expect=scene-switch`
 (런타임 씬 전환, URDF 재로드 왕복) · `--expect=scene-builder`(드래그앤드롭 편집·undo) ·
@@ -85,7 +86,8 @@ node scripts/gate-browser.mjs --expect=collision-testbed   # 등 표의 --expect
   ▶ Play / ⏸ / ⏹(리셋) / **⏭ Step(노드 1개)** · 재생 속도 · **충돌 시 자동 정지** 토글 ·
   **플로우**(노드 그래프 페인 열기) · `{} JSON` 시퀀스 원본 뷰어 · ⚙ 플래너 설정.
 - **좌측 라이브러리**: 오브젝트/로봇 템플릿 카드 — 뷰포트로 드래그앤드롭 배치, 3D 파일
-  임포트(⬆). **뷰포트**: 클릭 선택 · W/E/R 기즈모(이동/회전/스케일) · 좌하단 실행 오버레이
+  임포트(⬆). **뷰포트**: 클릭 선택 · W/E/R 기즈모(이동/회전/스케일) · **방향키로 선택
+  오브젝트 이동**(5cm, Shift=1cm, PageUp/Down=수직) · 좌하단 실행 오버레이
   (● 상태 · node k/n · 활성 노드 라벨 · simTime).
 - **우측 패널**: 관절 슬라이더(로봇 씬) · 인스펙터(엔티티 목록·pose·관절) · 엔티티 편집 폼
   (이름·Transform·치수·Physics) · 노드 파라미터 폼(플로우 노드 선택 시).
@@ -110,7 +112,9 @@ node scripts/gate-browser.mjs --expect=collision-testbed   # 등 표의 --expect
 3. **실행** — ▶ Play로 노드 단위 재생. 실행 오케스트레이터가 **활성 노드를 세 뷰에 동시에
    강조**한다(§5 동기 강조): 그래프 노드 아웃라인 ↔ 뷰포트 오버레이 `node k/n`+활성 라벨 ↔
    Timeline 커서. ⏭ Step으로 노드 하나씩, ⏸로 정지, 속도 조절.
-4. **관찰·재실행** — 충돌은 Collision Log에 즉시 기록되고 관련 오브젝트가 빨강 펄스한다.
+4. **관찰·재실행** — 충돌은 Collision Log에 기록되고, **접촉점에 빨강 마커**가 뜨며 관련
+   오브젝트가 빨강 펄스한다(로봇↔로봇 충돌도 감지된다 — 단 kinematic 로봇은 반력이 없어
+   밀려나지는 않는다).
    로그 행을 클릭하면 그 충돌 시점에 활성이던 노드가 강조된다. Timeline 마커/‘충돌 시 자동
    정지’ 토글로 예기치 않은 충돌에서 멈추고, 마커를 눌러 **그 노드부터 결정론적으로 재실행**
    한다(처음부터 되감아 빨리감기 — per-node 스냅샷은 백로그).

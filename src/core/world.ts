@@ -140,6 +140,9 @@ export class RapierWorld implements PhysicsWorld {
   // 'stop' 이벤트를 발행하므로, 이 매핑이 없으면 상대 엔티티가 start/stop 짝을 잃고
   // 접촉 상태가 '고착'된다 (Phase 4 CollisionMonitor·waitForCollision 이력 소비자 보호).
   private readonly removedColliderToEntity = new Map<ColliderId, EntityId>();
+  // 자기 접촉(같은 EntityId collider 쌍) 이벤트를 발행할 엔티티. 미등록 = 억제(기본).
+  // 로봇 링크는 EntityId를 공유하므로 이 집합이 self-collision 스위치가 된다.
+  private readonly selfContactEntities = new Set<EntityId>();
 
   /**
    * @param resolver 임포트된 3D 에셋 저장소 (Phase 7). convexHull/trimesh collider의
@@ -258,15 +261,49 @@ export class RapierWorld implements PhysicsWorld {
       const a = this.colliderToEntity.get(h1) ?? this.removedColliderToEntity.get(h1);
       const b = this.colliderToEntity.get(h2) ?? this.removedColliderToEntity.get(h2);
       if (a === undefined || b === undefined) return; // 매핑 없는 쌍은 무시
+      // 같은 엔티티 내부 접촉(로봇 자기 링크 등)은 옵트인일 때만 발행한다.
+      // 다른 엔티티(다른 로봇) 간 충돌은 여기서 걸러지지 않는다.
+      if (a === b && !this.selfContactEntities.has(a)) return;
       const sensor = this.sensorColliders.has(h1) || this.sensorColliders.has(h2);
-      out.push({
+      const event: ContactEvent = {
         a, b,
         phase: started ? 'start' : 'stop',
         kind: sensor ? 'sensor' : 'contact',
-      });
+      };
+      // 접촉 시작 시점의 월드 접촉점/법선을 보강한다(UI 접촉 마커용, DATA_MODEL §7).
+      // sensor는 교차만 있고 접촉 매니폴드가 없으며, stop 시점엔 이미 분리돼 조회 불가.
+      if (started && !sensor) {
+        const witness = this.readContactWitness(h1, h2);
+        if (witness) {
+          event.point = witness.point;
+          event.normal = witness.normal;
+        }
+      }
+      out.push(event);
     });
     this.flushRemovedColliders();
     return out;
+  }
+
+  /**
+   * 두 collider의 접촉 매니폴드에서 대표 접촉점(월드 좌표)과 법선을 읽는다.
+   * step() 직후에만 유효하며, 매니폴드가 없으면(이미 분리/센서) null.
+   * 실패해도 충돌 감지 자체에는 영향이 없다 — 시각화용 부가 정보다.
+   */
+  private readContactWitness(h1: ColliderId, h2: ColliderId): { point: Vec3; normal: Vec3 } | null {
+    const c1 = this.world.getCollider(h1);
+    const c2 = this.world.getCollider(h2);
+    if (!c1 || !c2) return null;
+
+    let found: { point: Vec3; normal: Vec3 } | null = null;
+    this.world.contactPair(c1, c2, (manifold) => {
+      if (found !== null) return; // 첫 매니폴드의 첫 접촉점만 대표로 쓴다
+      if (manifold.numSolverContacts() === 0) return;
+      const p = manifold.solverContactPoint(0);
+      const n = manifold.normal();
+      found = { point: [p.x, p.y, p.z], normal: [n.x, n.y, n.z] };
+    });
+    return found;
   }
 
   /** 제거 tombstone 정리 — 제거 유발 'stop' 이벤트는 제거 후 첫 step()의 drain에만 온다. */
@@ -276,6 +313,11 @@ export class RapierWorld implements PhysicsWorld {
       this.sensorColliders.delete(handle);
     }
     this.removedColliderToEntity.clear();
+  }
+
+  setSelfContactEnabled(entityId: EntityId, enabled: boolean): void {
+    if (enabled) this.selfContactEntities.add(entityId);
+    else this.selfContactEntities.delete(entityId);
   }
 
   entityOfCollider(collider: ColliderId): EntityId | undefined {
@@ -299,6 +341,7 @@ export class RapierWorld implements PhysicsWorld {
     this.entityToBodies.clear();
     this.sensorColliders.clear();
     this.removedColliderToEntity.clear();
+    this.selfContactEntities.clear();
   }
 
   free(): void {
@@ -308,6 +351,7 @@ export class RapierWorld implements PhysicsWorld {
     this.entityToBodies.clear();
     this.sensorColliders.clear();
     this.removedColliderToEntity.clear();
+    this.selfContactEntities.clear();
   }
 
   /**

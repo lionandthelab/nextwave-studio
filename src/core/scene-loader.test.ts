@@ -353,7 +353,13 @@ class RecordingWorld implements PhysicsWorld {
   readonly kinematicCalls: { bodyId: BodyId; pose: Pose }[] = [];
   readonly teleportCalls: { bodyId: BodyId; pose: Pose }[] = [];
   readonly removedEntityIds: EntityId[] = [];
+  /** setSelfContactEnabled 호출 기록 — 로봇 self-collision 배선 검증용 */
+  readonly selfContactCalls: { entityId: EntityId; enabled: boolean }[] = [];
   private nextHandle = 1;
+
+  setSelfContactEnabled(entityId: EntityId, enabled: boolean): void {
+    this.selfContactCalls.push({ entityId, enabled });
+  }
 
   createBody(entityId: EntityId, init: PhysicsBodyInit): BodyId {
     const bodyId = this.nextHandle;
@@ -481,12 +487,14 @@ describe('SceneLoader — robot 브랜치', () => {
     expect(world.bodies[0]?.init.position).toEqual([HOME_J1_RAD, L1_BASE_Y_M, 0]);
     expect(world.bodies[1]?.init.position).toEqual([HOME_J1_RAD, L2_BASE_Y_M, 0]);
 
-    // collider 규약 (CLAUDE.md §5): ROBOT 소속, selfCollision=false → 필터에 ROBOT 없음
+    // collider 규약 (CLAUDE.md §5): ROBOT 소속. 필터에는 **항상** ROBOT이 포함된다 —
+    // 다른 로봇과의 충돌을 위해서다. 자기 링크 억제는 그룹이 아니라 엔티티 단위
+    // (world.setSelfContactEnabled)로 처리한다.
     expect(world.colliders).toHaveLength(2);
     for (const collider of world.colliders) {
       expect(collider.entityId).toBe(ROBOT_ID);
       expect(collider.spec.group).toBe('ROBOT');
-      expect(collider.spec.collidesWith).toEqual(['ENV', 'OBJECT']);
+      expect(collider.spec.collidesWith).toEqual(['ENV', 'OBJECT', 'ROBOT']);
       expect(collider.spec.emitEvents).toBe(true);
       expect(collider.spec.friction).toBe(EXPECTED_ROBOT_LINK_FRICTION);
       expect(collider.spec.offset).toEqual(FAKE_LINK_COLLIDER_DEF.offset);
@@ -548,12 +556,20 @@ describe('SceneLoader — robot 브랜치', () => {
     expect(handle.robots.has(ROBOT_ID)).toBe(true);
   });
 
-  it('selfCollision: true면 링크 collider 필터에 ROBOT 그룹이 포함된다', async () => {
+  it('selfCollision: true면 해당 엔티티의 자기 접촉 발행이 켜진다 (그룹 필터는 불변)', async () => {
     const { world } = await buildRobotScene({ selfCollision: true });
     expect(world.colliders.length).toBeGreaterThan(0);
+    // 그룹 필터는 selfCollision과 무관하게 항상 ROBOT을 포함한다(다른 로봇과의 충돌)
     for (const collider of world.colliders) {
       expect(collider.spec.collidesWith).toEqual(['ENV', 'OBJECT', 'ROBOT']);
     }
+    // 자기 링크 접촉 여부는 엔티티 단위 스위치로 전달된다
+    expect(world.selfContactCalls).toContainEqual({ entityId: ROBOT_ID, enabled: true });
+  });
+
+  it('selfCollision 미지정(기본)이면 자기 접촉 발행이 꺼진 채 배선된다', async () => {
+    const { world } = await buildRobotScene();
+    expect(world.selfContactCalls).toContainEqual({ entityId: ROBOT_ID, enabled: false });
   });
 
   it('dispose()는 로봇 물리 바디를 제거하고 렌더 핸들을 해제한다', async () => {

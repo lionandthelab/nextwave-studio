@@ -68,6 +68,11 @@ export const ROTATION_SNAP_DEG = 15;
 /** 회전 스냅 각도 (rad) — TransformControls.rotationSnap에 들어가는 값 */
 export const ROTATION_SNAP_RAD = (ROTATION_SNAP_DEG * Math.PI) / 180;
 
+/** 방향키 1회 이동 거리 (m) — 스냅 격자와 같게 맞춰 반복 이동이 격자에 정렬된다 */
+export const NUDGE_STEP_M = TRANSLATION_SNAP_M;
+/** Shift 병용 시 미세 이동 거리 (m) */
+export const NUDGE_FINE_STEP_M = 0.01;
+
 /** 클릭 판정 최대 이동 거리 (px) — 이보다 크면 orbit 드래그로 보고 선택을 바꾸지 않는다 */
 const DEFAULT_CLICK_MAX_DISTANCE_PX = 5;
 /**
@@ -137,6 +142,41 @@ export function rayGroundPoint(origin: Readonly<Vec3>, dir: Readonly<Vec3>): Vec
   const t = rayGroundT(origin[1], dir[1]);
   if (t === null) return null;
   return [origin[0] + dir[0] * t, 0, origin[2] + dir[2] * t];
+}
+
+/**
+ * 방향키 이동 축.
+ * - `right`: 카메라 기준 좌우 (←/→)
+ * - `forward`: 카메라 기준 앞뒤 (↑/↓)
+ * - `vertical`: 월드 Y (PageUp/PageDown)
+ */
+export interface NudgeAxis {
+  kind: 'right' | 'forward' | 'vertical';
+  /** +1 또는 -1 */
+  sign: 1 | -1;
+}
+
+/**
+ * 키보드 키 → 이동 축 (순수 함수 — 단위 테스트 대상).
+ * 방향키는 카메라 기준 수평, PageUp/PageDown은 월드 수직.
+ */
+export function keyToNudgeAxis(key: string): NudgeAxis | null {
+  switch (key) {
+    case 'ArrowRight':
+      return { kind: 'right', sign: 1 };
+    case 'ArrowLeft':
+      return { kind: 'right', sign: -1 };
+    case 'ArrowUp':
+      return { kind: 'forward', sign: 1 };
+    case 'ArrowDown':
+      return { kind: 'forward', sign: -1 };
+    case 'PageUp':
+      return { kind: 'vertical', sign: 1 };
+    case 'PageDown':
+      return { kind: 'vertical', sign: -1 };
+    default:
+      return null;
+  }
 }
 
 /** 키보드 키 → 기즈모 모드 (W/E/R, 대소문자 무관 — UX_DESIGN §3.3/§9) */
@@ -269,6 +309,10 @@ const _ndc = new THREE.Vector2();
 const _worldPos = new THREE.Vector3();
 const _worldQuat = new THREE.Quaternion();
 const _worldScale = new THREE.Vector3();
+/** 방향키 이동 계산용 재사용 버퍼 (할당 없는 키 핸들러) */
+const _nudgeForward = new THREE.Vector3();
+const _nudgeRight = new THREE.Vector3();
+const _WORLD_UP = new THREE.Vector3(0, 1, 0);
 const _tintScratch = new THREE.Color();
 const _accentScratch = new THREE.Color();
 
@@ -369,8 +413,71 @@ export class ViewportInteraction {
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (isTypingTarget(event.target as TypingTargetLike | null)) return;
     const mode = keyToGizmoMode(event.key);
-    if (mode !== null) this.setMode(mode);
+    if (mode !== null) {
+      this.setMode(mode);
+      return;
+    }
+    if (this.nudgeByKey(event)) event.preventDefault(); // 방향키 페이지 스크롤 방지
   };
+
+  /**
+   * 방향키로 선택 오브젝트를 이동한다 (UX_DESIGN §3.3 "단축키로 배치 조정").
+   *
+   * - ←/→/↑/↓: **카메라 기준** 수평 이동 — 화면에서 보이는 방향과 일치해 직관적이다.
+   * - PageUp/PageDown: 월드 Y(수직) 이동.
+   * - Shift 병용: 미세 이동(1cm).
+   *
+   * 기즈모 드래그와 **같은 커밋 경로**(onTransformCommit)를 쓴다 — 통합자가 물리
+   * teleport까지 동일하게 처리하므로 이동 수단에 따라 동작이 갈리지 않는다.
+   * @returns 이동을 처리했으면 true
+   */
+  private nudgeByKey(event: KeyboardEvent): boolean {
+    const axis = keyToNudgeAxis(event.key);
+    if (axis === null) return false;
+    if (this.currentId === null) return false; // 선택 없음 — 무시
+    const snapshot = this.decomposeSelectedRoot();
+    if (snapshot === null) return false;
+
+    const step = event.shiftKey ? NUDGE_FINE_STEP_M : NUDGE_STEP_M;
+    const delta = this.nudgeDelta(axis, step);
+
+    const position: Vec3 = [
+      snapshot.position[0] + delta[0],
+      snapshot.position[1] + delta[1],
+      snapshot.position[2] + delta[2],
+    ];
+    // 커밋만 발행한다 — 시각 노드는 통합자의 물리 teleport → sync 경로로 갱신된다
+    // (드래그와 동일. 여기서 노드를 직접 옮기면 물리와 어긋난다 — 불변식 §2.1)
+    const commit: TransformCommit = {
+      mode: 'translate',
+      position,
+      rotation: snapshot.rotation,
+      scale: snapshot.scale,
+    };
+    for (const fn of this.commitListeners) fn(this.currentId, commit);
+    return true;
+  }
+
+  /** 이동 축(카메라 기준 right/forward, 월드 up) → 월드 델타 벡터 */
+  private nudgeDelta(axis: NudgeAxis, step: number): Vec3 {
+    if (axis.kind === 'vertical') return [0, axis.sign * step, 0];
+
+    // 카메라 기준 방향을 바닥 평면(y=0)에 투영한다 — 화면에서 보이는 대로 움직인다
+    this.camera.getWorldDirection(_nudgeForward);
+    _nudgeForward.y = 0;
+    if (_nudgeForward.lengthSq() < 1e-6) {
+      // 카메라가 수직으로 내려다보는 특수 상황 — 월드 축으로 폴백
+      _nudgeForward.set(0, 0, -1);
+    }
+    _nudgeForward.normalize();
+
+    if (axis.kind === 'forward') {
+      return [_nudgeForward.x * axis.sign * step, 0, _nudgeForward.z * axis.sign * step];
+    }
+    // right = forward × up (Y-up 좌표계)
+    _nudgeRight.copy(_nudgeForward).cross(_WORLD_UP).normalize();
+    return [_nudgeRight.x * axis.sign * step, 0, _nudgeRight.z * axis.sign * step];
+  }
 
   private readonly handleDraggingChanged = (event: { value: unknown }): void => {
     const dragging = event.value === true;

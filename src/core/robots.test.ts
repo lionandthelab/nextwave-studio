@@ -83,6 +83,12 @@ class MockPhysicsWorld implements PhysicsWorld {
     });
   }
 
+  /** 자기 접촉 스위치 — 이 테스트에서는 기록만 하고 동작에 영향 없다 */
+  readonly selfContactCalls: { entityId: EntityId; enabled: boolean }[] = [];
+  setSelfContactEnabled(entityId: EntityId, enabled: boolean): void {
+    this.selfContactCalls.push({ entityId, enabled });
+  }
+
   // 이하 이 테스트에서 쓰지 않는 계약 — 호출되면 테스트 실패로 드러나게 던진다
   createBody(): BodyId {
     throw new Error('MockPhysicsWorld.createBody: 이 테스트에서 호출되면 안 됩니다');
