@@ -1,4 +1,4 @@
-// ui/inspector/joint-panel.ts — 임시 관절 수동 제어 패널 (ROADMAP Phase 3 "슬라이더 수동 제어")
+// ui/inspector/joint-panel.ts — 관절 수동 제어 패널 (ROADMAP Phase 3 "슬라이더 수동 제어")
 //
 // 계층 규칙 (CLAUDE.md §3): ui는 core 공개 API만 쓴다. 이 패널은 core 내부를 import하지
 // 않고, 글루(main.ts)가 주입하는 콜백(JointPanelApi)과 POJO 관절 정보(JointInfo 타입)만
@@ -6,20 +6,31 @@
 // — 슬라이더 input은 setJoint 콜백으로 core에 "요청"할 뿐이고, Home 등 core 쪽 상태
 // 변화 후에는 readJoints로 다시 읽어 표시를 맞춘다 (물리/코어 → 뷰 단방향).
 //
-// Phase 6 인스펙터로 대체될 임시 UI다 — 스타일은 인라인 최소 구성(다크·모노스페이스).
+// ── 슬라이더 채움 규약 (UX_AUDIT C-18) ──────────────────────────────
+// 네이티브 accentColor는 트랙을 **min에서 썸까지** 채운다. 관절 limits가 부호를 걸치면
+// (예: ±2.0) 이 채움은 의미가 틀리다 — -0.600이 "35% 진행"처럼, 0.000이 "절반 열림"처럼
+// 읽힌다. 관절값은 이 앱의 핵심 수치이므로 부호와 0 기준점이 시각적으로 정확해야 한다.
+// 그래서 `.ui-range`(+ 부호 있는 범위면 `.ui-range--bipolar`)를 쓰고 `--rsw-range-track`에
+// gradient를 써 넣어 **0에서 썸까지만** 채우고 0 지점에 1px 틱을 그린다
+// (inspector.ts의 attachRangeFill/rangeTrackGradient — 노드 에디터와 공용).
 
 import {
+  BORDER_WIDTH,
   COLOR,
-  FONT,
+  ICON,
   LAYOUT,
   RADIUS,
   SHADOW,
   SPACE,
+  TYPE,
   Z_INDEX,
+  applyType,
   ensureThemeStyles,
-  makeButton,
+  makePanelHeader,
   styled,
 } from '../theme';
+import { makeIconButton } from '../icons';
+import { attachRangeFill, formatFixed } from './inspector';
 import type { JointInfo } from '../../core/robot-types';
 
 // ── 상수 (매직넘버 금지 — CLAUDE.md §4, 시각 토큰은 ui/theme.ts) ────
@@ -32,8 +43,12 @@ const FALLBACK_PRISMATIC_RANGE_M: readonly [number, number] = [0, 0.05];
 const SLIDER_STEP = 0.001;
 /** 값 표시 소수 자릿수 */
 const READOUT_DECIMALS = 3;
+/** 값 리드아웃 고정 폭 (자릿수가 늘어도 슬라이더가 흔들리지 않게) */
+const READOUT_MIN_WIDTH_PX = 56;
 /** 상단 커맨드바 아래에 배치 (단독 마운트 기본값 — 스택 편입 시 통합자가 덮는다) */
 const PANEL_TOP_PX = LAYOUT.belowBarTopPx;
+/** 본문 스크롤 영역 상한 (접기 트랜지션의 펼침 목표값) */
+const BODY_MAX_HEIGHT = '70vh';
 
 // ── 공개 타입 ───────────────────────────────────────────────────────
 
@@ -67,8 +82,13 @@ function sliderRangeOf(joint: JointInfo): readonly [number, number] {
   return [-FALLBACK_REVOLUTE_LIMIT_RAD, FALLBACK_REVOLUTE_LIMIT_RAD];
 }
 
+/** 관절값 단위 (CLAUDE.md §4 단위 규약 — prismatic만 미터) */
+function unitLabelOf(joint: JointInfo): string {
+  return joint.type === 'prismatic' ? '미터' : '라디안';
+}
+
 function formatValue(value: number): string {
-  return value.toFixed(READOUT_DECIMALS);
+  return formatFixed(value, READOUT_DECIMALS);
 }
 
 // ── 마운트 ──────────────────────────────────────────────────────────
@@ -93,17 +113,15 @@ export function mountJointPanel(
     display: 'flex',
     flexDirection: 'column',
     background: COLOR.bgPanel,
-    border: `1px solid ${COLOR.border}`,
+    border: `${BORDER_WIDTH.hair} solid ${COLOR.border}`,
     borderRadius: RADIUS.md,
     boxShadow: SHADOW.panel,
     color: COLOR.text,
-    fontFamily: FONT.ui,
-    fontSize: '12px',
-    lineHeight: '1.5',
     minWidth: '240px',
     boxSizing: 'border-box',
     userSelect: 'none',
   });
+  applyType(panel, TYPE.body);
   panel.dataset.testid = 'joint-panel';
   // 패널 위 상호작용이 뷰포트(OrbitControls)로 전파되지 않게 차단
   for (const type of ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'contextmenu']) {
@@ -112,54 +130,33 @@ export function mountJointPanel(
     });
   }
 
-  // 헤더: 타이틀 + 접기 토글 (inspector.ts/dock과 동일한 ▾/▴ 규약)
-  const header = styled(document.createElement('div'), {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: SPACE.md,
-    padding: `${SPACE.sm} 10px`,
-    borderBottom: `1px solid ${COLOR.borderSoft}`,
-    flexShrink: '0',
+  // 헤더 — 셰브론 회전 규약은 makePanelHeader가 소유한다(수제 ▾/▴ 제거, UX_AUDIT C-18)
+  const header = makePanelHeader('관절 제어', {
+    collapsible: true,
+    testId: 'joint-panel-header',
   });
-  const panelTitle = styled(document.createElement('strong'), {
-    color: COLOR.textStrong,
-    fontSize: '13px',
-  });
-  panelTitle.textContent = '관절 제어';
-  header.appendChild(panelTitle);
-
-  const collapseButton = makeButton('▾ 접기', '패널 접기/펼치기', 'joint-panel-collapse', 'ghost');
-  styled(collapseButton, { padding: '0 4px' });
-  header.appendChild(collapseButton);
-  panel.appendChild(header);
+  // 구 testId 유지 (측정 스크립트/문서 참조 호환)
+  if (header.collapseButton !== null) header.collapseButton.dataset.testid = 'joint-panel-collapse';
+  panel.appendChild(header.el);
 
   // 본문 (스크롤 영역): 로봇별 관절 섹션 — 접기는 max-height 트랜지션 (.ui-collapsible)
   const body = styled(document.createElement('div'), {
     overflowY: 'auto',
     minHeight: '0',
-    maxHeight: '70vh',
+    maxHeight: BODY_MAX_HEIGHT,
     opacity: '1',
-    padding: '8px 12px 10px 12px',
+    padding: `${SPACE.md} ${SPACE.lg} ${SPACE.lg} ${SPACE.lg}`,
   });
   body.classList.add('ui-scroll', 'ui-collapsible');
   panel.appendChild(body);
 
-  let collapsed = false;
-  const paintCollapse = (): void => {
-    body.style.maxHeight = collapsed ? '0' : '70vh';
+  header.onToggle((collapsed) => {
+    body.style.maxHeight = collapsed ? '0' : BODY_MAX_HEIGHT;
     body.style.opacity = collapsed ? '0' : '1';
-    body.style.paddingTop = collapsed ? '0' : '8px';
-    body.style.paddingBottom = collapsed ? '0' : '10px';
+    body.style.paddingTop = collapsed ? '0' : SPACE.md;
+    body.style.paddingBottom = collapsed ? '0' : SPACE.lg;
     body.style.overflowY = collapsed ? 'hidden' : 'auto';
-    collapseButton.textContent = collapsed ? '▴ 펼치기' : '▾ 접기';
-    collapseButton.setAttribute('aria-expanded', String(!collapsed));
-  };
-  collapseButton.addEventListener('click', () => {
-    collapsed = !collapsed;
-    paintCollapse();
   });
-  paintCollapse();
 
   for (const robot of robots) {
     body.appendChild(buildRobotSection(robot, api));
@@ -175,32 +172,35 @@ export function mountJointPanel(
 }
 
 function buildRobotSection(robot: JointPanelRobot, api: JointPanelApi): HTMLElement {
-  const section = styled(document.createElement('section'), { margin: '0 0 10px 0' });
-
-  const header = styled(document.createElement('div'), {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: SPACE.md,
-    margin: '0 0 6px 0',
-  });
-  const title = styled(document.createElement('strong'), {
-    color: COLOR.textStrong,
-    fontSize: '13px',
-  });
-  title.textContent = robot.id;
-  header.appendChild(title);
+  const section = styled(document.createElement('section'), { margin: `0 0 ${SPACE.xl} 0` });
 
   /** Home 후 슬라이더/표시를 core 진실(readJoints)로 되맞추는 갱신 훅 목록 */
   const refreshers: Array<() => void> = [];
 
-  const homeButton = makeButton('Home', `'${robot.id}' home 포즈 재적용`, `joint-home-${robot.id}`);
+  // 로봇 섹션 헤더 — 패널 헤더와 같은 팩토리(제목 굵기/보더/액션 정렬 규약 단일화)
+  const header = makePanelHeader(robot.id, {
+    actions: true,
+    headingTag: 'h3',
+    testId: `joint-section-${robot.id}`,
+  });
+  styled(header.el, { padding: `${SPACE.xs} 0 ${SPACE.sm} 0` });
+  applyType(header.titleEl, TYPE.subhead);
+  header.titleEl.title = robot.id;
+
+  const homeButton = makeIconButton(
+    'home',
+    'Home',
+    `'${robot.id}' home 포즈 재적용`,
+    `joint-home-${robot.id}`,
+    'default',
+    ICON.sm,
+  );
   homeButton.addEventListener('click', () => {
     api.applyHome(robot.id);
     for (const refresh of refreshers) refresh();
   });
-  header.appendChild(homeButton);
-  section.appendChild(header);
+  header.actionsEl?.appendChild(homeButton);
+  section.appendChild(header.el);
 
   const initialValues = api.readJoints(robot.id);
   for (const joint of robot.joints) {
@@ -218,16 +218,18 @@ function buildJointRow(
   api: JointPanelApi,
 ): { row: HTMLElement; refresh: () => void } {
   const [minValue, maxValue] = sliderRangeOf(joint);
+  const unit = unitLabelOf(joint);
 
   const row = styled(document.createElement('div'), {
     display: 'grid',
     gridTemplateColumns: '1fr auto',
     alignItems: 'center',
-    columnGap: '8px',
-    margin: '2px 0',
+    columnGap: SPACE.md,
+    margin: `${SPACE.sm} 0 0 0`,
   });
 
-  const label = styled(document.createElement('span'), {
+  const label = applyType(document.createElement('span'), TYPE.caption);
+  styled(label, {
     color: COLOR.label,
     overflow: 'hidden',
     textOverflow: 'ellipsis',
@@ -236,29 +238,42 @@ function buildJointRow(
   label.textContent = joint.name;
   label.title = joint.name;
 
-  const readout = styled(document.createElement('span'), {
+  const readout = applyType(document.createElement('span'), TYPE.monoReadout);
+  styled(readout, {
     color: COLOR.textStrong,
-    fontFamily: FONT.mono,
     textAlign: 'right',
-    minWidth: '56px',
+    minWidth: `${READOUT_MIN_WIDTH_PX}px`,
   });
   readout.textContent = formatValue(initialValue);
 
   const slider = styled(document.createElement('input'), {
     width: '100%',
     gridColumn: '1 / 3',
-    accentColor: COLOR.accent, // 네이티브 range 트랙/썸을 액센트로
   });
   slider.type = 'range';
   slider.min = String(minValue);
   slider.max = String(maxValue);
   slider.step = String(SLIDER_STEP);
   slider.value = String(initialValue);
+  slider.dataset.testid = 'joint-slider';
+  slider.dataset.joint = joint.name;
   slider.setAttribute('aria-label', `${robotId} ${joint.name} 관절 목표값`);
+  // 채움은 0 기준 (부호 있는 범위) — 네이티브 accentColor 대체 (UX_AUDIT C-18)
+  const paintFill = attachRangeFill(slider, minValue, maxValue);
+
+  /** 값 하나로 리드아웃·트랙 채움·aria-valuetext를 함께 갱신한다 (셋이 어긋나지 않게) */
+  const paintValue = (value: number): void => {
+    readout.textContent = formatValue(value);
+    paintFill(value);
+    // 숫자만 읽히면 rad인지 m인지 알 수 없다 — 단위를 말로 붙인다 (UX_AUDIT C-16)
+    slider.setAttribute('aria-valuetext', `${formatValue(value)} ${unit}`);
+  };
+  paintValue(initialValue);
+
   slider.addEventListener('input', () => {
     const value = Number(slider.value);
     api.setJoint(robotId, joint.name, value);
-    readout.textContent = formatValue(value);
+    paintValue(value);
   });
 
   row.appendChild(label);
@@ -272,7 +287,7 @@ function buildJointRow(
       const value = api.readJoints(robotId)[joint.name];
       if (value === undefined) return;
       slider.value = String(value);
-      readout.textContent = formatValue(value);
+      paintValue(value);
     },
   };
 }

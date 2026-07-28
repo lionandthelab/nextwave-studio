@@ -19,16 +19,23 @@
 // node에서 단위 테스트된다(node-editor.test.ts). DOM 조립은 얇다.
 
 import {
+  BORDER_WIDTH,
+  COLLISION,
   COLOR,
-  FONT,
+  ICON,
   RADIUS,
   SHADOW,
   SPACE,
+  TYPE,
+  applyType,
   ensureThemeStyles,
   makeButton,
+  makePanelHeader,
   styled,
 } from '../theme';
-import { formatFixed } from './inspector';
+import { icon, makeIconButton } from '../icons';
+import type { IconName } from '../icons';
+import { attachRangeFill, formatFixed } from './inspector';
 import { clamp, parseNumeric } from './entity-editor';
 import type { Easing } from '../../schema/types';
 
@@ -52,6 +59,20 @@ const GRIPPER_SLIDER_STEP = 0.01;
 const GRIPPER_DECIMALS = 2;
 /** 노트 textarea 행 수 */
 const NOTE_ROWS = 2;
+/** 그리퍼 값 리드아웃 고정 폭 (자릿수가 늘어도 슬라이더가 흔들리지 않게) */
+const GRIPPER_READOUT_COL_PX = 44;
+/** 관절 행의 숫자 입력 컬럼 폭 */
+const JOINT_INPUT_COL_PX = 68;
+
+/** 커밋 오류 상자의 DOM id — 실패한 입력이 aria-describedby로 가리킨다 (UX_AUDIT C-16) */
+const ERROR_BOX_ID = 'ne-errors';
+
+/** DOM id 발급기 — label htmlFor / aria-describedby 연결용 (재구축마다 유일) */
+let idSeq = 0;
+function nextDomId(prefix: string): string {
+  idSeq += 1;
+  return `${prefix}-${idSeq}`;
+}
 
 // ── 공개 타입 ───────────────────────────────────────────────────────
 
@@ -128,27 +149,33 @@ export function robotDisplayOf(params: Record<string, unknown>, defaultRobot: st
   return typeof robot === 'string' && robot !== '' ? robot : defaultRobot;
 }
 
-/** step 종류 → 헤더 아이콘/라벨 (요구 §2 "kind 헤더 with icon"). 미지 kind는 원문 라벨 */
-export function nodeKindMeta(kind: string): { icon: string; label: string } {
+/**
+ * step 종류 → 헤더 아이콘(SVG 이름)/라벨 (요구 §2 "kind 헤더 with icon"). 미지 kind는 원문 라벨.
+ *
+ * 아이콘은 이모지가 아니라 `icons.ts`의 이름이다 (UX_AUDIT C-13) — 컬러 이모지는
+ * currentColor를 못 받아 hover/disabled에서 텍스트만 밝아지고, OS마다 그림이 달라
+ * 스크린샷·문서가 재현되지 않는다.
+ */
+export function nodeKindMeta(kind: string): { icon: IconName; label: string } {
   switch (kind) {
     case 'moveJoints':
-      return { icon: '🦾', label: 'MoveJoints — 관절 이동' };
+      return { icon: 'robotArm', label: 'MoveJoints — 관절 이동' };
     case 'setJoints':
-      return { icon: '⚡', label: 'SetJoints — 관절 즉시 설정' };
+      return { icon: 'rotate', label: 'SetJoints — 관절 즉시 설정' };
     case 'gripper':
-      return { icon: '✋', label: 'Gripper — 그리퍼' };
+      return { icon: 'gripper', label: 'Gripper — 그리퍼' };
     case 'wait':
-      return { icon: '⏱', label: 'Wait — 대기' };
+      return { icon: 'timer', label: 'Wait — 대기' };
     case 'waitForCollision':
-      return { icon: '💥', label: 'WaitForCollision — 충돌 대기' };
+      return { icon: 'impact', label: 'WaitForCollision — 충돌 대기' };
     case 'label':
-      return { icon: '🏷', label: 'Label — 라벨' };
+      return { icon: 'bookmark', label: 'Label — 라벨' };
     case 'goto':
-      return { icon: '↩', label: 'Goto — 라벨로 이동' };
+      return { icon: 'undo', label: 'Goto — 라벨로 이동' };
     case 'moveToPose':
-      return { icon: '🎯', label: 'MoveToPose — 포즈 이동' };
+      return { icon: 'target', label: 'MoveToPose — 포즈 이동' };
     default:
-      return { icon: '◌', label: kind };
+      return { icon: 'workflow', label: kind };
   }
 }
 
@@ -408,22 +435,34 @@ export function applyGotoFormToParams(
 // ── 내부 DOM 헬퍼 (얇은 조립 — 시각 언어는 entity-editor와 동일) ─────
 
 function subCaption(text: string): HTMLElement {
-  const el = styled(document.createElement('div'), {
-    color: COLOR.muted,
-    fontSize: '11px',
-    margin: '6px 0 2px 0',
-  });
+  const el = applyType(document.createElement('div'), TYPE.caption);
+  styled(el, { color: COLOR.muted, margin: `${SPACE.lg} 0 ${SPACE.xxs} 0`, whiteSpace: 'normal' });
   el.textContent = text;
   return el;
 }
 
 function mutedLine(text: string): HTMLElement {
-  const el = styled(document.createElement('div'), {
-    color: COLOR.muted,
-    padding: '4px 0',
-  });
+  const el = applyType(document.createElement('div'), TYPE.body);
+  styled(el, { color: COLOR.muted, padding: `${SPACE.xs} 0`, whiteSpace: 'normal' });
   el.textContent = text;
   return el;
+}
+
+/** 아이콘 + 문구 한 줄 (경고/안내 박스 본문 — 이모지·딩벳 대체, UX_AUDIT C-13) */
+function iconLine(name: IconName, text: string): HTMLElement {
+  const row = styled(document.createElement('div'), {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: SPACE.sm,
+    padding: `${SPACE.hair} 0`,
+  });
+  const glyph = styled(document.createElement('span'), { display: 'flex', flex: 'none' });
+  glyph.appendChild(icon(name, ICON.sm));
+  const body = styled(document.createElement('span'), { whiteSpace: 'normal', minWidth: '0' });
+  body.textContent = text;
+  row.appendChild(glyph);
+  row.appendChild(body);
+  return row;
 }
 
 function addOption(select: HTMLSelectElement, value: string, label: string): void {
@@ -449,33 +488,44 @@ function makeSelect(testId: string, ariaLabel: string): HTMLSelectElement {
   return select;
 }
 
+/**
+ * 슬라이더 + 값 갱신 함수. 채움은 **0 기준**이다(부호 있는 범위) — 네이티브 accentColor의
+ * min→thumb 채움은 limits ±2.0에서 -0.600을 "35% 진행"처럼 읽히게 만든다(UX_AUDIT C-18).
+ * `aria-valuetext`도 함께 갱신한다 — 숫자만 읽히면 단위(rad)가 전달되지 않는다.
+ */
 function makeSlider(
   minValue: number,
   maxValue: number,
   stepValue: number,
   testId: string,
   ariaLabel: string,
-): HTMLInputElement {
+  unitText: string,
+  decimals: number,
+): { slider: HTMLInputElement; paint: (value: number) => void } {
   const slider = document.createElement('input');
   slider.type = 'range';
   slider.min = String(minValue);
   slider.max = String(maxValue);
   slider.step = String(stepValue);
-  styled(slider, { width: '100%', minWidth: '0', margin: '0', accentColor: COLOR.accent });
+  styled(slider, { width: '100%', minWidth: '0', margin: '0' });
   slider.dataset.testid = testId;
   slider.setAttribute('aria-label', ariaLabel);
-  return slider;
+  const paintFill = attachRangeFill(slider, minValue, maxValue);
+  const paint = (value: number): void => {
+    paintFill(value);
+    slider.setAttribute('aria-valuetext', `${formatFixed(value, decimals)} ${unitText}`);
+  };
+  return { slider, paint };
 }
 
 function bareNumberInput(testId: string, ariaLabel: string, stepValue: number): HTMLInputElement {
   const input = document.createElement('input');
   input.type = 'number';
-  input.className = 'ui-input';
+  input.className = 'ui-input ui-input--mono';
   input.step = String(stepValue);
   styled(input, {
     width: '100%',
     boxSizing: 'border-box',
-    fontFamily: FONT.mono,
     textAlign: 'right',
   });
   input.dataset.testid = testId;
@@ -497,21 +547,26 @@ interface NumberFieldOptions {
   onCommit(input: HTMLInputElement): void;
 }
 
-/** 라벨 + number 입력 셀 (커밋은 change만 — 요구 §3) */
+/**
+ * 라벨 + number 입력 셀 (커밋은 change만 — 요구 §3).
+ * 라벨은 `<label for>`로 입력에 연결된다 — 가시 텍스트가 곧 접근 가능한 이름이다
+ * (WCAG 2.5.3 Label in Name, UX_AUDIT C-16).
+ */
 function numberField(options: NumberFieldOptions): { cell: HTMLElement; input: HTMLInputElement } {
   const cell = styled(document.createElement('div'), {
     display: 'flex',
     flexDirection: 'column',
-    gap: '2px',
+    gap: SPACE.xxs,
     minWidth: '0',
   });
-  const label = styled(document.createElement('span'), {
-    color: COLOR.label,
-    fontSize: '11px',
-    userSelect: 'none',
-  });
+  const inputId = nextDomId(`rsw-${options.testId}`);
+  const label = applyType(document.createElement('label'), TYPE.caption);
+  styled(label, { color: COLOR.label, userSelect: 'none', whiteSpace: 'normal' });
+  label.htmlFor = inputId;
   label.textContent = options.label;
   const input = bareNumberInput(options.testId, options.label, options.step);
+  input.id = inputId;
+  input.removeAttribute('aria-label');
   if (options.min !== undefined) input.min = String(options.min);
   if (options.max !== undefined) input.max = String(options.max);
   if (options.placeholder !== undefined) input.placeholder = options.placeholder;
@@ -523,37 +578,31 @@ function numberField(options: NumberFieldOptions): { cell: HTMLElement; input: H
   return { cell, input };
 }
 
-/** 접기 가능한 섹션 (entity-editor와 같은 ▾/▸ 규약) */
+/** 접기 가능한 섹션 (셰브론 회전 규약은 makePanelHeader가 소유 — UX_AUDIT C-18) */
 function makeSection(
   titleText: string,
   testId: string,
 ): { section: HTMLElement; body: HTMLElement } {
   const section = styled(document.createElement('section'), {
-    borderBottom: `1px solid ${COLOR.borderSoft}`,
-    padding: '2px 0 8px 0',
-    margin: '0 0 4px 0',
+    borderBottom: `${BORDER_WIDTH.hair} solid ${COLOR.borderSoft}`,
+    padding: `0 0 ${SPACE.lg} 0`,
+    // 섹션 경계는 16px 이상 — 4~8px로 뭉개면 그룹이 눈에 보이지 않는다
+    margin: `0 0 ${SPACE.xl} 0`,
   });
   section.dataset.testid = testId;
-  const toggle = makeButton(
-    `▾ ${titleText}`,
-    `${titleText} 섹션 접기/펼치기`,
-    `${testId}-toggle`,
-    'ghost',
-  );
-  styled(toggle, { width: '100%', textAlign: 'left', padding: '2px 4px', fontWeight: '600' });
-  const body = styled(document.createElement('div'), { padding: '4px 4px 0 4px' });
-  let collapsed = false;
-  const paint = (): void => {
+  const header = makePanelHeader(titleText, { collapsible: true, headingTag: 'h3', testId });
+  // section이 이미 testId를 갖는다 — 헤더의 중복 testid는 제거하고 토글 id만 남긴다
+  delete header.el.dataset.testid;
+  if (header.collapseButton !== null) header.collapseButton.dataset.testid = `${testId}-toggle`;
+  styled(header.el, { padding: `${SPACE.xs} 0`, borderBottom: 'none' });
+  applyType(header.titleEl, TYPE.subhead);
+  // 영문 도메인 식별자 제목은 lang을 명시한다 — 한국어 TTS 철자 나열 방지 (WCAG 3.1.2)
+  if (/^[\x20-\x7E]+$/.test(titleText)) header.titleEl.setAttribute('lang', 'en');
+  const body = styled(document.createElement('div'), { padding: `${SPACE.xs} 0 0 0` });
+  header.onToggle((collapsed) => {
     body.style.display = collapsed ? 'none' : '';
-    toggle.textContent = `${collapsed ? '▸' : '▾'} ${titleText}`;
-    toggle.setAttribute('aria-expanded', String(!collapsed));
-  };
-  toggle.addEventListener('click', () => {
-    collapsed = !collapsed;
-    paint();
   });
-  paint();
-  section.appendChild(toggle);
+  section.appendChild(header.el);
   section.appendChild(body);
   return { section, body };
 }
@@ -571,15 +620,13 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     width: '100%',
     boxSizing: 'border-box',
     background: COLOR.bgPanel,
-    border: `1px solid ${COLOR.border}`,
+    border: `${BORDER_WIDTH.hair} solid ${COLOR.border}`,
     borderRadius: RADIUS.md,
     boxShadow: SHADOW.panel,
     color: COLOR.text,
-    fontFamily: FONT.ui,
-    fontSize: '12px',
-    lineHeight: '1.5',
     userSelect: 'none',
   });
+  applyType(root, TYPE.body);
   root.dataset.testid = 'node-editor';
   for (const type of ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'contextmenu', 'keydown']) {
     root.addEventListener(type, (e) => {
@@ -587,43 +634,38 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     });
   }
 
-  // 헤더: kind 아이콘 + 타입명 + 노드 id (요구 §2 "kind 헤더 with icon")
-  const header = styled(document.createElement('div'), {
+  // 헤더: kind 아이콘 + 타입명 + 노드 id (요구 §2 "kind 헤더 with icon").
+  // 수제 헤더 대신 공용 팩토리 — 제목 굵기/보더/액션 정렬 규약이 한 곳에서 결정된다.
+  const header = makePanelHeader('노드 편집', { actions: true, testId: 'node-editor-header' });
+  const headerIcon = styled(document.createElement('span'), {
     display: 'flex',
-    alignItems: 'center',
-    gap: SPACE.md,
-    padding: `${SPACE.sm} 10px`,
-    borderBottom: `1px solid ${COLOR.borderSoft}`,
-  });
-  const headerIcon = styled(document.createElement('span'), { fontSize: '13px', flexShrink: '0' });
-  headerIcon.dataset.testid = 'ne-kind-icon';
-  const headerTitle = styled(document.createElement('strong'), {
-    color: COLOR.textStrong,
-    fontSize: '13px',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  });
-  headerTitle.dataset.testid = 'ne-kind';
-  const headerId = styled(document.createElement('span'), {
+    flex: 'none',
     color: COLOR.muted,
-    fontFamily: FONT.mono,
-    fontSize: '11px',
-    marginLeft: 'auto',
+  });
+  headerIcon.dataset.testid = 'ne-kind-icon';
+  header.el.insertBefore(headerIcon, header.titleEl);
+  const headerTitle = header.titleEl;
+  headerTitle.dataset.testid = 'ne-kind';
+  // kind 라벨은 영문 도메인 식별자를 포함한다 — 한국어 TTS가 철자 나열로 읽지 않도록
+  // lang을 명시한다 (WCAG 3.1.2)
+  headerTitle.setAttribute('lang', 'en');
+  const headerId = applyType(document.createElement('span'), TYPE.monoMicro);
+  styled(headerId, {
+    color: COLOR.muted,
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
-    flexShrink: '1',
     minWidth: '0',
   });
   headerId.dataset.testid = 'ne-id';
-  header.appendChild(headerIcon);
-  header.appendChild(headerTitle);
-  header.appendChild(headerId);
-  root.appendChild(header);
+  if (header.actionsEl !== null) {
+    styled(header.actionsEl, { minWidth: '0', overflow: 'hidden' });
+    header.actionsEl.appendChild(headerId);
+  }
+  root.appendChild(header.el);
 
   const content = styled(document.createElement('div'), {
-    padding: '6px 10px 10px 10px',
+    padding: `${SPACE.md} ${SPACE.lg} ${SPACE.lg} ${SPACE.lg}`,
     maxHeight: '65vh',
     overflowY: 'auto',
     minHeight: '0',
@@ -642,17 +684,19 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
   content.appendChild(paramsSection.section);
 
   // 커밋 오류 (인라인 한국어 — 불변식 §2.8: 무효 편집은 거부되고 폼은 복원된다)
-  const errorBox = styled(document.createElement('div'), {
+  const errorBox = applyType(document.createElement('div'), TYPE.caption);
+  styled(errorBox, {
     display: 'none',
-    color: COLOR.errorText,
-    background: COLOR.errorSoft,
-    border: `1px solid ${COLOR.errorBorder}`,
+    color: COLLISION.text,
+    background: COLLISION.soft,
+    border: `${BORDER_WIDTH.hair} solid ${COLLISION.border}`,
     borderRadius: RADIUS.sm,
-    padding: '4px 8px',
-    margin: '2px 0 6px 0',
-    fontSize: '11px',
+    padding: `${SPACE.sm} ${SPACE.md}`,
+    margin: `0 0 ${SPACE.lg} 0`,
     whiteSpace: 'normal',
   });
+  // id는 aria-describedby의 대상이다 — 실패한 입력이 이 상자를 가리킨다 (UX_AUDIT C-16)
+  errorBox.id = ERROR_BOX_ID;
   errorBox.dataset.testid = 'ne-errors';
   errorBox.setAttribute('role', 'alert');
   content.appendChild(errorBox);
@@ -665,82 +709,95 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
   const robotRow = styled(document.createElement('div'), {
     display: 'flex',
     alignItems: 'baseline',
-    gap: '6px',
-    padding: '1px 0',
+    gap: SPACE.sm,
+    padding: `${SPACE.hair} 0`,
   });
-  const robotLabel = styled(document.createElement('span'), {
-    color: COLOR.label,
-    fontSize: '11px',
-    flexShrink: '0',
-  });
+  const robotLabel = applyType(document.createElement('span'), TYPE.caption);
+  styled(robotLabel, { color: COLOR.label, flex: 'none' });
   robotLabel.textContent = '대상 로봇';
-  const robotValue = styled(document.createElement('span'), {
+  const robotValue = applyType(document.createElement('span'), TYPE.monoReadout);
+  styled(robotValue, {
     color: COLOR.textStrong,
-    fontFamily: FONT.mono,
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
   });
   robotValue.dataset.testid = 'ne-robot';
-  const robotHint = styled(document.createElement('span'), {
-    color: COLOR.muted,
-    fontSize: '11px',
-    flexShrink: '0',
-  });
+  const robotHint = applyType(document.createElement('span'), TYPE.micro);
+  styled(robotHint, { color: COLOR.muted, flex: 'none' });
   robotHint.textContent = '(단일 로봇 MVP — 읽기 전용)';
   robotRow.appendChild(robotLabel);
   robotRow.appendChild(robotValue);
   robotRow.appendChild(robotHint);
   commonBody.appendChild(robotRow);
 
-  const enabledRow = styled(document.createElement('label'), {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-    padding: '3px 0',
-    cursor: 'pointer',
-    color: COLOR.text,
-  });
+  const enabledRow = document.createElement('label');
+  enabledRow.className = 'ui-check-label';
+  styled(enabledRow, { color: COLOR.text, margin: `${SPACE.sm} 0 0 0`, whiteSpace: 'normal' });
   const enabledBox = document.createElement('input');
   enabledBox.type = 'checkbox';
+  enabledBox.className = 'ui-check';
   enabledBox.dataset.testid = 'ne-enabled';
-  styled(enabledBox, { accentColor: COLOR.accent, margin: '0' });
   const enabledText = document.createElement('span');
   enabledText.textContent = '활성 — 해제 시 실행에서 제외(순서 유지)';
   enabledRow.appendChild(enabledBox);
   enabledRow.appendChild(enabledText);
   commonBody.appendChild(enabledRow);
 
-  commonBody.appendChild(subCaption('노트'));
-  const noteArea = document.createElement('textarea');
+  const noteId = nextDomId('rsw-ne-note');
+  const noteCaption = subCaption('노트');
+  const noteLabel = document.createElement('label');
+  noteLabel.htmlFor = noteId;
+  noteLabel.textContent = '노트';
+  noteCaption.replaceChildren(noteLabel);
+  commonBody.appendChild(noteCaption);
+  const noteArea = applyType(document.createElement('textarea'), TYPE.body);
   noteArea.className = 'ui-input';
+  noteArea.id = noteId;
   noteArea.rows = NOTE_ROWS;
   noteArea.placeholder = '노드 메모 (실행 무관)';
   styled(noteArea, {
     width: '100%',
     boxSizing: 'border-box',
     resize: 'vertical',
-    fontFamily: FONT.ui,
-    fontSize: '12px',
   });
   noteArea.dataset.testid = 'ne-note';
-  noteArea.setAttribute('aria-label', '노드 노트');
   commonBody.appendChild(noteArea);
 
   // ── 상태 (뷰 상태는 ui 소유 — 그래프 진실은 deps 너머 flow-graph) ──
   let currentId: string | null = null;
 
+  /** 마지막 커밋이 거부됐는가 — 폼 재구축 후 aria-invalid를 다시 입히기 위한 상태 */
+  let commitRejected = false;
+
+  /**
+   * 커밋 실패를 **시각(빨강)뿐 아니라 프로그램적으로도** 알린다 (UX_AUDIT C-16):
+   * 파라미터 컨트롤에 aria-invalid를 걸고 aria-describedby로 오류 상자를 가리킨다.
+   * 폼은 커밋마다 재구축되므로 renderAll 뒤에 다시 호출해야 한다.
+   */
+  const paintInvalidState = (): void => {
+    const controls = paramsBody.querySelectorAll<HTMLElement>('input, select, textarea');
+    for (const control of controls) {
+      if (commitRejected) {
+        control.setAttribute('aria-invalid', 'true');
+        control.setAttribute('aria-describedby', ERROR_BOX_ID);
+      } else {
+        control.removeAttribute('aria-invalid');
+        control.removeAttribute('aria-describedby');
+      }
+    }
+  };
+
   const showErrors = (errors: readonly string[]): void => {
     errorBox.replaceChildren();
+    commitRejected = errors.length > 0;
     if (errors.length === 0) {
       errorBox.style.display = 'none';
       return;
     }
     errorBox.style.display = '';
     for (const message of errors) {
-      const line = styled(document.createElement('div'), { padding: '1px 0' });
-      line.textContent = `⚠ ${message}`;
-      errorBox.appendChild(line);
+      errorBox.appendChild(iconLine('alert', message));
     }
   };
 
@@ -758,6 +815,8 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     const errors = deps.commitParams(currentId, build(node.params));
     showErrors(errors ?? []);
     renderAll();
+    // 재구축된 컨트롤에 오류 상태를 다시 입힌다 (renderAll이 paramsBody를 갈아 끼운다)
+    paintInvalidState();
   };
 
   // ── 재구축 중 포커스 복원 (커밋 → 재구축이 키보드 흐름을 끊지 않게) ─
@@ -834,8 +893,8 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     for (const row of form.rows) {
       const range = jointSliderRange(row.limits);
       const container = styled(document.createElement('div'), {
-        padding: '3px 0',
-        borderBottom: `1px solid ${COLOR.borderSoft}`,
+        padding: `${SPACE.sm} 0`,
+        borderBottom: `${BORDER_WIDTH.hair} solid ${COLOR.borderSoft}`,
       });
       container.dataset.testid = 'ne-joint-row';
       container.dataset.joint = row.name;
@@ -844,11 +903,11 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        gap: '6px',
+        gap: SPACE.sm,
       });
-      const name = styled(document.createElement('span'), {
+      const name = applyType(document.createElement('span'), TYPE.caption);
+      styled(name, {
         color: COLOR.label,
-        fontSize: '11px',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
@@ -858,38 +917,46 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
         `${row.name} — 범위 [${formatFixed(range.minRad, JOINT_DECIMALS)}, ` +
         `${formatFixed(range.maxRad, JOINT_DECIMALS)}] rad` +
         (row.limits === undefined ? ' (limits 없음 — ±π 폴백)' : '');
-      const removeButton = makeButton(
-        '✕',
+      const removeButton = makeIconButton(
+        'close',
+        '',
         `관절 ${row.name} 행 제거`,
         'ne-joint-remove',
         'ghost',
+        ICON.sm,
       );
-      styled(removeButton, { padding: '0 4px', flexShrink: '0' });
+      styled(removeButton, { flex: 'none' });
       head.appendChild(name);
       head.appendChild(removeButton);
 
       const controls = styled(document.createElement('div'), {
         display: 'grid',
-        gridTemplateColumns: 'minmax(0, 1fr) 68px',
-        gap: '6px',
+        gridTemplateColumns: `minmax(0, 1fr) ${JOINT_INPUT_COL_PX}px`,
+        gap: SPACE.sm,
         alignItems: 'center',
       });
-      const slider = makeSlider(
+      const { slider, paint: paintSlider } = makeSlider(
         range.minRad,
         range.maxRad,
         JOINT_SLIDER_STEP_RAD,
         'ne-joint-slider',
         `${row.name} 목표값 슬라이더 (rad)`,
+        '라디안',
+        JOINT_DECIMALS,
       );
       const input = bareNumberInput('ne-joint-value', `${row.name} 목표값 (rad)`, JOINT_SLIDER_STEP_RAD);
       const initial = clampJointValueRad(row.valueRad, row.limits);
       slider.value = String(initial);
       input.value = formatFixed(initial, JOINT_DECIMALS);
+      paintSlider(initial);
 
       // 드래그 중에는 리드아웃만 갱신(라이브 프리뷰), 커밋은 release/blur (요구 §3)
       slider.addEventListener('input', () => {
         const value = parseNumeric(slider.value);
-        if (value !== null) input.value = formatFixed(value, JOINT_DECIMALS);
+        if (value === null) return;
+        input.value = formatFixed(value, JOINT_DECIMALS);
+        // 채움(0 기준)과 aria-valuetext를 드래그 중에도 값과 동기화한다 (UX_AUDIT C-18)
+        paintSlider(value);
       });
       slider.addEventListener('change', () => {
         commitJoints(readRows());
@@ -916,8 +983,8 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     // 미사용 관절 추가 드롭다운 (요구 §2)
     const available = availableJointNames(context.robotJoints, form.rows);
     const addSelect = makeSelect('ne-joint-add', '관절 추가');
-    styled(addSelect, { marginTop: '4px' });
-    addOption(addSelect, '', available.length > 0 ? '＋ 관절 추가…' : '추가할 관절 없음');
+    styled(addSelect, { marginTop: SPACE.md });
+    addOption(addSelect, '', available.length > 0 ? '관절 추가…' : '추가할 관절 없음');
     for (const jointName of available) addOption(addSelect, jointName, jointName);
     addSelect.disabled = available.length === 0;
     addSelect.addEventListener('change', () => {
@@ -936,8 +1003,8 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
       const grid = styled(document.createElement('div'), {
         display: 'grid',
         gridTemplateColumns: '1fr 1fr',
-        gap: '4px 6px',
-        marginTop: '6px',
+        gap: `${SPACE.xs} ${SPACE.sm}`,
+        marginTop: SPACE.lg,
       });
       const duration = numberField({
         label: 'durationSec (s)',
@@ -954,15 +1021,17 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
       const easingCell = styled(document.createElement('div'), {
         display: 'flex',
         flexDirection: 'column',
-        gap: '2px',
+        gap: SPACE.xxs,
         minWidth: '0',
       });
-      const easingLabel = styled(document.createElement('span'), {
-        color: COLOR.label,
-        fontSize: '11px',
-      });
+      const easingId = nextDomId('rsw-ne-easing');
+      const easingLabel = applyType(document.createElement('label'), TYPE.caption);
+      styled(easingLabel, { color: COLOR.label });
+      easingLabel.htmlFor = easingId;
       easingLabel.textContent = 'easing';
       const select = makeSelect('ne-easing', 'easing');
+      select.id = easingId;
+      select.removeAttribute('aria-label');
       addOption(select, '', '(기본 — linear)');
       addOption(select, 'linear', 'linear — 등속');
       addOption(select, 'easeInOut', 'easeInOut — 완급');
@@ -985,18 +1054,18 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     const form = gripperFormStateOf(node.params);
 
     if (!context.gripperAvailable) {
-      const warn = styled(document.createElement('div'), {
-        color: COLOR.warn,
-        border: `1px solid ${COLOR.warn}`,
+      const warn = applyType(document.createElement('div'), TYPE.caption);
+      styled(warn, {
+        color: COLOR.warnText,
+        border: `${BORDER_WIDTH.hair} solid ${COLOR.warn}`,
         borderRadius: RADIUS.sm,
-        background: COLOR.bgField,
-        padding: '4px 8px',
-        margin: '0 0 6px 0',
-        fontSize: '11px',
+        background: COLOR.warnSoft,
+        padding: `${SPACE.sm} ${SPACE.md}`,
+        margin: `0 0 ${SPACE.lg} 0`,
         whiteSpace: 'normal',
       });
       warn.dataset.testid = 'ne-grip-warn';
-      warn.textContent = '⚠ 이 로봇엔 gripper 설정이 없습니다';
+      warn.appendChild(iconLine('alert', '이 로봇엔 gripper 설정이 없습니다'));
       paramsBody.appendChild(warn);
     }
 
@@ -1014,7 +1083,7 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
 
     // 세그먼트 컨트롤 [열기|닫기|값] (요구 §2)
     paramsBody.appendChild(subCaption('상태'));
-    const seg = styled(document.createElement('div'), { display: 'flex', gap: '4px' });
+    const seg = styled(document.createElement('div'), { display: 'flex', gap: SPACE.xs });
     seg.setAttribute('role', 'group');
     seg.setAttribute('aria-label', '그리퍼 상태');
     const segEntries: Array<{ mode: GripperMode; label: string; testId: string }> = [
@@ -1040,29 +1109,32 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     if (form.mode === 'value') {
       const sliderRow = styled(document.createElement('div'), {
         display: 'grid',
-        gridTemplateColumns: 'minmax(0, 1fr) 44px',
-        gap: '6px',
+        gridTemplateColumns: `minmax(0, 1fr) ${GRIPPER_READOUT_COL_PX}px`,
+        gap: SPACE.sm,
         alignItems: 'center',
-        marginTop: '6px',
+        marginTop: SPACE.lg,
       });
-      const slider = makeSlider(
+      // 0..1 단극 범위 — 채움은 min→thumb이 옳다(0이 곧 하한이므로 기준점이 맞다)
+      const { slider, paint: paintSlider } = makeSlider(
         0,
         1,
         GRIPPER_SLIDER_STEP,
         'ne-grip-slider',
         '그리퍼 값 (0=닫힘, 1=열림)',
+        '(0=닫힘, 1=열림)',
+        GRIPPER_DECIMALS,
       );
       slider.value = String(form.valueRatio);
-      const readout = styled(document.createElement('span'), {
-        color: COLOR.textStrong,
-        fontFamily: FONT.mono,
-        textAlign: 'right',
-      });
+      paintSlider(form.valueRatio);
+      const readout = applyType(document.createElement('span'), TYPE.monoReadout);
+      styled(readout, { color: COLOR.textStrong, textAlign: 'right' });
       readout.dataset.testid = 'ne-grip-readout';
       readout.textContent = formatFixed(form.valueRatio, GRIPPER_DECIMALS);
       slider.addEventListener('input', () => {
         const value = parseNumeric(slider.value);
-        if (value !== null) readout.textContent = formatFixed(value, GRIPPER_DECIMALS);
+        if (value === null) return;
+        readout.textContent = formatFixed(value, GRIPPER_DECIMALS);
+        paintSlider(value);
       });
       slider.addEventListener('change', () => {
         commitGripper('value');
@@ -1088,7 +1160,7 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
       duration.input.value = formatFixed(form.durationSec, DURATION_DECIMALS);
     }
     durationRef = duration.input;
-    styled(duration.cell, { marginTop: '6px' });
+    styled(duration.cell, { marginTop: SPACE.lg });
     paramsBody.appendChild(duration.cell);
   };
 
@@ -1117,15 +1189,17 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
       const cell = styled(document.createElement('div'), {
         display: 'flex',
         flexDirection: 'column',
-        gap: '2px',
+        gap: SPACE.xxs,
         minWidth: '0',
       });
-      const label = styled(document.createElement('span'), {
-        color: COLOR.label,
-        fontSize: '11px',
-      });
+      const selectId = nextDomId(`rsw-${testId}`);
+      const label = applyType(document.createElement('label'), TYPE.caption);
+      styled(label, { color: COLOR.label });
+      label.htmlFor = selectId;
       label.textContent = labelText;
       const select = makeSelect(testId, labelText);
+      select.id = selectId;
+      select.removeAttribute('aria-label');
       if (current === '') addOption(select, '', '(선택)');
       for (const entityId of context.entityIds) addOption(select, entityId, entityId);
       if (current !== '') ensureOption(select, current, current);
@@ -1168,13 +1242,13 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     const grid = styled(document.createElement('div'), {
       display: 'grid',
       gridTemplateColumns: '1fr 1fr',
-      gap: '4px 6px',
+      gap: `${SPACE.xs} ${SPACE.sm}`,
     });
     grid.appendChild(a.cell);
     grid.appendChild(b.cell);
     paramsBody.appendChild(subCaption('충돌 대기 엔티티 쌍'));
     paramsBody.appendChild(grid);
-    styled(timeout.cell, { marginTop: '6px' });
+    styled(timeout.cell, { marginTop: SPACE.lg });
     paramsBody.appendChild(timeout.cell);
   };
 
@@ -1182,16 +1256,19 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     const cell = styled(document.createElement('div'), {
       display: 'flex',
       flexDirection: 'column',
-      gap: '2px',
+      gap: SPACE.xxs,
     });
-    const label = styled(document.createElement('span'), { color: COLOR.label, fontSize: '11px' });
+    const inputId = nextDomId('rsw-ne-label-name');
+    const label = applyType(document.createElement('label'), TYPE.caption);
+    styled(label, { color: COLOR.label });
+    label.htmlFor = inputId;
     label.textContent = 'label 이름';
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'ui-input';
+    input.id = inputId;
     styled(input, { width: '100%', boxSizing: 'border-box' });
     input.dataset.testid = 'ne-label-name';
-    input.setAttribute('aria-label', 'label 이름');
     input.value = labelNameOf(node.params);
     input.addEventListener('change', () => {
       commitWith((original) => applyLabelFormToParams(original, input.value));
@@ -1213,15 +1290,17 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     const labelCell = styled(document.createElement('div'), {
       display: 'flex',
       flexDirection: 'column',
-      gap: '2px',
+      gap: SPACE.xxs,
       minWidth: '0',
     });
-    const labelCaption = styled(document.createElement('span'), {
-      color: COLOR.label,
-      fontSize: '11px',
-    });
+    const gotoSelectId = nextDomId('rsw-ne-goto-label');
+    const labelCaption = applyType(document.createElement('label'), TYPE.caption);
+    styled(labelCaption, { color: COLOR.label });
+    labelCaption.htmlFor = gotoSelectId;
     labelCaption.textContent = '대상 label';
     const select = makeSelect('ne-goto-label', '대상 label');
+    select.id = gotoSelectId;
+    select.removeAttribute('aria-label');
     if (form.label === '') addOption(select, '', '(label 선택)');
     const seen = new Set<string>();
     for (const labelName of context.labels) {
@@ -1261,7 +1340,7 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     const grid = styled(document.createElement('div'), {
       display: 'grid',
       gridTemplateColumns: '1fr 1fr',
-      gap: '4px 6px',
+      gap: `${SPACE.xs} ${SPACE.sm}`,
     });
     grid.appendChild(labelCell);
     grid.appendChild(timesField.cell);
@@ -1272,16 +1351,16 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
   };
 
   const buildPoseNotice = (): void => {
-    const notice = styled(document.createElement('div'), {
-      color: COLOR.info,
+    const notice = applyType(document.createElement('div'), TYPE.caption);
+    styled(notice, {
+      color: COLOR.infoText,
       background: COLOR.infoSoft,
       borderRadius: RADIUS.sm,
-      padding: '4px 8px',
-      fontSize: '11px',
+      padding: `${SPACE.sm} ${SPACE.md}`,
       whiteSpace: 'normal',
     });
     notice.dataset.testid = 'ne-pose-note';
-    notice.textContent = 'ℹ IK 백로그 — 실행 시 건너뜀';
+    notice.appendChild(iconLine('info', 'IK 백로그 — 실행 시 건너뜀'));
     paramsBody.appendChild(notice);
   };
 
@@ -1330,8 +1409,9 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
   const renderAll = (): void => {
     const node = currentId === null ? null : deps.getNode(currentId);
     if (node === null) {
-      headerIcon.textContent = '⬡';
+      headerIcon.replaceChildren(icon('workflow', ICON.md));
       headerTitle.textContent = '노드 편집';
+      headerTitle.removeAttribute('lang');
       headerId.textContent = '';
       placeholder.style.display = '';
       paramsSection.section.style.display = 'none';
@@ -1343,8 +1423,11 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     paramsSection.section.style.display = '';
     commonSection.section.style.display = '';
     const meta = nodeKindMeta(node.kind);
-    headerIcon.textContent = meta.icon;
+    headerIcon.replaceChildren(icon(meta.icon, ICON.md));
     headerTitle.textContent = meta.label;
+    // 라벨이 영문 도메인 식별자(MoveJoints…)를 포함한다 — 한국어 TTS 철자 나열 방지
+    headerTitle.setAttribute('lang', 'en');
+    headerTitle.title = meta.label;
     headerId.textContent = node.id;
     headerId.title = node.id;
     paintCommon(node);

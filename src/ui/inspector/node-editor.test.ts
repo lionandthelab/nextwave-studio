@@ -100,26 +100,35 @@ describe('robotDisplayOf', () => {
 });
 
 describe('nodeKindMeta', () => {
+  const KNOWN_KINDS = [
+    'moveJoints',
+    'setJoints',
+    'gripper',
+    'wait',
+    'waitForCollision',
+    'label',
+    'goto',
+    'moveToPose',
+  ];
+
   it('알려진 8종 step kind에 아이콘+라벨을 준다', () => {
-    const kinds = [
-      'moveJoints',
-      'setJoints',
-      'gripper',
-      'wait',
-      'waitForCollision',
-      'label',
-      'goto',
-      'moveToPose',
-    ];
-    for (const kind of kinds) {
+    for (const kind of KNOWN_KINDS) {
       const meta = nodeKindMeta(kind);
       expect(meta.icon.length).toBeGreaterThan(0);
       expect(meta.label.toLowerCase()).toContain(kind.toLowerCase());
     }
   });
 
+  it('아이콘은 이모지가 아니라 icons.ts의 SVG 이름이다 (UX_AUDIT C-13)', () => {
+    // 컬러 이모지는 currentColor를 못 받아 hover/disabled에서 텍스트만 밝아지고,
+    // OS/브라우저마다 그림이 달라 스크린샷·문서가 재현되지 않는다.
+    for (const kind of [...KNOWN_KINDS, 'customStep']) {
+      expect(nodeKindMeta(kind).icon).toMatch(/^[a-zA-Z]+$/);
+    }
+  });
+
   it('미지 kind는 원문 라벨 + 폴백 아이콘', () => {
-    expect(nodeKindMeta('customStep')).toEqual({ icon: '◌', label: 'customStep' });
+    expect(nodeKindMeta('customStep')).toEqual({ icon: 'workflow', label: 'customStep' });
   });
 });
 

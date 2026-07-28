@@ -1,10 +1,20 @@
-// ui/inspector/inspector.ts — MVP 인스펙터 패널
-// (ROADMAP Phase 6 "인스펙터(엔티티 목록·선택·트랜스폼/관절 상태 표시)", UX_DESIGN §3.5 (A)의 읽기 부분집합)
+// ui/inspector/inspector.ts — 인스펙터 패널 + 씬 아웃라이너 (UX_DESIGN §3.5 (A), UX_AUDIT C-16/C-10/C-5)
 //
-// READ-heavy MVP: 엔티티 목록 + 선택 + 선택 대상의 트랜스폼/관절 상태 "표시"만 한다.
-// 편집(치수·Physics·Transform 쓰기)은 Phase 7 Scene Builder의 몫이다. 이 패널은 물리를
-// 절대 변경하지 않는다 — 값은 InspectorDeps 콜백으로 읽기만 한다(뷰에서 물리 pose를
-// 역으로 쓰지 않는다 — CLAUDE.md §6 "UI/UX", 불변식 §2.1).
+// 이 모듈은 두 개의 마운트 지점을 낸다:
+//   mountSceneOutliner — **엔티티 목록(아웃라이너)** 단독 패널. 검색 + 타입 필터 칩 +
+//                        listbox(방향키 탐색). 통합자가 좌 패널로 이관할 수 있다.
+//   mountInspector     — 선택 대상 상세(관절 요약). options.showList=false면 목록을
+//                        그리지 않는다(목록은 아웃라이너가 소유).
+//
+// ── 왜 나뉘었나 (UX_AUDIT C-16) ─────────────────────────────────────
+// 목록은 *항상 보여야 하는 내비게이션 표면*이고, 속성은 *선택마다 통째로 바뀌며 세로
+// 공간을 독점하는 작업 표면*이다. 한 스크롤 컨테이너에 두면 선택을 바꾸려면 스크롤부터
+// 해야 한다(Blender/Isaac Sim/Unity/Figma 모두 분리한다). 같은 이유로 **읽기 전용
+// Transform 리드아웃을 제거**했다 — 편집 폼(entity-editor)이 같은 값을 편집 가능한 형태로
+// 이미 보여주므로 중복이었다. 이 패널의 상세는 편집 폼이 다루지 않는 것(관절 요약)만 남긴다.
+//
+// READ-ONLY 계약: 이 패널은 물리를 절대 변경하지 않는다 — 값은 InspectorDeps 콜백으로
+// 읽기만 한다(뷰에서 물리 pose를 역으로 쓰지 않는다 — CLAUDE.md 불변식 §2.1).
 //
 // 계층 규칙 (CLAUDE.md §3): ui는 core를 import하지 않는다. 글루(통합자)가 core 파사드
 // 위에서 InspectorDeps를 구현해 주입한다. 값 갱신은 통합자가 refresh()를 적당한 주기
@@ -12,30 +22,37 @@
 // 소유하지 않는다(주기 결정권은 통합자).
 //
 // 회전 표시 규약: 내부 진실은 쿼터니언 [x,y,z,w]다 (CLAUDE.md §4 "회전 표현").
-// 이 패널의 오일러(deg, XYZ 순서) 변환(quatToEulerDegXYZ)은 **표시 전용**이며
-// 역변환·저장 경로가 없다. 행 title(툴팁)로 원본 쿼터니언을 함께 노출한다.
+// 오일러(deg, XYZ) 변환(quatToEulerDegXYZ)은 **표시/입력 경계 전용**이며 이 파일에서는
+// entity-editor가 재사용하는 순수 헬퍼로만 남는다.
 //
-// 선택 통지: 목록 행 클릭(같은 행 재클릭 = 해제) 또는 핸들 select() 호출로 선택이
+// 선택 통지: 목록 행 클릭/Enter(같은 행 재활성화 = 해제) 또는 핸들 select() 호출로 선택이
 // "바뀔 때만" deps.onSelect가 불린다 — 통합자가 onSelect 안에서 같은 id로 select()를
-// 되돌려 불러도 루프가 생기지 않는다(변경 가드). 통합자는 onSelect에서
-// render/highlight.ts 펄스 등으로 반응할 수 있다.
+// 되돌려 불러도 루프가 생기지 않는다(변경 가드).
 //
-// 스타일: joint-panel.ts·dock과 같은 시각 언어(다크·모노스페이스·#2e3238 보더·접기
-// 토글)를 쓴다. joint-panel은 이 인스펙터로 대체될 임시 UI다(그 파일 헤더 참조) —
-// 통합자가 두 패널을 한 컨테이너로 재배치할 수 있도록 핸들에 el을 노출한다.
+// 접근성 (UX_AUDIT C-5): 엔티티 목록은 role="listbox" + role="option" + roving tabindex다.
+// 이전에는 행이 role도 tabIndex도 없는 div라 **키보드로 엔티티를 선택할 방법이 없었고**,
+// 선택이 안 되면 트랜스폼 편집·기즈모·관절 패널이 전부 닫혔다(WCAG 2.1.1 Level A).
 
 import {
+  BORDER_WIDTH,
   COLOR,
-  FONT,
+  ICON,
   LAYOUT,
   RADIUS,
   SHADOW,
   SPACE,
+  SURFACE,
+  TYPE,
   Z_INDEX,
+  applyType,
   ensureThemeStyles,
   makeButton,
+  makePanelHeader,
   styled,
 } from '../theme';
+import { icon } from '../icons';
+import type { IconName } from '../icons';
+import { rovingTabindex } from '../a11y';
 import type { Quat, Vec3 } from '../../schema/types';
 
 // ── 상수 (매직넘버 금지 — CLAUDE.md §4, 시각 토큰은 ui/theme.ts) ────
@@ -46,6 +63,8 @@ const PANEL_RIGHT_PX = 12;
 const PANEL_WIDTH_PX = LAYOUT.rightPanelWidthPx;
 /** 하단 독(본문 180px + 탭바 + 여백)을 침범하지 않는 최대 높이 여유 */
 const PANEL_BOTTOM_CLEARANCE_PX = 220;
+/** 본문 스크롤 영역 상한 (접기 트랜지션의 펼침 목표값) */
+const BODY_MAX_HEIGHT = '70vh';
 
 /** position/관절 값 표시 소수 자릿수 (미터/라디안, CLAUDE.md §4 단위 규약) */
 export const POSITION_DECIMALS = 3;
@@ -67,13 +86,22 @@ const QUAT_NORM_EPS = 1e-12;
 const JOINT_VALUE_COL_PX = 52;
 const JOINT_LIMITS_COL_PX = 104;
 
-// 시각 토큰은 ui/theme.ts가 소유한다 — 이 모듈은 토큰만 소비한다
-const COLOR_TEXT = COLOR.text;
-const COLOR_TEXT_STRONG = COLOR.textStrong;
-const COLOR_MUTED = COLOR.muted;
-const COLOR_LABEL = COLOR.label;
-const COLOR_BORDER = COLOR.border;
-const COLOR_ROW_BORDER = COLOR.borderSoft;
+/**
+ * 선택 대상이 없을 때의 **단일** 빈 상태 문구 (UX_AUDIT C-16).
+ * 인스펙터와 편집 폼이 각자 다른 문구를 동시에 노출하던 중복을 닫는다 —
+ * entity-editor가 이 상수를 import해 쓴다(문구의 단일 진실).
+ */
+export const EMPTY_SELECTION_HINT = '뷰포트나 아웃라이너에서 대상을 선택하세요';
+
+/** 아웃라이너 타입 필터 칩 (UX_AUDIT C-10 — 라이브러리엔 검색이 있고 목록엔 없던 비대칭) */
+export const ENTITY_TYPE_FILTERS: ReadonlyArray<{ type: string; label: string }> = [
+  { type: 'robot', label: '로봇' },
+  { type: 'object', label: '사물' },
+  { type: 'static', label: '정적' },
+];
+
+/** 인스턴스별 고유 id 접두사 (label htmlFor 연결이 인스턴스 간 충돌하지 않게) */
+let instanceSeq = 0;
 
 // ── 공개 타입 ───────────────────────────────────────────────────────
 
@@ -98,17 +126,29 @@ export interface InspectorJoint {
 
 /**
  * 글루(통합자)가 core 파사드 위에서 구현해 주입하는 읽기 전용 데이터 표면.
- * getPose/getJoints가 null이면 해당 섹션은 "없음"으로 표시된다
- * (예: 물리 바디 없는 엔티티의 pose, 로봇이 아닌 엔티티의 관절).
+ * getJoints가 null이면 관절 섹션이 생략된다(로봇이 아닌 엔티티).
  */
 export interface InspectorDeps {
   listEntities(): Array<{ id: string; type: string }>;
+  /**
+   * @deprecated 읽기 전용 Transform 리드아웃은 편집 폼과 중복이라 제거됐다(UX_AUDIT C-16).
+   * 시그니처 호환을 위해 남긴다 — 이 패널은 더 이상 호출하지 않는다.
+   */
   getPose(
     id: string,
   ): { position: [number, number, number]; rotation: [number, number, number, number] } | null;
   getJoints(id: string): Array<{ name: string; valueRad: number; limits?: [number, number] }> | null;
-  /** 선택이 "바뀔 때만" 통지 (클릭·select() 공통, 변경 가드 — 파일 헤더 참조) */
+  /** 선택이 "바뀔 때만" 통지 (활성화·select() 공통, 변경 가드 — 파일 헤더 참조) */
   onSelect?(id: string | null): void;
+}
+
+/** mountInspector 선택 옵션 — 기존 2인자 호출과 호환된다 */
+export interface InspectorOptions {
+  /**
+   * 엔티티 목록(아웃라이너)을 이 패널 안에 그릴지. 기본 true.
+   * false면 목록은 mountSceneOutliner가 소유한다(좌 패널 이관 — UX_AUDIT C-16).
+   */
+  showList?: boolean;
 }
 
 export interface InspectorHandle {
@@ -122,13 +162,30 @@ export interface InspectorHandle {
   dispose(): void;
 }
 
+/** 아웃라이너가 요구하는 최소 표면 — InspectorDeps가 구조적으로 그대로 대입된다 */
+export interface SceneOutlinerDeps {
+  listEntities(): Array<{ id: string; type: string }>;
+  /** 선택이 "바뀔 때만" 통지 */
+  onSelect?(id: string | null): void;
+}
+
+export interface SceneOutlinerHandle {
+  readonly el: HTMLElement;
+  /** 현재 선택 id (없으면 null) */
+  readonly selectedId: string | null;
+  refresh(): void;
+  select(id: string | null): void;
+  dispose(): void;
+}
+
 // ── 순수 헬퍼 (DOM 비의존 — node 단위 테스트 대상) ───────────────────
 
 /**
  * 쿼터니언 [x,y,z,w] → 오일러 각(deg) [x,y,z] — Tait-Bryan **XYZ 순서**
  * (three.js `Euler` 기본 순서와 동일한 행렬 추출식).
  *
- * **표시 전용**이다: 내부 진실은 쿼터니언이며(CLAUDE.md §4) 이 값을 되쓰는 경로는 없다.
+ * **표시/입력 경계 전용**이다: 내부 진실은 쿼터니언이며(CLAUDE.md §4) 이 값을 되쓰는
+ * 경로는 entity-editor의 eulerDegToQuat(역변환 쌍) 하나뿐이다.
  * 입력은 정규화하지 않아도 된다(내부 정규화). 노름이 0에 가까우면 [0,0,0]을 돌려준다.
  * |y|=90° 짐벌락에서는 z=0으로 고정하고 나머지를 x에 흡수한다(three.js와 동일 규약).
  */
@@ -202,7 +259,7 @@ export function formatLimits(limits?: [number, number]): string {
   return `[${formatFixed(lower, JOINT_VALUE_DECIMALS)}, ${formatFixed(upper, JOINT_VALUE_DECIMALS)}]`;
 }
 
-/** 목록 행 클릭 의미론: 이미 선택된 행을 다시 클릭하면 해제(null), 아니면 그 행 선택 */
+/** 목록 행 활성화 의미론: 이미 선택된 행을 다시 활성화하면 해제(null), 아니면 그 행 선택 */
 export function nextSelection(current: string | null, clickedId: string): string | null {
   return current === clickedId ? null : clickedId;
 }
@@ -224,52 +281,450 @@ export function entityListKey(entities: ReadonlyArray<{ id: string; type: string
   return entities.map((e) => `${e.id}${FIELD_SEP}${e.type}`).join(ENTRY_SEP);
 }
 
-/** 엔티티 type → 목록 아이콘/한국어 라벨 (미지 type은 원문 그대로 라벨) */
-export function entityTypeMeta(type: string): { icon: string; label: string } {
+/**
+ * 아웃라이너 필터 판정 (UX_AUDIT C-10).
+ * 타입 칩이 하나도 켜져 있지 않으면 타입 제한 없음, 검색어는 id/type 부분 일치(대소문자 무시).
+ */
+export function matchesEntityFilter(
+  entity: { id: string; type: string },
+  query: string,
+  types: ReadonlySet<string>,
+): boolean {
+  if (types.size > 0 && !types.has(entity.type)) return false;
+  const q = query.trim().toLowerCase();
+  if (q === '') return true;
+  return entity.id.toLowerCase().includes(q) || entity.type.toLowerCase().includes(q);
+}
+
+/** 엔티티 type → 목록 아이콘(SVG 이름)/한국어 라벨 (미지 type은 원문 그대로 라벨) */
+export function entityTypeMeta(type: string): { icon: IconName; label: string } {
   switch (type) {
     case 'robot':
-      return { icon: '🦾', label: '로봇' };
+      return { icon: 'robotArm', label: '로봇' };
     case 'object':
-      return { icon: '▣', label: '사물' };
+      return { icon: 'shapeBox', label: '사물' };
     case 'static':
-      return { icon: '▤', label: '정적' };
+      return { icon: 'shapePlane', label: '정적' };
     default:
-      return { icon: '◌', label: type };
+      return { icon: 'layers', label: type };
   }
+}
+
+// ── 슬라이더 트랙 채움 (UX_AUDIT C-18 — joint-panel/node-editor 공용) ─
+
+/** 부호를 걸치는 범위인가 (min < 0 < max) — 채움 기준점이 min이 아니라 0이어야 한다 */
+export function isBipolarRange(minValue: number, maxValue: number): boolean {
+  return minValue < 0 && maxValue > 0;
+}
+
+/**
+ * `--rsw-range-track`에 써 넣을 배경(linear-gradient) 문자열.
+ *
+ * 단극(0..max, 예: 그리퍼)은 기존대로 min→thumb 채움이 옳다. 그러나 부호를 걸치는
+ * 관절 범위에서 min→thumb 채움은 **의미가 틀리다**: limits ±2.0에서 -0.600이 "35% 진행"
+ * 처럼 읽히고 0.000이 "절반 열림"으로 보인다(UX_AUDIT C-18). 이 함수는 부호 있는 범위에서
+ * **0에서 썸까지만** 채우고 0 지점에 1px 틱을 그린다(틱 레이어가 채움 레이어 위에 온다).
+ */
+export function rangeTrackGradient(value: number, minValue: number, maxValue: number): string {
+  const span = maxValue - minValue;
+  const track = SURFACE.sunken;
+  const fillColor = COLOR.accent;
+  if (!Number.isFinite(span) || span <= 0) return track;
+  const pct = (v: number): number => {
+    const ratio = (v - minValue) / span;
+    return Math.min(Math.max(ratio, 0), 1) * 100;
+  };
+  const valuePct = pct(Number.isFinite(value) ? value : minValue);
+  if (!isBipolarRange(minValue, maxValue)) {
+    return (
+      `linear-gradient(to right, ${fillColor} 0 ${valuePct}%, ` +
+      `${track} ${valuePct}% 100%)`
+    );
+  }
+  const zeroPct = pct(0);
+  const lo = Math.min(zeroPct, valuePct);
+  const hi = Math.max(zeroPct, valuePct);
+  const tick =
+    `linear-gradient(to right, transparent 0 calc(${zeroPct}% - 0.5px), ` +
+    `${COLOR.muted} calc(${zeroPct}% - 0.5px) calc(${zeroPct}% + 0.5px), ` +
+    `transparent calc(${zeroPct}% + 0.5px) 100%)`;
+  const fill =
+    `linear-gradient(to right, ${track} 0 ${lo}%, ` +
+    `${fillColor} ${lo}% ${hi}%, ${track} ${hi}% 100%)`;
+  return `${tick}, ${fill}`;
+}
+
+/**
+ * range 입력을 디자인 시스템 슬라이더로 만든다(채움 갱신 함수를 돌려준다).
+ * 값이 바뀔 때마다 paint(value)를 호출해야 트랙 채움이 값과 동기화된다.
+ */
+export function attachRangeFill(
+  input: HTMLInputElement,
+  minValue: number,
+  maxValue: number,
+): (value: number) => void {
+  input.classList.add('ui-range');
+  if (isBipolarRange(minValue, maxValue)) input.classList.add('ui-range--bipolar');
+  return (value: number): void => {
+    input.style.setProperty('--rsw-range-track', rangeTrackGradient(value, minValue, maxValue));
+  };
 }
 
 // ── 내부 DOM 헬퍼 ───────────────────────────────────────────────────
 
 /** 섹션 캡션 (muted 소제목) */
 function caption(text: string): HTMLElement {
-  const el = styled(document.createElement('div'), {
-    color: COLOR_MUTED,
-    fontSize: '11px',
-    margin: '8px 0 2px 0',
-  });
+  const el = applyType(document.createElement('div'), TYPE.caption);
+  styled(el, { color: COLOR.muted, margin: `${SPACE.xl} 0 ${SPACE.xxs} 0` });
   el.textContent = text;
   return el;
 }
 
 /** muted 안내/플레이스홀더 줄 */
 function mutedLine(text: string): HTMLElement {
-  const el = styled(document.createElement('div'), {
-    color: COLOR_MUTED,
-    padding: '2px 0',
-  });
+  const el = applyType(document.createElement('div'), TYPE.body);
+  styled(el, { color: COLOR.muted, padding: `${SPACE.xs} 0`, whiteSpace: 'normal' });
   el.textContent = text;
   return el;
 }
 
-// ── 마운트 ──────────────────────────────────────────────────────────
+// ── 엔티티 목록 뷰 (아웃라이너 본체 — 두 마운트가 공유한다) ──────────
+
+interface EntityListView {
+  readonly el: HTMLElement;
+  /** 목록 재독 (변경 없으면 DOM 재구축 생략) */
+  refresh(): void;
+  /** 선택 시각 갱신 */
+  setSelected(id: string | null): void;
+  dispose(): void;
+}
+
+/**
+ * 검색 + 타입 필터 칩 + listbox(방향키 탐색)로 이뤄진 엔티티 목록.
+ * 선택 상태는 소유자가 갖는다 — 이 뷰는 활성화된 id를 onActivate로 올려보낼 뿐이다.
+ */
+function createEntityListView(
+  deps: SceneOutlinerDeps,
+  onActivate: (id: string) => void,
+): EntityListView {
+  const idPrefix = `rsw-outliner-${(instanceSeq += 1)}`;
+  const root = styled(document.createElement('div'), {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: SPACE.sm,
+    minWidth: '0',
+  });
+
+  // 검색
+  const searchRow = styled(document.createElement('div'), {
+    display: 'flex',
+    alignItems: 'center',
+    gap: SPACE.xs,
+  });
+  const searchIcon = styled(document.createElement('span'), {
+    color: COLOR.muted,
+    display: 'flex',
+    flex: 'none',
+  });
+  searchIcon.appendChild(icon('search', ICON.sm));
+  const searchId = `${idPrefix}-search`;
+  const searchInput = document.createElement('input');
+  searchInput.type = 'search';
+  searchInput.className = 'ui-input';
+  searchInput.id = searchId;
+  searchInput.placeholder = '엔티티 검색…';
+  searchInput.dataset.testid = 'outliner-search';
+  styled(searchInput, { flex: '1 1 auto', minWidth: '0', boxSizing: 'border-box' });
+  // 아이콘+플레이스홀더만으로는 가시 라벨이 없다 — 이름은 sr-only 라벨이 htmlFor로 준다
+  const searchLabel = document.createElement('label');
+  searchLabel.className = 'sr-only';
+  searchLabel.htmlFor = searchId;
+  searchLabel.textContent = '엔티티 검색';
+  searchRow.appendChild(searchLabel);
+  searchRow.appendChild(searchIcon);
+  searchRow.appendChild(searchInput);
+  root.appendChild(searchRow);
+
+  // 타입 필터 칩 (다중 선택 — 아무것도 안 켜면 전체)
+  const chipRow = styled(document.createElement('div'), {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: SPACE.xs,
+  });
+  chipRow.setAttribute('role', 'group');
+  chipRow.setAttribute('aria-label', '엔티티 타입 필터');
+  const activeTypes = new Set<string>();
+  for (const filter of ENTITY_TYPE_FILTERS) {
+    const button = makeButton(
+      filter.label,
+      `${filter.label}만 보기 (다시 누르면 해제)`,
+      `outliner-filter-${filter.type}`,
+      'ghost',
+    );
+    styled(button, { padding: `${SPACE.xxs} ${SPACE.sm}`, minHeight: '24px' });
+    button.setAttribute('aria-pressed', 'false');
+    button.addEventListener('click', () => {
+      if (activeTypes.has(filter.type)) activeTypes.delete(filter.type);
+      else activeTypes.add(filter.type);
+      const on = activeTypes.has(filter.type);
+      button.setAttribute('aria-pressed', String(on));
+      button.classList.toggle('ui-btn--active', on);
+      render(true);
+    });
+    chipRow.appendChild(button);
+  }
+  root.appendChild(chipRow);
+
+  const listCaption = caption('엔티티');
+  styled(listCaption, { margin: `${SPACE.xxs} 0 ${SPACE.xxs} 0` });
+  root.appendChild(listCaption);
+
+  // listbox (WAI-ARIA APG — 행이 role="option"일 때만 aria-selected가 유효하다)
+  const listEl = styled(document.createElement('div'), {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: SPACE.hair,
+    minWidth: '0',
+  });
+  listEl.dataset.testid = 'inspector-entities';
+  listEl.setAttribute('role', 'listbox');
+  listEl.setAttribute('aria-label', '씬 엔티티');
+  root.appendChild(listEl);
+
+  // 빈 상태는 listbox **바깥**에 둔다 — role="listbox"의 자식은 option이어야 한다
+  const emptyLine = mutedLine('엔티티 없음');
+  emptyLine.dataset.testid = 'outliner-empty';
+  emptyLine.style.display = 'none';
+  root.appendChild(emptyLine);
+
+  const rowById = new Map<string, HTMLElement>();
+  let renderedKey: string | null = null;
+  let selectedId: string | null = null;
+
+  const roving = rovingTabindex(listEl, [], {
+    orientation: 'vertical',
+    onActivate: (el) => {
+      const id = el.dataset.entityId;
+      if (id !== undefined) onActivate(id);
+    },
+  });
+
+  const paintSelection = (): void => {
+    for (const [id, row] of rowById) {
+      // 선택 시각은 클래스 토글 — hover 스타일과 공존한다 (theme .rsw-entity-row--selected)
+      row.classList.toggle('rsw-entity-row--selected', id === selectedId);
+      row.setAttribute('aria-selected', String(id === selectedId));
+    }
+  };
+
+  const buildRow = (entity: { id: string; type: string }): HTMLElement => {
+    const meta = entityTypeMeta(entity.type);
+    const row = styled(document.createElement('div'), {
+      display: 'grid',
+      gridTemplateColumns: 'auto 1fr auto',
+      alignItems: 'center',
+      columnGap: SPACE.sm,
+      padding: `${SPACE.xxs} ${SPACE.sm}`,
+    });
+    // hover/선택 시각은 theme 클래스 소유 (.rsw-entity-row[--selected])
+    row.classList.add('rsw-entity-row');
+    row.dataset.testid = 'inspector-entity';
+    row.dataset.entityId = entity.id;
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', 'false');
+
+    const iconCell = styled(document.createElement('span'), {
+      color: COLOR.muted,
+      display: 'flex',
+      flex: 'none',
+    });
+    iconCell.appendChild(icon(meta.icon, ICON.sm));
+
+    const idCell = applyType(document.createElement('span'), TYPE.body);
+    styled(idCell, {
+      color: COLOR.text,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+    });
+    idCell.textContent = entity.id;
+    idCell.title = entity.id;
+
+    const typeCell = applyType(document.createElement('span'), TYPE.micro);
+    styled(typeCell, { color: COLOR.muted, flex: 'none' });
+    typeCell.textContent = meta.label;
+
+    row.appendChild(iconCell);
+    row.appendChild(idCell);
+    row.appendChild(typeCell);
+    row.addEventListener('click', () => {
+      onActivate(entity.id);
+    });
+    return row;
+  };
+
+  /** @param force 필터 변경 등 목록 키가 같아도 다시 그려야 할 때 */
+  function render(force = false): void {
+    const entities = deps.listEntities();
+    const visible = entities.filter((e) =>
+      matchesEntityFilter(e, searchInput.value, activeTypes),
+    );
+    const key = entityListKey(visible);
+    listCaption.textContent =
+      visible.length === entities.length
+        ? `엔티티 (${entities.length})`
+        : `엔티티 (${visible.length}/${entities.length})`;
+    if (!force && key === renderedKey) return;
+    renderedKey = key;
+
+    listEl.replaceChildren();
+    rowById.clear();
+    if (visible.length === 0) {
+      emptyLine.textContent = entities.length === 0 ? '엔티티 없음' : '검색 결과 없음';
+      emptyLine.style.display = '';
+      listEl.style.display = 'none';
+      roving.setItems([]);
+      return;
+    }
+    emptyLine.style.display = 'none';
+    listEl.style.display = '';
+    const rows: HTMLElement[] = [];
+    for (const entity of visible) {
+      const row = buildRow(entity);
+      listEl.appendChild(row);
+      rowById.set(entity.id, row);
+      rows.push(row);
+    }
+    roving.setItems(rows);
+    paintSelection();
+  }
+
+  searchInput.addEventListener('input', () => {
+    render(true);
+  });
+
+  render(true);
+
+  return {
+    el: root,
+    refresh: (): void => {
+      render();
+    },
+    setSelected: (id): void => {
+      selectedId = id;
+      paintSelection();
+    },
+    dispose: (): void => {
+      roving.dispose();
+      root.remove();
+    },
+  };
+}
+
+// ── 씬 아웃라이너 (독립 마운트 — 통합자가 좌 패널로 배치) ────────────
+
+/**
+ * 엔티티 목록(아웃라이너)을 host에 마운트한다.
+ *
+ * 우측 인스펙터에서 분리된 표면이다(UX_AUDIT C-16) — 통합자가 좌 패널(라이브러리 아래)에
+ * 두면 "선택을 바꾸려면 스크롤부터 해야 한다"가 사라진다. 배치는 통합자가 el로 결정한다.
+ */
+export function mountSceneOutliner(
+  host: HTMLElement,
+  deps: SceneOutlinerDeps,
+): SceneOutlinerHandle {
+  ensureThemeStyles();
+  const panel = styled(document.createElement('div'), {
+    width: '100%',
+    boxSizing: 'border-box',
+    display: 'flex',
+    flexDirection: 'column',
+    minHeight: '0',
+    background: COLOR.bgPanel,
+    border: `${BORDER_WIDTH.hair} solid ${COLOR.border}`,
+    borderRadius: RADIUS.md,
+    color: COLOR.text,
+    userSelect: 'none',
+  });
+  applyType(panel, TYPE.body);
+  panel.dataset.testid = 'scene-outliner';
+
+  const header = makePanelHeader('씬 아웃라이너', {
+    collapsible: true,
+    testId: 'scene-outliner-header',
+  });
+  panel.appendChild(header.el);
+
+  const body = styled(document.createElement('div'), {
+    overflowY: 'auto',
+    minHeight: '0',
+    maxHeight: BODY_MAX_HEIGHT,
+    opacity: '1',
+    padding: `${SPACE.md} ${SPACE.lg} ${SPACE.lg} ${SPACE.lg}`,
+  });
+  body.classList.add('ui-scroll', 'ui-collapsible');
+  panel.appendChild(body);
+
+  let selectedId: string | null = null;
+
+  const applySelection = (requested: string | null): void => {
+    const ids = deps.listEntities().map((e) => e.id);
+    const resolved = resolveSelection(ids, requested);
+    const changed = resolved !== selectedId;
+    selectedId = resolved;
+    view.setSelected(selectedId);
+    if (changed) deps.onSelect?.(resolved);
+  };
+
+  const view = createEntityListView(deps, (id) => {
+    applySelection(nextSelection(selectedId, id));
+  });
+  body.appendChild(view.el);
+
+  header.onToggle((collapsed) => {
+    body.style.maxHeight = collapsed ? '0' : BODY_MAX_HEIGHT;
+    body.style.opacity = collapsed ? '0' : '1';
+    body.style.paddingTop = collapsed ? '0' : SPACE.md;
+    body.style.paddingBottom = collapsed ? '0' : SPACE.lg;
+    body.style.overflowY = collapsed ? 'hidden' : 'auto';
+  });
+
+  host.appendChild(panel);
+
+  return {
+    el: panel,
+    get selectedId(): string | null {
+      return selectedId;
+    },
+    refresh: (): void => {
+      view.refresh();
+      // 선택 엔티티가 목록에서 사라졌으면 해제 (변경 시 onSelect 통지)
+      applySelection(selectedId);
+    },
+    select: (id): void => {
+      applySelection(id);
+    },
+    dispose: (): void => {
+      view.dispose();
+      panel.remove();
+    },
+  };
+}
+
+// ── 인스펙터 마운트 ─────────────────────────────────────────────────
 
 /**
  * 인스펙터를 host에 마운트한다 (우측 절대 배치 — 상단 재생 바 아래).
  * 패널 내부 포인터/휠은 stopPropagation으로 흡수한다 — 뷰포트 orbit 컨트롤로
  * 새지 않게 하는 기존 패널 규약(joint-panel/dock)과 동일.
  */
-export function mountInspector(host: HTMLElement, deps: InspectorDeps): InspectorHandle {
+export function mountInspector(
+  host: HTMLElement,
+  deps: InspectorDeps,
+  options: InspectorOptions = {},
+): InspectorHandle {
   ensureThemeStyles();
+  const showList = options.showList ?? true;
   const panel = styled(document.createElement('div'), {
     position: 'absolute',
     top: `${PANEL_TOP_PX}px`,
@@ -280,16 +735,14 @@ export function mountInspector(host: HTMLElement, deps: InspectorDeps): Inspecto
     display: 'flex',
     flexDirection: 'column',
     background: COLOR.bgPanel,
-    border: `1px solid ${COLOR_BORDER}`,
+    border: `${BORDER_WIDTH.hair} solid ${COLOR.border}`,
     borderRadius: RADIUS.md,
     boxShadow: SHADOW.panel,
-    color: COLOR_TEXT,
-    fontFamily: FONT.ui,
-    fontSize: '12px',
-    lineHeight: '1.5',
+    color: COLOR.text,
     boxSizing: 'border-box',
     userSelect: 'none',
   });
+  applyType(panel, TYPE.body);
   panel.dataset.testid = 'inspector';
   for (const type of ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'contextmenu']) {
     panel.addEventListener(type, (e) => {
@@ -297,153 +750,95 @@ export function mountInspector(host: HTMLElement, deps: InspectorDeps): Inspecto
     });
   }
 
-  // 헤더: 타이틀 + 접기 토글 (dock과 동일한 ▾/▴ 규약)
-  const header = styled(document.createElement('div'), {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: SPACE.md,
-    padding: `${SPACE.sm} 10px`,
-    borderBottom: `1px solid ${COLOR_ROW_BORDER}`,
-    flexShrink: '0',
-  });
-  const title = styled(document.createElement('strong'), {
-    color: COLOR_TEXT_STRONG,
-    fontSize: '13px',
-  });
-  title.textContent = 'Inspector';
-  header.appendChild(title);
+  // 헤더 — 셰브론 회전 규약은 makePanelHeader가 소유한다(수제 ▾/▴ 제거, UX_AUDIT C-18)
+  const header = makePanelHeader('인스펙터', { collapsible: true, testId: 'inspector-header' });
+  // 구 testId 유지 (측정 스크립트/문서 참조 호환)
+  if (header.collapseButton !== null) header.collapseButton.dataset.testid = 'inspector-collapse';
+  panel.appendChild(header.el);
 
-  const collapseButton = makeButton('▾ 접기', '패널 접기/펼치기', 'inspector-collapse', 'ghost');
-  styled(collapseButton, { padding: '0 4px' });
-  header.appendChild(collapseButton);
-  panel.appendChild(header);
-
-  // 본문 (스크롤 영역): 엔티티 목록 + 상세 — 접기는 max-height 트랜지션 (.ui-collapsible)
+  // 본문 (스크롤 영역): (선택적) 엔티티 목록 + 상세 — 접기는 max-height 트랜지션
   const body = styled(document.createElement('div'), {
     overflowY: 'auto',
     minHeight: '0',
-    maxHeight: '70vh',
+    maxHeight: BODY_MAX_HEIGHT,
     opacity: '1',
-    padding: '6px 10px 10px 10px',
+    padding: `${SPACE.md} ${SPACE.lg} ${SPACE.lg} ${SPACE.lg}`,
   });
   body.classList.add('ui-scroll', 'ui-collapsible');
   panel.appendChild(body);
 
-  const listCaption = caption('엔티티');
-  const listContainer = document.createElement('div');
-  listContainer.dataset.testid = 'inspector-entities';
   const detailContainer = document.createElement('div');
   detailContainer.dataset.testid = 'inspector-detail';
-  body.appendChild(listCaption);
-  body.appendChild(listContainer);
-  body.appendChild(detailContainer);
 
   // ── 상태 (뷰 상태는 ui 소유 — 시뮬 진실은 deps 콜백 너머의 core) ──
   let selectedId: string | null = null;
-  let collapsed = false;
-  let renderedListKey: string | null = null;
-  const rowById = new Map<string, HTMLElement>();
 
-  const paintCollapse = (): void => {
-    body.style.maxHeight = collapsed ? '0' : '70vh';
+  const listView: EntityListView | null = showList
+    ? createEntityListView(deps, (id) => {
+        applySelection(nextSelection(selectedId, id));
+      })
+    : null;
+  if (listView !== null) body.appendChild(listView.el);
+  body.appendChild(detailContainer);
+
+  header.onToggle((collapsed) => {
+    body.style.maxHeight = collapsed ? '0' : BODY_MAX_HEIGHT;
     body.style.opacity = collapsed ? '0' : '1';
-    body.style.paddingTop = collapsed ? '0' : '6px';
-    body.style.paddingBottom = collapsed ? '0' : '10px';
+    body.style.paddingTop = collapsed ? '0' : SPACE.md;
+    body.style.paddingBottom = collapsed ? '0' : SPACE.lg;
     body.style.overflowY = collapsed ? 'hidden' : 'auto';
-    collapseButton.textContent = collapsed ? '▴ 펼치기' : '▾ 접기';
-    collapseButton.setAttribute('aria-expanded', String(!collapsed));
-  };
-  collapseButton.addEventListener('click', () => {
-    collapsed = !collapsed;
-    paintCollapse();
   });
-  paintCollapse();
 
-  const paintListSelection = (): void => {
-    for (const [id, row] of rowById) {
-      // 선택 시각은 클래스 토글 — hover 스타일과 공존한다 (theme .rsw-entity-row--selected)
-      row.classList.toggle('rsw-entity-row--selected', id === selectedId);
-      row.setAttribute('aria-selected', String(id === selectedId));
-    }
-  };
-
-  // ── 상세 렌더 (읽기 전용 리드아웃 — refresh마다 재구축) ────────────
+  // ── 상세 렌더 (편집 폼이 다루지 않는 것만 — Transform 중복 제거, C-16) ─
   const renderDetail = (): void => {
     detailContainer.replaceChildren();
     if (selectedId === null) {
-      detailContainer.appendChild(caption('상세'));
-      detailContainer.appendChild(mutedLine('엔티티를 선택하면 상태가 표시됩니다'));
+      // 빈 상태 문구는 편집 폼이 하나만 낸다 (EMPTY_SELECTION_HINT — 중복 제거)
+      detailContainer.style.display = 'none';
       return;
     }
+    detailContainer.style.display = '';
 
     const entity = deps.listEntities().find((e) => e.id === selectedId);
     const meta = entityTypeMeta(entity?.type ?? '');
 
-    detailContainer.appendChild(caption('상세'));
+    // 선택 대상 헤드라인 (아이콘 + id + 타입)
     const idRow = styled(document.createElement('div'), {
       display: 'flex',
-      alignItems: 'baseline',
+      alignItems: 'center',
       justifyContent: 'space-between',
-      gap: '8px',
-      padding: '1px 0',
+      gap: SPACE.md,
+      padding: `${SPACE.xs} 0`,
     });
-    const idText = styled(document.createElement('span'), {
-      color: COLOR_TEXT_STRONG,
+    const idText = applyType(document.createElement('span'), TYPE.bodyStrong);
+    styled(idText, {
+      color: COLOR.textStrong,
+      display: 'flex',
+      alignItems: 'center',
+      gap: SPACE.xs,
+      overflow: 'hidden',
+      minWidth: '0',
+    });
+    const idIcon = styled(document.createElement('span'), {
+      display: 'flex',
+      flex: 'none',
+      color: COLOR.muted,
+    });
+    idIcon.appendChild(icon(meta.icon, ICON.md));
+    const idLabel = styled(document.createElement('span'), {
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap',
     });
-    idText.textContent = `${meta.icon} ${selectedId}`;
-    const typeBadge = styled(document.createElement('span'), {
-      color: COLOR_LABEL,
-      fontSize: '11px',
-      flexShrink: '0',
-    });
+    idLabel.textContent = selectedId;
+    idText.appendChild(idIcon);
+    idText.appendChild(idLabel);
+    const typeBadge = applyType(document.createElement('span'), TYPE.micro);
+    styled(typeBadge, { color: COLOR.label, flex: 'none' });
     typeBadge.textContent = meta.label;
     idRow.appendChild(idText);
     idRow.appendChild(typeBadge);
     detailContainer.appendChild(idRow);
-
-    // Transform — 물리(진실)에서 읽은 pose 리드아웃 (편집 없음)
-    detailContainer.appendChild(caption('Transform'));
-    const pose = deps.getPose(selectedId);
-    if (pose === null) {
-      detailContainer.appendChild(mutedLine('pose 없음 (물리 바디 미등록)'));
-    } else {
-      const positionLabel = styled(document.createElement('div'), {
-        color: COLOR_LABEL,
-        fontSize: '11px',
-      });
-      positionLabel.textContent = 'position (m)';
-      const positionValue = styled(document.createElement('div'), {
-        color: COLOR_TEXT_STRONG,
-        fontFamily: FONT.mono,
-        padding: '0 0 2px 8px',
-      });
-      positionValue.dataset.testid = 'inspector-position';
-      positionValue.textContent = formatPosition(pose.position);
-
-      const rotationLabel = styled(document.createElement('div'), {
-        color: COLOR_LABEL,
-        fontSize: '11px',
-      });
-      rotationLabel.textContent = 'rotation (deg)';
-      const rotationValue = styled(document.createElement('div'), {
-        color: COLOR_TEXT_STRONG,
-        fontFamily: FONT.mono,
-        padding: '0 0 2px 8px',
-      });
-      rotationValue.dataset.testid = 'inspector-rotation';
-      // 오일러는 표시 전용 — 원본(진실) 쿼터니언은 툴팁으로 노출 (CLAUDE.md §4)
-      rotationValue.textContent = formatEulerDeg(quatToEulerDegXYZ(pose.rotation));
-      rotationValue.title = `${quatReadout(pose.rotation)} — 내부 진실은 쿼터니언, 오일러(XYZ)는 표시 전용`;
-
-      detailContainer.appendChild(positionLabel);
-      detailContainer.appendChild(positionValue);
-      detailContainer.appendChild(rotationLabel);
-      detailContainer.appendChild(rotationValue);
-    }
 
     // 관절 (로봇 엔티티만 — getJoints가 null이면 섹션 자체를 생략)
     const joints = deps.getJoints(selectedId);
@@ -453,13 +848,14 @@ export function mountInspector(host: HTMLElement, deps: InspectorDeps): Inspecto
         detailContainer.appendChild(mutedLine('없음'));
       } else {
         const gridColumns = `1fr ${JOINT_VALUE_COL_PX}px ${JOINT_LIMITS_COL_PX}px`;
-        const head = styled(document.createElement('div'), {
+        const head = applyType(document.createElement('div'), TYPE.micro);
+        styled(head, {
           display: 'grid',
           gridTemplateColumns: gridColumns,
-          columnGap: '6px',
-          color: COLOR_MUTED,
-          fontSize: '11px',
-          borderBottom: `1px solid ${COLOR_ROW_BORDER}`,
+          columnGap: SPACE.sm,
+          color: COLOR.muted,
+          borderBottom: `${BORDER_WIDTH.hair} solid ${COLOR.borderSoft}`,
+          padding: `0 0 ${SPACE.xxs} 0`,
         });
         for (const [text, align] of [
           ['이름', 'left'],
@@ -476,14 +872,15 @@ export function mountInspector(host: HTMLElement, deps: InspectorDeps): Inspecto
           const row = styled(document.createElement('div'), {
             display: 'grid',
             gridTemplateColumns: gridColumns,
-            columnGap: '6px',
-            padding: '1px 0',
+            columnGap: SPACE.sm,
+            padding: `${SPACE.hair} 0`,
           });
           row.dataset.testid = 'inspector-joint';
           row.dataset.joint = joint.name;
 
-          const nameCell = styled(document.createElement('span'), {
-            color: COLOR_LABEL,
+          const nameCell = applyType(document.createElement('span'), TYPE.body);
+          styled(nameCell, {
+            color: COLOR.label,
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
@@ -491,16 +888,13 @@ export function mountInspector(host: HTMLElement, deps: InspectorDeps): Inspecto
           nameCell.textContent = joint.name;
           nameCell.title = joint.name;
 
-          const valueCell = styled(document.createElement('span'), {
-            color: COLOR_TEXT_STRONG,
-            fontFamily: FONT.mono,
-            textAlign: 'right',
-          });
+          const valueCell = applyType(document.createElement('span'), TYPE.monoReadout);
+          styled(valueCell, { color: COLOR.textStrong, textAlign: 'right' });
           valueCell.textContent = formatFixed(joint.valueRad, JOINT_VALUE_DECIMALS);
 
-          const limitsCell = styled(document.createElement('span'), {
-            color: COLOR_MUTED,
-            fontFamily: FONT.mono,
+          const limitsCell = applyType(document.createElement('span'), TYPE.monoMicro);
+          styled(limitsCell, {
+            color: COLOR.muted,
             textAlign: 'right',
             whiteSpace: 'nowrap',
           });
@@ -515,85 +909,21 @@ export function mountInspector(host: HTMLElement, deps: InspectorDeps): Inspecto
     }
   };
 
-  // ── 선택 적용 (클릭·select() 공통 경로 — 변경 시에만 onSelect 통지) ─
-  const applySelection = (requested: string | null): void => {
+  // ── 선택 적용 (활성화·select() 공통 경로 — 변경 시에만 onSelect 통지) ─
+  function applySelection(requested: string | null): void {
     const ids = deps.listEntities().map((e) => e.id);
     const resolved = resolveSelection(ids, requested);
     const changed = resolved !== selectedId;
     selectedId = resolved;
-    paintListSelection();
+    listView?.setSelected(selectedId);
     renderDetail();
     if (changed) deps.onSelect?.(resolved);
-  };
-
-  // ── 목록 렌더 (id/type/순서가 바뀔 때만 재구축 — refresh의 DOM 변동 최소화) ─
-  const renderList = (entities: ReadonlyArray<{ id: string; type: string }>): void => {
-    listContainer.replaceChildren();
-    rowById.clear();
-    listCaption.textContent = `엔티티 (${entities.length})`;
-    if (entities.length === 0) {
-      listContainer.appendChild(mutedLine('엔티티 없음'));
-      return;
-    }
-    for (const entity of entities) {
-      const meta = entityTypeMeta(entity.type);
-      const row = styled(document.createElement('div'), {
-        display: 'grid',
-        gridTemplateColumns: 'auto 1fr auto',
-        alignItems: 'baseline',
-        columnGap: '6px',
-        padding: '1px 6px',
-      });
-      // hover/선택 시각은 theme 클래스 소유 (.rsw-entity-row[--selected])
-      row.classList.add('rsw-entity-row');
-      row.dataset.testid = 'inspector-entity';
-      row.dataset.entityId = entity.id;
-
-      const icon = styled(document.createElement('span'), { fontSize: '11px' });
-      icon.textContent = meta.icon;
-      const idCell = styled(document.createElement('span'), {
-        color: COLOR_TEXT,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-      });
-      idCell.textContent = entity.id;
-      idCell.title = entity.id;
-      const typeCell = styled(document.createElement('span'), {
-        color: COLOR_MUTED,
-        fontSize: '11px',
-      });
-      typeCell.textContent = meta.label;
-
-      row.appendChild(icon);
-      row.appendChild(idCell);
-      row.appendChild(typeCell);
-      row.addEventListener('click', () => {
-        applySelection(nextSelection(selectedId, entity.id));
-      });
-      listContainer.appendChild(row);
-      rowById.set(entity.id, row);
-    }
-  };
+  }
 
   const refresh = (): void => {
-    const entities = deps.listEntities();
-    const key = entityListKey(entities);
-    if (key !== renderedListKey) {
-      renderedListKey = key;
-      renderList(entities);
-      // 선택 엔티티가 목록에서 사라졌으면 해제 (변경 시 onSelect 통지)
-      const resolved = resolveSelection(
-        entities.map((e) => e.id),
-        selectedId,
-      );
-      if (resolved !== selectedId) {
-        selectedId = resolved;
-        deps.onSelect?.(resolved);
-      }
-      paintListSelection();
-    }
-    renderDetail();
+    listView?.refresh();
+    // 선택 엔티티가 목록에서 사라졌으면 해제 (변경 시 onSelect 통지)
+    applySelection(selectedId);
   };
 
   host.appendChild(panel);
@@ -606,6 +936,7 @@ export function mountInspector(host: HTMLElement, deps: InspectorDeps): Inspecto
       applySelection(id);
     },
     dispose: (): void => {
+      listView?.dispose();
       panel.remove();
     },
   };

@@ -21,16 +21,20 @@
 // DOM 없이 export되어 node에서 단위 테스트된다(entity-editor.test.ts). DOM은 얇다.
 
 import {
+  BORDER_WIDTH,
   COLOR,
-  FONT,
+  ICON,
   RADIUS,
   SHADOW,
   SPACE,
+  TYPE,
+  applyType,
   ensureThemeStyles,
-  makeButton,
+  makePanelHeader,
   styled,
 } from '../theme';
-import { formatFixed, quatToEulerDegXYZ } from './inspector';
+import { makeIconButton } from '../icons';
+import { EMPTY_SELECTION_HINT, formatFixed, quatToEulerDegXYZ } from './inspector';
 import type {
   BodyType,
   ColliderGroup,
@@ -88,6 +92,16 @@ const BODY_TYPE_CHOICES: readonly BodyType[] = ['dynamic', 'fixed', 'kinematicPo
 /** 폼에 노출하는 그룹 후보 (CLAUDE.md §5 — DEBUG는 현재값일 때만 추가) */
 const GROUP_CHOICES: readonly ColliderGroup[] = ['ENV', 'ROBOT', 'OBJECT', 'SENSOR_ZONE'];
 
+/**
+ * DOM id 발급기 — label htmlFor / aria-labelledby / aria-describedby 연결용.
+ * 폼이 재구축되거나 여러 인스턴스가 마운트돼도 id가 충돌하지 않게 단조 증가한다.
+ */
+let idSeq = 0;
+function nextDomId(prefix: string): string {
+  idSeq += 1;
+  return `${prefix}-${idSeq}`;
+}
+
 // ── 공개 타입 ───────────────────────────────────────────────────────
 
 /**
@@ -98,6 +112,14 @@ export interface EntityEditorDeps {
   /** 현재 spec 스냅샷 (없으면 null) */
   getEntity(id: string): EntitySpec | null;
   isRobot(id: string): boolean;
+  /**
+   * 엔티티 삭제 요청 (선택 — 미주입이면 삭제 버튼이 비활성) — UX_AUDIT C-4.
+   * `editor.removeEntity`는 core에 완전 구현돼 있었는데 호출부가 자동화 파사드에만 있어
+   * **UI에서 오브젝트를 지울 방법이 없었다**(라이브러리로 넣을 수만 있는 add-only 함정).
+   * 확인 다이얼로그가 아니라 **즉시 삭제 + 실행취소 토스트**가 이 제품의 정답이므로,
+   * 이 폼은 콜백만 부르고 되돌리기 표면은 통합자가 소유한다.
+   */
+  onDeleteEntity?(id: string): void;
   /** → SceneEditor.updateTransform (통합자 바인딩) */
   updateTransform(id: string, transform: Transform): void;
   /** → SceneEditor.updateDimensions — 메시+collider 동시 재생성 */
@@ -428,21 +450,17 @@ export function attachScrub(
 
 // ── 내부 DOM 헬퍼 ───────────────────────────────────────────────────
 
-function subCaption(text: string): HTMLElement {
-  const el = styled(document.createElement('div'), {
-    color: COLOR.muted,
-    fontSize: '11px',
-    margin: '6px 0 2px 0',
-  });
+function subCaption(text: string, id?: string): HTMLElement {
+  const el = applyType(document.createElement('div'), TYPE.caption);
+  styled(el, { color: COLOR.muted, margin: `${SPACE.lg} 0 ${SPACE.xxs} 0` });
   el.textContent = text;
+  if (id !== undefined) el.id = id;
   return el;
 }
 
 function mutedLine(text: string): HTMLElement {
-  const el = styled(document.createElement('div'), {
-    color: COLOR.muted,
-    padding: '4px 0',
-  });
+  const el = applyType(document.createElement('div'), TYPE.body);
+  styled(el, { color: COLOR.muted, padding: `${SPACE.xs} 0`, whiteSpace: 'normal' });
   el.textContent = text;
   return el;
 }
@@ -451,13 +469,15 @@ function tripleRow(): HTMLElement {
   return styled(document.createElement('div'), {
     display: 'grid',
     gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-    gap: '4px 6px',
+    gap: `${SPACE.xs} ${SPACE.sm}`,
   });
 }
 
 interface NumberCellOpts {
   label: string;
   testId: string;
+  /** input의 DOM id (label htmlFor 연결용). 생략하면 testId에서 유일 id를 발급한다 */
+  id?: string;
   step: number;
   min?: number;
   max?: number;
@@ -467,36 +487,42 @@ interface NumberCellOpts {
   onScrubActive(active: boolean, input: HTMLInputElement): void;
 }
 
-/** 라벨(스크럽 가능) + number 입력 셀. 커밋은 change(Enter/blur/스피너)와 스크럽 종료만 */
+/**
+ * 라벨(스크럽 가능) + number 입력 셀. 커밋은 change(Enter/blur/스피너)와 스크럽 종료만.
+ *
+ * 라벨은 `<label for>`로 입력에 **프로그램적으로 연결**된다(UX_AUDIT C-16). 별도
+ * `aria-label`을 붙이지 않는 것이 핵심이다 — 붙이면 접근 가능한 이름이 가시 텍스트를
+ * 덮어써 음성 제어 사용자가 화면에 보이는 말("X")로 필드를 잡을 수 없다
+ * (WCAG 2.5.3 Label in Name). 축(X/Y/Z)만으로는 의미가 없으므로 위치/회전 그룹이
+ * `role="group" + aria-labelledby`로 문맥("position (m)")을 덧씌운다.
+ */
 function numberCell(opts: NumberCellOpts): { cell: HTMLElement; input: HTMLInputElement } {
   const cell = styled(document.createElement('div'), {
     display: 'flex',
     flexDirection: 'column',
-    gap: '2px',
+    gap: SPACE.xxs,
     minWidth: '0',
   });
-  const label = styled(document.createElement('span'), {
-    color: COLOR.label,
-    fontSize: '11px',
-    userSelect: 'none',
-  });
+  const inputId = opts.id ?? nextDomId(`rsw-${opts.testId}`);
+  const label = applyType(document.createElement('label'), TYPE.caption);
+  styled(label, { color: COLOR.label, userSelect: 'none' });
+  label.htmlFor = inputId;
   label.textContent = opts.label;
   label.title = `${opts.label} — 라벨을 좌우로 드래그해 조정`;
 
   const input = document.createElement('input');
   input.type = 'number';
-  input.className = 'ui-input';
+  input.className = 'ui-input ui-input--mono';
+  input.id = inputId;
   input.step = String(opts.step);
   if (opts.min !== undefined) input.min = String(opts.min);
   if (opts.max !== undefined) input.max = String(opts.max);
   styled(input, {
     width: '100%',
     boxSizing: 'border-box',
-    fontFamily: FONT.mono,
     textAlign: 'right',
   });
   input.dataset.testid = opts.testId;
-  input.setAttribute('aria-label', opts.label);
   input.addEventListener('change', () => {
     opts.onCommit();
   });
@@ -552,15 +578,13 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
     width: '100%',
     boxSizing: 'border-box',
     background: COLOR.bgPanel,
-    border: `1px solid ${COLOR.border}`,
+    border: `${BORDER_WIDTH.hair} solid ${COLOR.border}`,
     borderRadius: RADIUS.md,
     boxShadow: SHADOW.panel,
     color: COLOR.text,
-    fontFamily: FONT.ui,
-    fontSize: '12px',
-    lineHeight: '1.5',
     userSelect: 'none',
   });
+  applyType(root, TYPE.body);
   root.dataset.testid = 'entity-editor';
   for (const type of ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'contextmenu', 'keydown']) {
     root.addEventListener(type, (e) => {
@@ -568,23 +592,28 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
     });
   }
 
-  const header = styled(document.createElement('div'), {
-    display: 'flex',
-    alignItems: 'center',
-    gap: SPACE.md,
-    padding: `${SPACE.sm} 10px`,
-    borderBottom: `1px solid ${COLOR.borderSoft}`,
+  // 헤더 — 수제 구현 대신 공용 팩토리(제목 굵기·보더·액션 정렬 규약 단일화, UX_AUDIT C-18)
+  const header = makePanelHeader('엔티티 편집', { actions: true, testId: 'entity-editor-header' });
+  root.appendChild(header.el);
+
+  // 삭제 (UX_AUDIT C-4) — 확인 다이얼로그 대신 즉시 삭제 + 실행취소 토스트(통합자 소유)
+  const deleteButton = makeIconButton(
+    'trash',
+    '삭제',
+    '선택한 엔티티 삭제 (실행취소 가능)',
+    'ee-delete',
+    'danger',
+    ICON.sm,
+  );
+  deleteButton.disabled = true;
+  deleteButton.addEventListener('click', () => {
+    if (currentId === null) return;
+    deps.onDeleteEntity?.(currentId);
   });
-  const title = styled(document.createElement('strong'), {
-    color: COLOR.textStrong,
-    fontSize: '13px',
-  });
-  title.textContent = '엔티티 편집';
-  header.appendChild(title);
-  root.appendChild(header);
+  header.actionsEl?.appendChild(deleteButton);
 
   const content = styled(document.createElement('div'), {
-    padding: '6px 10px 10px 10px',
+    padding: `${SPACE.md} ${SPACE.lg} ${SPACE.lg} ${SPACE.lg}`,
     maxHeight: '65vh',
     overflowY: 'auto',
     minHeight: '0',
@@ -639,32 +668,36 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
     return [robot ? 'robot' : 'entity', shapeKind ?? '-', spec.physics !== undefined ? 'phys' : '-'].join('|');
   };
 
-  // ── 섹션 골격 (접기 토글 — dock/inspector와 같은 ▾/▸ 규약) ─────────
+  // ── 섹션 골격 (접기 — 셰브론 회전 규약은 makePanelHeader가 소유, UX_AUDIT C-18) ─
   const makeSection = (
     titleText: string,
     testId: string,
   ): { section: HTMLElement; body: HTMLElement } => {
     const section = styled(document.createElement('section'), {
-      borderBottom: `1px solid ${COLOR.borderSoft}`,
-      padding: '2px 0 8px 0',
-      margin: '0 0 4px 0',
+      borderBottom: `${BORDER_WIDTH.hair} solid ${COLOR.borderSoft}`,
+      padding: `0 0 ${SPACE.lg} 0`,
+      // 섹션 경계는 16px 이상 — 4~8px로 뭉개면 그룹이 눈에 보이지 않는다
+      margin: `0 0 ${SPACE.xl} 0`,
     });
     section.dataset.testid = testId;
-    const toggle = makeButton(`▾ ${titleText}`, `${titleText} 섹션 접기/펼치기`, `${testId}-toggle`, 'ghost');
-    styled(toggle, { width: '100%', textAlign: 'left', padding: '2px 4px', fontWeight: '600' });
-    const body = styled(document.createElement('div'), { padding: '4px 4px 0 4px' });
-    let collapsed = false;
-    const paint = (): void => {
-      body.style.display = collapsed ? 'none' : '';
-      toggle.textContent = `${collapsed ? '▸' : '▾'} ${titleText}`;
-      toggle.setAttribute('aria-expanded', String(!collapsed));
-    };
-    toggle.addEventListener('click', () => {
-      collapsed = !collapsed;
-      paint();
+    const header = makePanelHeader(titleText, {
+      collapsible: true,
+      headingTag: 'h3',
+      testId,
     });
-    paint();
-    section.appendChild(toggle);
+    // section이 이미 testId를 갖는다 — 헤더의 중복 testid는 제거하고 토글 id만 남긴다
+    delete header.el.dataset.testid;
+    if (header.collapseButton !== null) header.collapseButton.dataset.testid = `${testId}-toggle`;
+    styled(header.el, { padding: `${SPACE.xs} 0`, borderBottom: 'none' });
+    applyType(header.titleEl, TYPE.subhead);
+    // 영문 도메인 식별자 제목(Transform/Dimensions/Physics)은 lang을 명시한다 —
+    // 한국어 TTS가 철자를 하나씩 나열하는 문제를 막는다 (WCAG 3.1.2)
+    if (/^[\x20-\x7E]+$/.test(titleText)) header.titleEl.setAttribute('lang', 'en');
+    const body = styled(document.createElement('div'), { padding: `${SPACE.xs} 0 0 0` });
+    header.onToggle((collapsed) => {
+      body.style.display = collapsed ? 'none' : '';
+    });
+    section.appendChild(header.el);
     section.appendChild(body);
     return { section, body };
   };
@@ -672,24 +705,41 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
   // ── 이름/ID 섹션 ───────────────────────────────────────────────────
   const buildNameSection = (): HTMLElement => {
     const { section, body } = makeSection('이름/ID', 'ee-sec-name');
+    const inputId = nextDomId('rsw-ee-name');
+    const errorId = `${inputId}-error`;
+    const label = applyType(document.createElement('label'), TYPE.caption);
+    styled(label, { color: COLOR.label, display: 'block', margin: `0 0 ${SPACE.xxs} 0` });
+    label.htmlFor = inputId;
+    label.textContent = '엔티티 id';
+
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'ui-input';
+    input.id = inputId;
     styled(input, { width: '100%', boxSizing: 'border-box' });
     input.dataset.testid = 'ee-name';
-    input.setAttribute('aria-label', '엔티티 이름/ID');
 
-    const errorLine = styled(document.createElement('div'), {
+    const errorLine = applyType(document.createElement('div'), TYPE.caption);
+    styled(errorLine, {
       color: COLOR.errorText,
-      fontSize: '11px',
-      padding: '2px 0 0 0',
+      padding: `${SPACE.xxs} 0 0 0`,
       display: 'none',
       whiteSpace: 'normal',
     });
+    errorLine.id = errorId;
     errorLine.dataset.testid = 'ee-name-error';
+    errorLine.setAttribute('role', 'alert');
+    /** 오류는 시각(빨강)뿐 아니라 프로그램적으로도 입력에 붙는다 (UX_AUDIT C-16) */
     const showError = (message: string | null): void => {
       errorLine.style.display = message === null ? 'none' : '';
       errorLine.textContent = message ?? '';
+      if (message === null) {
+        input.removeAttribute('aria-invalid');
+        input.removeAttribute('aria-describedby');
+      } else {
+        input.setAttribute('aria-invalid', 'true');
+        input.setAttribute('aria-describedby', errorId);
+      }
     };
 
     const commit = (): void => {
@@ -719,6 +769,7 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
       if (e.key === 'Enter') input.blur();
     });
 
+    body.appendChild(label);
     body.appendChild(input);
     body.appendChild(errorLine);
     fieldBindings.push({
@@ -796,15 +847,25 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
     const ry = numberCell({ label: 'RY°', testId: 'ee-rot-y', ...rotOpts });
     const rz = numberCell({ label: 'RZ°', testId: 'ee-rot-z', ...rotOpts });
 
-    body.appendChild(subCaption('position (m)'));
+    // 그룹 라벨링: 축 라벨(X/Y/Z)만으로는 위치인지 회전인지 알 수 없다 — 스크린리더가
+    // 그룹 진입 시 "position (m)"을 함께 읽도록 role="group" + aria-labelledby로 묶는다
+    // (UX_AUDIT C-16). 가시 캡션이 곧 그룹의 접근 가능한 이름이다.
+    const posCaptionId = nextDomId('rsw-ee-pos-cap');
+    const rotCaptionId = nextDomId('rsw-ee-rot-cap');
+
+    body.appendChild(subCaption('position (m)', posCaptionId));
     const posRow = tripleRow();
+    posRow.setAttribute('role', 'group');
+    posRow.setAttribute('aria-labelledby', posCaptionId);
     posRow.appendChild(px.cell);
     posRow.appendChild(py.cell);
     posRow.appendChild(pz.cell);
     body.appendChild(posRow);
 
-    body.appendChild(subCaption('rotation (deg · XYZ — 커밋 시 쿼터니언 변환)'));
+    body.appendChild(subCaption('rotation (deg · XYZ — 커밋 시 쿼터니언 변환)', rotCaptionId));
     const rotRow = tripleRow();
+    rotRow.setAttribute('role', 'group');
+    rotRow.setAttribute('aria-labelledby', rotCaptionId);
     rotRow.appendChild(rx.cell);
     rotRow.appendChild(ry.cell);
     rotRow.appendChild(rz.cell);
@@ -1037,32 +1098,27 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
     const collidesBox = styled(document.createElement('div'), {
       display: 'flex',
       flexWrap: 'wrap',
-      gap: '2px 12px',
-      padding: '2px 0',
+      gap: `${SPACE.xxs} ${SPACE.lg}`,
+      padding: `${SPACE.xxs} 0`,
     });
     collidesBox.dataset.testid = 'ee-collides';
     body.appendChild(collidesBox);
     const collideChecks = new Map<ColliderGroup, HTMLInputElement>();
+    /** 체크박스 시각은 .ui-check/.ui-check-label이 소유한다 (네이티브 렌더 제거) */
     const makeCheckbox = (
       labelText: string,
       testId: string,
       checked: boolean,
     ): { row: HTMLElement; box: HTMLInputElement } => {
-      const rowEl = styled(document.createElement('label'), {
-        display: 'flex',
-        alignItems: 'center',
-        gap: '6px',
-        padding: '1px 0',
-        cursor: 'pointer',
-        color: COLOR.text,
-      });
+      const rowEl = document.createElement('label');
+      rowEl.className = 'ui-check-label';
       const box = document.createElement('input');
       box.type = 'checkbox';
+      box.className = 'ui-check';
       box.checked = checked;
       box.dataset.testid = testId;
-      styled(box, { accentColor: COLOR.accent, margin: '0' });
       box.addEventListener('change', commitPhysics);
-      const text = document.createElement('span');
+      const text = styled(document.createElement('span'), { whiteSpace: 'normal' });
       text.textContent = labelText;
       rowEl.appendChild(box);
       rowEl.appendChild(text);
@@ -1076,7 +1132,6 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
       collideChecks.clear();
       for (const group of choices) {
         const { row, box } = makeCheckbox(group, `ee-collides-${group}`, checked.includes(group));
-        styled(row, { fontSize: '11px' });
         collidesBox.appendChild(row);
         collideChecks.set(group, box);
       }
@@ -1164,8 +1219,12 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
     fieldBindings.length = 0;
     scrubControl = null;
     content.replaceChildren();
+    deleteButton.disabled = spec === null || deps.onDeleteEntity === undefined;
+    header.setTitle(spec === null ? '엔티티 편집' : spec.id);
+    header.titleEl.title = spec === null ? '엔티티 편집' : spec.id;
     if (spec === null) {
-      content.appendChild(mutedLine('엔티티를 선택하면 편집할 수 있습니다'));
+      // 빈 상태 문구는 앱 전체에서 하나다 (inspector.ts EMPTY_SELECTION_HINT — UX_AUDIT C-16)
+      content.appendChild(mutedLine(EMPTY_SELECTION_HINT));
       return;
     }
     content.appendChild(buildNameSection());
@@ -1174,10 +1233,10 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
       // 로봇: 물리/치수는 URDF 유도 — 이름/Transform만 편집 (요구 §2 Robot).
       // 문구는 능력형으로 쓴다: 제약만 읽히면 "로봇은 못 옮기는구나"로 오해해 위의
       // Transform 입력을 시도조차 하지 않는다(사용자 보고의 실패 연쇄).
-      const note = styled(document.createElement('div'), {
+      const note = applyType(document.createElement('div'), TYPE.caption);
+      styled(note, {
         color: COLOR.muted,
-        fontSize: '11px',
-        padding: '4px',
+        padding: SPACE.xs,
         // 줄바꿈을 명시한다: 이 문구의 한 줄 길이가 우측 스택(폭 auto 열)의 max-content를
         // 밀어 올려 패널이 캔버스를 덮는 회귀가 있었다 (실측 583 → 750 px).
         whiteSpace: 'normal',

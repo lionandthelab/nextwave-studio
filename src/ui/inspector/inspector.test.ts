@@ -12,9 +12,12 @@ import {
   formatFixed,
   formatLimits,
   formatPosition,
+  isBipolarRange,
+  matchesEntityFilter,
   nextSelection,
   quatReadout,
   quatToEulerDegXYZ,
+  rangeTrackGradient,
   resolveSelection,
 } from './inspector';
 import type { Quat } from '../../schema/types';
@@ -201,13 +204,100 @@ describe('entityListKey — 목록 변경 감지', () => {
 });
 
 describe('entityTypeMeta', () => {
-  it('알려진 type은 아이콘 + 한국어 라벨', () => {
-    expect(entityTypeMeta('robot')).toEqual({ icon: '🦾', label: '로봇' });
-    expect(entityTypeMeta('object')).toEqual({ icon: '▣', label: '사물' });
-    expect(entityTypeMeta('static')).toEqual({ icon: '▤', label: '정적' });
+  it('알려진 type은 SVG 아이콘 이름 + 한국어 라벨', () => {
+    expect(entityTypeMeta('robot')).toEqual({ icon: 'robotArm', label: '로봇' });
+    expect(entityTypeMeta('object')).toEqual({ icon: 'shapeBox', label: '사물' });
+    expect(entityTypeMeta('static')).toEqual({ icon: 'shapePlane', label: '정적' });
   });
 
   it('미지 type은 원문 라벨로 폴백한다', () => {
-    expect(entityTypeMeta('conveyor')).toEqual({ icon: '◌', label: 'conveyor' });
+    expect(entityTypeMeta('conveyor')).toEqual({ icon: 'layers', label: 'conveyor' });
+  });
+
+  it('아이콘은 이모지가 아니라 icons.ts의 이름이다 (UX_AUDIT C-13)', () => {
+    // 이모지는 currentColor를 못 받아 hover/선택에서 텍스트만 밝아지고 OS마다 그림이 다르다
+    for (const type of ['robot', 'object', 'static', 'conveyor']) {
+      expect(entityTypeMeta(type).icon).toMatch(/^[a-zA-Z]+$/);
+    }
+  });
+});
+
+// ── 아웃라이너 검색/필터 (UX_AUDIT C-10) ────────────────────────────
+
+describe('matchesEntityFilter', () => {
+  const ARM = { id: 'arm', type: 'robot' };
+  const BOX = { id: 'box_a', type: 'object' };
+
+  it('검색어가 비면 전부 통과한다', () => {
+    expect(matchesEntityFilter(ARM, '', new Set())).toBe(true);
+    expect(matchesEntityFilter(ARM, '   ', new Set())).toBe(true);
+  });
+
+  it('id 부분 일치 (대소문자 무시)', () => {
+    expect(matchesEntityFilter(BOX, 'box', new Set())).toBe(true);
+    expect(matchesEntityFilter(BOX, 'BOX_A', new Set())).toBe(true);
+    expect(matchesEntityFilter(BOX, 'arm', new Set())).toBe(false);
+  });
+
+  it('type으로도 검색된다', () => {
+    expect(matchesEntityFilter(ARM, 'robot', new Set())).toBe(true);
+  });
+
+  it('타입 칩이 켜져 있으면 그 타입만 통과한다 (칩이 없으면 제한 없음)', () => {
+    expect(matchesEntityFilter(ARM, '', new Set(['robot']))).toBe(true);
+    expect(matchesEntityFilter(BOX, '', new Set(['robot']))).toBe(false);
+    expect(matchesEntityFilter(BOX, '', new Set(['robot', 'object']))).toBe(true);
+  });
+
+  it('타입 필터와 검색어는 AND로 결합한다', () => {
+    expect(matchesEntityFilter(BOX, 'box', new Set(['object']))).toBe(true);
+    expect(matchesEntityFilter(BOX, 'arm', new Set(['object']))).toBe(false);
+    expect(matchesEntityFilter(BOX, 'box', new Set(['robot']))).toBe(false);
+  });
+});
+
+// ── 슬라이더 트랙 채움 (UX_AUDIT C-18) ──────────────────────────────
+
+describe('isBipolarRange', () => {
+  it('min < 0 < max일 때만 부호 있는 범위다', () => {
+    expect(isBipolarRange(-2, 2)).toBe(true);
+    expect(isBipolarRange(-1.5, 0.5)).toBe(true);
+    expect(isBipolarRange(0, 1)).toBe(false); // 그리퍼 — min→thumb 채움이 옳다
+    expect(isBipolarRange(-2, 0)).toBe(false);
+    expect(isBipolarRange(0.5, 2)).toBe(false);
+  });
+});
+
+describe('rangeTrackGradient', () => {
+  it('단극(0..1): 0%에서 값까지 채운다', () => {
+    const grad = rangeTrackGradient(0.25, 0, 1);
+    expect(grad).toContain('linear-gradient');
+    expect(grad).toContain('0 25%'); // 채움이 하한에서 시작한다
+    expect(grad).not.toContain('calc('); // 틱 레이어 없음
+  });
+
+  it('부호 있는 범위: 채움이 0에서 시작한다 (min이 아니라)', () => {
+    // limits ±2.0에서 -0.6 → 0 지점은 50%, 값 지점은 35% — 채움은 [35%, 50%]다.
+    // min→thumb였다면 "35% 진행"으로 읽혀 부호와 0 기준점이 시각적으로 틀린다.
+    const grad = rangeTrackGradient(-0.6, -2, 2);
+    expect(grad).toContain('35% 50%');
+  });
+
+  it('부호 있는 범위: 0 지점에 1px 틱 레이어를 얹는다', () => {
+    const grad = rangeTrackGradient(1, -2, 2);
+    expect(grad).toContain('calc(50% - 0.5px)');
+    expect(grad).toContain('calc(50% + 0.5px)');
+    // 틱 레이어가 채움 레이어보다 앞(위)에 온다
+    expect(grad.indexOf('transparent')).toBeLessThan(grad.lastIndexOf('linear-gradient'));
+  });
+
+  it('값이 0이면 채움 폭이 0이다 ("절반 열림"으로 보이지 않는다)', () => {
+    expect(rangeTrackGradient(0, -2, 2)).toContain('50% 50%');
+  });
+
+  it('범위 밖 값은 클램프하고, 폭 0/비유한 범위는 단색으로 방어한다', () => {
+    expect(rangeTrackGradient(9, -2, 2)).toContain('50% 100%');
+    expect(rangeTrackGradient(0, 1, 1)).not.toContain('linear-gradient');
+    expect(rangeTrackGradient(0, Number.NaN, 1)).not.toContain('linear-gradient');
   });
 });
