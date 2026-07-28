@@ -11,9 +11,16 @@
 // - statusColor/statusLabelKo: 실행 상태 점 색 + 텍스트 라벨(색만으로 전달 금지 — UX §9)
 // - originBadge: 출처 배지 텍스트 (generated → 'AI', modified → '수정됨' — UX §3.4)
 // - PALETTE_GROUPS: ＋ 삽입 팔레트의 step 분류 (동작/시간/충돌/흐름 — Phase 8 요구)
+// - nodeLod: 줌 배율 → 노드 상세도 정책 (UX_AUDIT C-10 확장성 천장)
+//
+// ── 이 모듈은 DOM에 의존하지 않는다 (canvas.test.ts는 node 환경에서 돈다) ──────
+// LOD는 **정책만** 여기서 소유하고(nodeLod/LOD_ZOOM_THRESHOLD), SVG 분기 그리기는
+// canvas.ts의 drawNode가 이 정책을 소비해 수행한다. icons.ts에서 가져오는 것도
+// `IconName` 타입뿐이다 — 값 import가 아니므로 node 환경에서 안전하다.
 
 import type { ControlStepKind } from '../../schema/types';
-import { COLOR } from '../theme';
+import type { IconName } from '../icons';
+import { CATEGORY, COLLISION, COLOR } from '../theme';
 
 // ── 숫자/시간 포맷 (요약 전용 — 데이터 값은 건드리지 않는다) ─────────
 
@@ -41,13 +48,21 @@ export function formatDurationSec(sec: number): string {
 export type PaletteGroupKo = '동작' | '시간' | '충돌' | '흐름';
 
 export interface StepKindMeta {
-  /** 노드 좌측 아이콘 글리프 */
-  readonly icon: string;
+  /**
+   * 노드 좌측 아이콘 (icons.ts의 SVG 세트 — UX_AUDIT C-13).
+   * 이모지가 아니라 `IconName`이므로 kind를 추가하면서 아이콘을 빠뜨리면 **컴파일이 깨진다.**
+   * 아이콘 자체에는 색을 칠하지 않는다(currentColor 상속) — 범주 색은 좌측 스트립이 든다.
+   */
+  readonly icon: IconName;
   /** 노드 타입 표시명 (UX §2 목업의 'MoveJoint' 류 — kind의 PascalCase) */
   readonly label: string;
   /** ＋ 팔레트 분류 */
   readonly groupKo: PaletteGroupKo;
-  /** 종류 색 (노드 좌측 컬러 스트립) — theme 토큰 */
+  /**
+   * 범주 색 (노드 좌측 컬러 스트립) — **CATEGORY 토큰만 쓴다.**
+   * 시맨틱 토큰(success/warn/info)을 범주형으로 재사용하면 "초록 노드"가 성공인지 흐름
+   * 제어인지 구분되지 않고, 그 초록이 타임라인 완료 칩의 초록과 같은 값이 된다(C-14).
+   */
   readonly color: string;
   /** 팔레트 툴팁/빈 요약 대체용 한국어 설명 */
   readonly descriptionKo: string;
@@ -55,66 +70,66 @@ export interface StepKindMeta {
 
 const KIND_META: Readonly<Record<string, StepKindMeta>> = {
   moveJoints: {
-    icon: '🦾',
+    icon: 'robotArm',
     label: 'MoveJoints',
     groupKo: '동작',
-    color: COLOR.accent,
+    color: CATEGORY.motion,
     descriptionKo: '관절을 목표값으로 보간 이동',
   },
   setJoints: {
-    icon: '⚙',
+    icon: 'settings',
     label: 'SetJoints',
     groupKo: '동작',
-    color: COLOR.accent,
+    color: CATEGORY.motion,
     descriptionKo: '관절값 즉시 설정',
   },
   gripper: {
-    icon: '✋',
+    icon: 'gripper',
     label: 'Gripper',
     groupKo: '동작',
-    color: COLOR.accent,
+    color: CATEGORY.motion,
     descriptionKo: '그리퍼 열기/닫기',
   },
   moveToPose: {
-    icon: '🎯',
+    icon: 'target',
     label: 'MoveToPose',
     groupKo: '동작',
-    color: COLOR.accent,
+    color: CATEGORY.motion,
     descriptionKo: '카테시안 목표 이동 (로드맵 — 현재 실행 시 건너뜀)',
   },
   wait: {
-    icon: '⏱',
+    icon: 'timer',
     label: 'Wait',
     groupKo: '시간',
-    color: COLOR.info,
+    color: CATEGORY.time,
     descriptionKo: '지정 시간 대기',
   },
   waitForCollision: {
-    icon: '💥',
+    icon: 'impact',
     label: 'WaitForCollision',
     groupKo: '충돌',
-    color: COLOR.warn,
+    color: CATEGORY.collision,
     descriptionKo: '두 엔티티의 충돌이 감지될 때까지 대기',
   },
   label: {
-    icon: '🔖',
+    icon: 'bookmark',
     label: 'Label',
     groupKo: '흐름',
-    color: COLOR.success,
+    color: CATEGORY.flow,
     descriptionKo: 'goto 점프 대상 라벨',
   },
   goto: {
-    icon: '↩',
+    icon: 'refresh',
     label: 'Goto',
     groupKo: '흐름',
-    color: COLOR.success,
+    color: CATEGORY.flow,
     descriptionKo: '라벨로 점프 (반복)',
   },
 };
 
 /** 알 수 없는 kind의 대체 메타 (label은 kind 문자열 그대로) */
 const UNKNOWN_KIND_META: Omit<StepKindMeta, 'label'> = {
-  icon: '□',
+  icon: 'help',
   groupKo: '동작',
   color: COLOR.muted,
   descriptionKo: '알 수 없는 step 종류',
@@ -259,6 +274,11 @@ export function nodeSummary(kind: string, params: Record<string, unknown>): stri
 
 export type NodeRunStatus = 'pending' | 'active' | 'done' | 'error';
 
+/**
+ * 상태 점 색. 4단계는 서로 다른 축의 토큰을 쓴다 —
+ * pending은 중립(muted), active는 액센트(펄스가 병행), done은 성공, error는 **충돌 램프**
+ * (이 제품의 오류는 곧 충돌 사건이며 3D 펄스·접촉점 마커와 같은 램프를 써야 한다 — C-7).
+ */
 export function statusColor(status: NodeRunStatus): string {
   switch (status) {
     case 'active':
@@ -266,7 +286,7 @@ export function statusColor(status: NodeRunStatus): string {
     case 'done':
       return COLOR.success;
     case 'error':
-      return COLOR.error;
+      return COLLISION.base;
     case 'pending':
       return COLOR.muted;
   }
@@ -301,4 +321,23 @@ export function truncateText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   if (maxChars <= 1) return '…';
   return `${text.slice(0, maxChars - 1)}…`;
+}
+
+// ── LOD 정책 (UX_AUDIT C-10 — 확장성 천장) ──────────────────────────
+//
+// 노드 라벨 예산은 15자다. 줌 0.5에서 11px 활자는 화면상 5.5px가 되어 **어차피 판독이
+// 불가능하다** — 그 배율 아래에서 텍스트를 계속 그리는 것은 프레임 예산만 태우고
+// 형태 인지를 방해한다. 그래서 아이콘 + 범주 색 칩으로 축약한다(compact).
+//
+// 축약은 **시각 채널만** 줄인다. `aria-label`은 두 LOD에서 동일한 전체 요약을 유지하므로
+// 스크린리더 사용자에게는 줌 배율이 아무 영향도 주지 않는다.
+
+export type NodeLod = 'compact' | 'full';
+
+/** 이 배율 미만에서 노드를 아이콘 칩으로 축약한다 */
+export const LOD_ZOOM_THRESHOLD = 0.5;
+
+/** 줌 배율 → 노드 상세도. NaN은 안전하게 full로 본다. */
+export function nodeLod(zoom: number): NodeLod {
+  return zoom < LOD_ZOOM_THRESHOLD ? 'compact' : 'full';
 }
