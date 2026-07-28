@@ -120,23 +120,31 @@ import type {
 } from './ui/orchestrator';
 import { mountNodeEditor } from './ui/inspector/node-editor';
 import {
+  COMMAND_BAR_PRIORITY,
   mountCommandBarShell,
   mountSceneControls,
+  setCommandBarPriority,
 } from './ui/command-bar/scene-controls';
 import type { SceneSwitchResult } from './ui/command-bar/scene-controls';
 import { createCollisionLogPanel } from './ui/dock/collision-log';
 import { appLog, createConsolePanel } from './ui/dock/console-panel';
-import { mountDock } from './ui/dock/dock';
+import { DOCK_TAB_ID, mountDock } from './ui/dock/dock';
 import { createTimelinePanel } from './ui/dock/timeline';
 import { SceneHistory } from './ui/history';
+import type { HistorySnapshot } from './ui/history';
 import { DIMENSION_MIN_M, mountEntityEditor } from './ui/inspector/entity-editor';
-import { mountInspector } from './ui/inspector/inspector';
-import type { InspectorHandle } from './ui/inspector/inspector';
+import { mountInspector, mountSceneOutliner } from './ui/inspector/inspector';
+import type { InspectorHandle, SceneOutlinerHandle } from './ui/inspector/inspector';
 import { mountJointPanel } from './ui/inspector/joint-panel';
 import { mountImportDialog } from './ui/library/import-dialog';
 import { mountLibrary, TEMPLATE_MIME } from './ui/library/library';
 import { templateByKey } from './ui/library/templates';
 import { mountViewportStatus } from './ui/viewport/statusline';
+import type { ViewportStatusHandle } from './ui/viewport/statusline';
+import { computeRtf, mountStatsHud } from './ui/viewport/stats-hud';
+import type { StatsHudHandle } from './ui/viewport/stats-hud';
+import { mountDropHint } from './ui/viewport/drop-hint';
+import type { DropHintHandle } from './ui/viewport/drop-hint';
 import {
   mountRunOverlay,
   overlaySummary,
@@ -144,8 +152,23 @@ import {
 } from './ui/viewport/run-overlay';
 import type { RunOverlayState } from './ui/viewport/run-overlay';
 import { mountWorkspace } from './ui/workspace';
+import { makeIconButton } from './ui/icons';
+import { SCOPE_ATTR, createShortcutRouter } from './ui/shortcuts';
+import { mountHelpSheet } from './ui/help-sheet';
+import {
+  createAutosave,
+  createDirtyTracker,
+  createDocument,
+  createDocumentStore,
+  describeAge,
+  downloadDocument,
+  installUnloadGuard,
+  parseDocument,
+} from './ui/document';
+import { setDocumentTitle } from './ui/brand';
 import { mountNlInput } from './ui/command-bar/nl-input';
 import type { GenerateMode, NlInputHandle } from './ui/command-bar/nl-input';
+import type { WorkcellDocument } from './ui/document';
 import { DEFAULT_PLANNER_MODEL, mountPlannerSettings } from './ui/command-bar/planner-settings';
 import type { PlannerBackendConfig } from './ui/command-bar/planner-settings';
 import { mountClarifyCard } from './ui/feedback/clarify-card';
@@ -153,13 +176,18 @@ import { mountToasts } from './ui/feedback/toast';
 import { AnthropicAdapter, PlannerService, buildContext } from './planner';
 import type { PlannerResult, WorldSnapshot } from './planner';
 import {
+  BORDER,
   COLOR,
   FONT,
   LAYOUT,
   RADIUS,
   SHADOW,
   SPACE,
+  SURFACE,
+  TYPE,
   Z_INDEX,
+  applyType,
+  ensureThemeStyles,
   makeButton,
 } from './ui/theme';
 import {
@@ -455,11 +483,119 @@ declare global {
   }
 }
 
+// ── 이전 작업 복원 배너 (UX_AUDIT C-3) ──────────────────────────────
+//
+// 자동저장된 초안이 있을 때만 나타난다. 사용자가 명시적으로 선택하기 전에는 현재 씬을
+// 건드리지 않는다 — 복원이 또 다른 데이터 손실이 되면 안 된다.
+
+interface RestoreBannerDeps {
+  readonly ageText: string;
+  readonly originLabel: string | null;
+  onRestore(): void;
+  onDismiss(): void;
+}
+
+function mountRestoreBanner(host: HTMLElement, deps: RestoreBannerDeps): { remove(): void } {
+  ensureThemeStyles();
+  const bar = document.createElement('div');
+  Object.assign(bar.style, {
+    position: 'fixed',
+    left: '50%',
+    bottom: SPACE.xxl,
+    transform: 'translateX(-50%)',
+    zIndex: Z_INDEX.toast,
+    display: 'flex',
+    alignItems: 'center',
+    gap: SPACE.lg,
+    padding: `${SPACE.lg} ${SPACE.xl}`,
+    background: SURFACE.overlay,
+    border: `1px solid ${BORDER.default}`,
+    borderRadius: RADIUS.lg,
+    boxShadow: SHADOW.overlay,
+    maxWidth: 'min(560px, calc(100vw - 32px))',
+  } satisfies Partial<CSSStyleDeclaration>);
+  bar.setAttribute('role', 'status');
+  bar.dataset.testid = 'restore-banner';
+
+  const text = document.createElement('div');
+  applyType(text, TYPE.body);
+  text.style.color = COLOR.text;
+  const origin = deps.originLabel === null ? '' : ` · ${deps.originLabel}`;
+  text.textContent = `저장하지 않은 이전 작업이 있습니다 (${deps.ageText}${origin})`;
+
+  const restore = makeButton('복원', '이전 작업 복원', 'restore-apply', 'primary');
+  const dismiss = makeButton('버리기', '이전 작업 버리기', 'restore-dismiss', 'ghost');
+
+  const close = (): void => {
+    bar.remove();
+  };
+  restore.addEventListener('click', () => {
+    close();
+    deps.onRestore();
+  });
+  dismiss.addEventListener('click', () => {
+    close();
+    deps.onDismiss();
+  });
+
+  bar.append(text, restore, dismiss);
+  host.appendChild(bar);
+  return { remove: close };
+}
+
+// ── 부트 오버레이 해제 ───────────────────────────────────────────────
+//
+// index.html의 #boot는 첫 페인트 ~ WASM 초기화 사이의 빈 화면을 덮는다. 부트가 성공하든
+// 실패하든 반드시 걷어야 한다 — 실패 시엔 오류 오버레이가 그 아래에 있기 때문이다.
+
+function dismissBoot(): void {
+  const boot = document.getElementById('boot');
+  if (boot === null) return;
+  boot.dataset.hiding = 'true';
+  const remove = (): void => {
+    boot.remove();
+  };
+  boot.addEventListener('transitionend', remove, { once: true });
+  // 트랜지션이 비활성(prefers-reduced-motion)이면 transitionend가 오지 않는다
+  window.setTimeout(remove, 400);
+}
+
 // ── 오류 오버레이 (검증 실패·부트스트랩 실패 표시용, 한국어) ─────────
 
 const OVERLAY_Z_INDEX = Z_INDEX.overlay;
 
+/** 오류 화면에서 현재 작업을 파일로 구제하는 콜백 (부트 완료 후 배선) */
+let rescueDocumentDownload: (() => void) | null = null;
+
+/**
+ * 전역 오류 안전망 (UX_AUDIT C-18).
+ *
+ * 구 상태: `window.onerror`/`unhandledrejection` 핸들러가 0건이라, WASM 초기화 실패나
+ * URDF 메시 404(CLAUDE.md §9의 흔한 함정)가 전부 "화면이 안 뜬다"로 수렴했고 사용자는
+ * 원인을 알 수 없었다. 신뢰성 인상은 "에러가 없다"가 아니라 **"에러를 잘 설명한다"** 에서 온다.
+ */
+function installGlobalErrorHandlers(): void {
+  let shown = false;
+  const report = (title: string, detail: string): void => {
+    if (shown) return; // 첫 오류만 — 연쇄 오류로 화면을 덮지 않는다
+    shown = true;
+    showErrorOverlay(title, [detail]);
+  };
+  window.addEventListener('error', (e) => {
+    const err: unknown = e.error;
+    report('예기치 못한 오류', err instanceof Error ? (err.stack ?? err.message) : e.message);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const reason: unknown = e.reason;
+    report(
+      '처리되지 않은 비동기 오류',
+      reason instanceof Error ? (reason.stack ?? reason.message) : String(reason),
+    );
+  });
+}
+
 function showErrorOverlay(title: string, lines: readonly string[]): void {
+  dismissBoot();
   const overlay = document.createElement('div');
   Object.assign(overlay.style, {
     position: 'fixed',
@@ -492,6 +628,30 @@ function showErrorOverlay(title: string, lines: readonly string[]): void {
     margin: '0',
   } satisfies Partial<CSSStyleDeclaration>);
   overlay.appendChild(list);
+
+  // 오류 상황에서도 **작업물을 구제**하는 경로를 준다 — 이게 핵심이다.
+  // 다시 시도할 수 있다는 것보다, 만든 것이 안전하다는 것이 먼저다.
+  const actions = document.createElement('div');
+  Object.assign(actions.style, {
+    display: 'flex',
+    gap: SPACE.md,
+    marginTop: SPACE.xxl,
+    flexWrap: 'wrap',
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  if (rescueDocumentDownload !== null) {
+    const rescue = makeButton('현재 작업 내려받기', '현재 워크셀을 파일로 저장', 'error-rescue', 'primary');
+    rescue.addEventListener('click', () => {
+      rescueDocumentDownload?.();
+    });
+    actions.appendChild(rescue);
+  }
+  const reload = makeButton('새로고침', '페이지를 다시 불러온다', 'error-reload');
+  reload.addEventListener('click', () => {
+    window.location.reload();
+  });
+  actions.appendChild(reload);
+  overlay.appendChild(actions);
 
   document.body.appendChild(overlay);
 }
@@ -597,18 +757,6 @@ interface ActiveScene {
   dispose(): void;
 }
 
-/**
- * 업로드 JSON 봉투 해석 (형식 규약은 scene-controls.ts 헤더):
- * (a) SceneSpec 단독, (b) { scene, sequence? } 봉투. 'scene' 키가 있으면 봉투로
- * 해석한다 — SceneSpec에는 'scene' 필드가 없으므로 두 형식은 모호하지 않다.
- */
-function unwrapUploadEnvelope(payload: unknown): { scene: unknown; sequence?: unknown } {
-  if (payload !== null && typeof payload === 'object' && 'scene' in payload) {
-    const envelope = payload as { scene: unknown; sequence?: unknown };
-    return { scene: envelope.scene, sequence: envelope.sequence };
-  }
-  return { scene: payload };
-}
 
 /** 프리셋 전환을 URL ?scene=에 반영(딥링크 공유용) — 업로드 씬은 파라미터를 지운다 */
 function updateUrlSceneParam(presetName: string | null): void {
@@ -725,6 +873,7 @@ async function boot(): Promise<void> {
     return;
   }
 
+  installGlobalErrorHandlers();
   await initPhysics();
   console.log('Rapier ready');
 
@@ -745,6 +894,8 @@ async function boot(): Promise<void> {
 
   let renderer: Renderer | null = null;
   let active: ActiveScene | null = null;
+  /** `active`를 선언 타입 그대로 읽는다 — 대입이 클로저 안에서만 일어나 CFA가 null로 좁힌다 */
+  const getActiveScene = (): ActiveScene | null => active;
   let switching = false;
   /** 임포트 3D 에셋 저장소 — 앱 수명 (씬 전환/undo 재로드에도 asset:// 해석 유지) */
   const assetStore = new MeshAssetStore();
@@ -773,15 +924,239 @@ async function boot(): Promise<void> {
     left: 'auto',
     right: 'auto',
   } satisfies Partial<CSSStyleDeclaration>);
+  commandBar.el.setAttribute(SCOPE_ATTR, 'commandBar');
+
+  // ── 단축키 라우터 (UX_AUDIT C-6) ──────────────────────────────────
+  //
+  // 구 구현은 window에 keydown을 거는 곳이 5군데였고 Space를 3개가, 방향키를 2개가
+  // 나눠 가졌다. 이제 전역 단축키는 전부 이 라우터를 통과한다 — 스코프 판정과
+  // "위젯이 키의 주인이면 가로채지 않는다"는 규칙이 한곳에 있다.
+  const shortcuts = createShortcutRouter(window);
+  /** 현재 씬의 재생 컨트롤 — 씬 빌드가 대입한다(단축키는 씬 수명을 가로지른다) */
+  let currentPlayback: {
+    play(): void;
+    pause(): void;
+    stop(): void;
+    stepOnce(): void;
+  } | null = null;
+  /** 현재 씬의 카메라 포커스 — F/Home 키가 쓴다 */
+  let focusSelectedEntity: (() => void) | null = null;
+  /** 현재 씬의 상태줄·드롭 힌트 — 씬 수명을 가로지르는 소비자(충돌 카운터/라이브러리 드래그)용 */
+  let viewportStatusRef: ViewportStatusHandle | null = null;
+  let activePlaybackBar: { togglePlay(): void } | null = null;
+  let resetCameraView: (() => void) | null = null;
+  /** '플로우' 토글 — 버튼과 단축키가 같은 함수를 부른다(동작 분기 금지) */
+  let flowPaneToggler: (() => void) | null = null;
+  let activeDropHint: DropHintHandle | null = null;
+
+  // ── 도움말 · 단축키 시트 (UX_AUDIT C-12) ──────────────────────────
+  //
+  // 시트는 UX_DESIGN §9의 규정 목록이 아니라 **실제 등록된 바인딩**만 그린다.
+  // 문서를 베끼면 구현되지 않은 키를 광고하게 되고, 그건 도움말이 없는 것보다 나쁘다.
+  const helpSheet = mountHelpSheet(document.body, {
+    listShortcuts: () => shortcuts.list(),
+  });
+
+  // ── 문서 모델: 저장 상태 · 자동저장 · 이탈 가드 (UX_AUDIT C-3) ────
+  //
+  // 구 상태에는 사용자가 소유하는 대상이 없었다. 💾 저장은 SceneSpec만 직렬화해
+  // **시퀀스를 버렸고**, localStorage/IndexedDB가 비어 있어 새로고침 한 번에 전부
+  // 휘발했으며, beforeunload·dirty 표시가 0건이었다.
+  const dirtyTracker = createDirtyTracker();
+  const documentStore = createDocumentStore();
+
+  const snapshotDocument = (): WorkcellDocument | null => {
+    const scene = active;
+    if (!scene) return null;
+    return createDocument({
+      name: scene.spec.name,
+      scene: scene.editor.serialize(),
+      sequence: scene.validSequence ?? null,
+      nowIso: new Date().toISOString(),
+    });
+  };
+
+  const autosave = createAutosave({
+    store: documentStore,
+    snapshot: snapshotDocument,
+    originLabel: () => active?.spec.name ?? null,
+    onError: (message) => {
+      appLog('warn', `자동저장 실패: ${message}`);
+    },
+  });
+
+  /** 편집이 일어났음을 문서 계층에 알린다 (dirty 재판정 + 자동저장 예약) */
+  const markDocumentChanged = (): void => {
+    const scene = active;
+    if (!scene) return;
+    dirtyTracker.check(scene.editor.serialize(), scene.validSequence ?? null);
+    autosave.schedule();
+  };
+
+  /** 현재 문서를 봉투로 저장한다 — 씬과 시퀀스가 **함께** 나간다 */
+  rescueDocumentDownload = (): void => {
+    const doc = snapshotDocument();
+    if (doc !== null) downloadDocument(doc);
+  };
+
+  const saveDocumentToFile = (): void => {
+    const doc = snapshotDocument();
+    if (doc === null) {
+      showToast('저장할 워크셀이 없습니다 — 씬이 로드된 뒤 다시 시도하세요', 'warn');
+      return;
+    }
+    const fileName = downloadDocument(doc);
+    dirtyTracker.markSaved(doc.scene, doc.sequence);
+    appLog('info', `워크셀 저장: ${fileName}`);
+    showToast(`저장됨 — ${fileName}`, 'info');
+  };
+
+  dirtyTracker.onChange((dirty) => {
+    setDocumentTitle(active?.spec.name ?? null, dirty);
+  });
+  installUnloadGuard(() => dirtyTracker.isDirty());
+
+  // ── 단축키 등록표 (UX_DESIGN §9) ──────────────────────────────────
+  //
+  // 이 표가 **구현의 단일 진실**이고, 도움말 시트는 이 표만 그린다. 문서에만 있고
+  // 구현되지 않은 키를 광고하지 않기 위해서다 — 구 상태는 규정 8종 중 2종만
+  // 스펙대로 동작했고 ←/→는 스펙과 반대 기능에 배선돼 있었다.
+  shortcuts.registerAll([
+    {
+      id: 'playback.toggle',
+      keys: 'Space',
+      scope: 'global',
+      group: '재생',
+      labelKo: '재생 / 일시정지',
+      run: (e) => {
+        e.preventDefault(); // 페이지 스크롤 방지
+        activePlaybackBar?.togglePlay();
+      },
+    },
+    {
+      id: 'playback.step',
+      keys: 'ArrowRight',
+      scope: 'global',
+      group: '재생',
+      labelKo: '노드 하나 실행 (Step)',
+      run: (e) => {
+        e.preventDefault();
+        currentPlayback?.stepOnce();
+      },
+    },
+    {
+      id: 'playback.stop',
+      keys: 'Escape',
+      scope: 'viewport',
+      group: '재생',
+      labelKo: '정지 (처음으로 되감기)',
+      run: () => {
+        currentPlayback?.stop();
+      },
+    },
+    {
+      id: 'edit.undo',
+      keys: 'Ctrl+Z',
+      scope: 'global',
+      group: '편집',
+      labelKo: '실행 취소',
+      run: (e) => {
+        e.preventDefault();
+        void history.undo();
+      },
+    },
+    {
+      id: 'edit.redo',
+      keys: 'Ctrl+Shift+Z',
+      scope: 'global',
+      group: '편집',
+      labelKo: '다시 실행',
+      run: (e) => {
+        e.preventDefault();
+        void history.redo();
+      },
+    },
+    {
+      id: 'file.save',
+      keys: 'Ctrl+S',
+      scope: 'global',
+      group: '파일',
+      labelKo: '워크셀 저장 (씬 + 시퀀스)',
+      // 입력창에 타이핑 중이어도 저장은 되어야 한다
+      allowInTextEntry: true,
+      run: (e) => {
+        e.preventDefault(); // 브라우저 '페이지 저장' 차단
+        saveDocumentToFile();
+      },
+    },
+    {
+      id: 'camera.focus',
+      keys: 'F',
+      scope: 'global',
+      group: '카메라',
+      labelKo: '선택 대상 포커스',
+      run: (e) => {
+        e.preventDefault();
+        focusSelectedEntity?.();
+      },
+    },
+    {
+      id: 'camera.reset',
+      keys: 'Home',
+      scope: 'global',
+      group: '카메라',
+      labelKo: '카메라 리셋',
+      run: (e) => {
+        e.preventDefault();
+        resetCameraView?.();
+      },
+    },
+    {
+      id: 'view.flow',
+      keys: 'Ctrl+Shift+F',
+      scope: 'global',
+      group: '보기',
+      labelKo: '플로우 그래프 표시 / 숨김',
+      run: (e) => {
+        e.preventDefault();
+        flowPaneToggler?.();
+      },
+    },
+    {
+      id: 'view.dock',
+      keys: 'Ctrl+Shift+D',
+      scope: 'global',
+      group: '보기',
+      labelKo: '하단 독 펼치기 / 접기',
+      run: (e) => {
+        e.preventDefault();
+        workspace.setDockCollapsed(!workspace.isDockCollapsed());
+      },
+    },
+    {
+      id: 'help.open',
+      keys: '?',
+      scope: 'global',
+      group: '일반',
+      labelKo: '도움말 · 단축키',
+      run: (e) => {
+        e.preventDefault();
+        if (helpSheet.isOpen()) helpSheet.close();
+        else helpSheet.open();
+      },
+    },
+  ]);
   // '플로우' 토글 (Phase 8) — 중앙 하단 flowGraph 페인 표시/숨김. 표시 상태는 앱 수명이
   // 소유하고, 씬 로드가 시퀀스 유무로 재설정한다(시퀀스 있는 씬 = 자동 표시). 시퀀스
   // 없는 씬도 페인을 열어 빈 그래프에서 시퀀스를 만들 수 있다(파일 헤더의 Flow Graph 절).
   let flowPaneVisible = false;
-  const flowToggleButton = makeButton(
+  const flowToggleButton = makeIconButton(
+    'workflow',
     '플로우',
-    '플로우 그래프 페인 표시/숨김',
+    '플로우 그래프 페인 표시/숨김 (Ctrl+Shift+F)',
     'flow-toggle',
   );
+  setCommandBarPriority(flowToggleButton, COMMAND_BAR_PRIORITY.view);
   flowToggleButton.setAttribute('aria-pressed', 'false');
   const setFlowPaneVisible = (visible: boolean): void => {
     flowPaneVisible = visible;
@@ -789,9 +1164,12 @@ async function boot(): Promise<void> {
     flowToggleButton.classList.toggle('ui-btn--active', visible);
     flowToggleButton.setAttribute('aria-pressed', String(visible));
   };
-  flowToggleButton.addEventListener('click', () => {
+  flowPaneToggler = (): void => {
     setFlowPaneVisible(!flowPaneVisible);
     if (flowPaneVisible) active?.onFlowPaneShown();
+  };
+  flowToggleButton.addEventListener('click', () => {
+    flowPaneToggler?.();
   });
   commandBar.right.appendChild(flowToggleButton);
 
@@ -847,13 +1225,15 @@ async function boot(): Promise<void> {
 
   // ── Undo/Redo (UX §7) — 앱 수명 SceneHistory + ↶↷ 버튼 + Ctrl/Cmd+Z ──
 
-  const undoButton = makeButton('↶', '되돌리기 (Ctrl+Z)', 'history-undo');
-  const redoButton = makeButton('↷', '다시하기 (Ctrl+Shift+Z)', 'history-redo');
+  const undoButton = makeIconButton('undo', '', '실행 취소 (Ctrl+Z)', 'history-undo');
+  const redoButton = makeIconButton('redo', '', '다시 실행 (Ctrl+Shift+Z)', 'history-redo');
+  setCommandBarPriority(undoButton, COMMAND_BAR_PRIORITY.misc);
+  setCommandBarPriority(redoButton, COMMAND_BAR_PRIORITY.misc);
   undoButton.disabled = true;
   redoButton.disabled = true;
 
   const history = new SceneHistory({
-    restore: (spec) => restoreSceneFromHistory(spec),
+    restore: (snapshot) => restoreSceneFromHistory(snapshot),
     onStateChange: (canUndo, canRedo) => {
       undoButton.disabled = !canUndo;
       redoButton.disabled = !canRedo;
@@ -892,19 +1272,21 @@ async function boot(): Promise<void> {
    * 복원 결과가 재생 상태에 오염되지 않는다. 시퀀스는 현재 씬의 원본 JSON을
    * 새 스펙에 재검증해 유효할 때만 유지된다(무효 → 미로드 + 콘솔 경고).
    */
-  async function restoreSceneFromHistory(spec: SceneSpec): Promise<boolean> {
+  async function restoreSceneFromHistory(snapshot: HistorySnapshot): Promise<boolean> {
     const scene = active;
     if (scene && scene.engine.state === 'playing') {
       scene.engine.stop();
       showToast('되돌리기: 시뮬 정지됨', 'info');
     }
+    // 시퀀스도 스냅샷에서 복원한다 — 구 구현은 현재 씬의 sequenceJson을 그대로
+    // 재사용해서, 플로우 그래프 편집이 Undo 대상에서 통째로 빠져 있었다 (C-4).
     const result = await loadScene(
-      { scene: spec, sequence: scene?.sequenceJson },
+      { scene: snapshot.scene, sequence: snapshot.sequence ?? scene?.sequenceJson },
       { fromHistory: true },
     );
     if (!result.ok) {
       for (const error of result.errors) appLog('error', `히스토리 복원 실패: ${error}`);
-      showToast('되돌리기/다시하기 실패 — Console 탭을 확인하세요', 'warn');
+      showToast('되돌리기/다시하기 실패 — 콘솔 탭을 확인하세요', 'warn');
       return false;
     }
     appLog('info', '씬 히스토리 복원 완료 (전체 클린 재로드)');
@@ -1034,6 +1416,9 @@ async function boot(): Promise<void> {
       rightStack?: HTMLDivElement;
       jointPanel?: ReturnType<typeof mountJointPanel>;
       inspector?: InspectorHandle;
+      sceneOutliner?: SceneOutlinerHandle;
+      statsHud?: StatsHudHandle;
+      dropHint?: DropHintHandle;
       entityEditor?: ReturnType<typeof mountEntityEditor>;
       flowNodeEditor?: ReturnType<typeof mountNodeEditor>;
       flowCanvas?: ReturnType<typeof mountFlowCanvas>;
@@ -1064,6 +1449,9 @@ async function boot(): Promise<void> {
       built.flowNodeEditor?.dispose();
       built.entityEditor?.dispose();
       built.inspector?.dispose();
+      built.sceneOutliner?.dispose();
+      built.statsHud?.dispose();
+      built.dropHint?.dispose();
       built.jointPanel?.dispose();
       built.rightStack?.remove();
       built.timelinePanel?.dispose();
@@ -1118,7 +1506,7 @@ async function boot(): Promise<void> {
             appLog('error', `시퀀스 검증 실패: ${error}`);
           }
           showToast(
-            '시퀀스 검증 실패 — 플로우를 로드하지 않았습니다. Console 탭에서 사유를 확인하세요',
+            '시퀀스 검증 실패 — 플로우를 로드하지 않았습니다. 콘솔 탭에서 사유를 확인하세요',
             'warn',
           );
         }
@@ -1242,6 +1630,8 @@ async function boot(): Promise<void> {
           appLog('error', msg);
           showToast(msg, 'warn');
         }
+        // 성공/실패 무관 — 실패 복원도 스펙을 바꿀 수 있다 (UX_AUDIT C-3)
+        markDocumentChanged();
       };
 
       // 기즈모 모드/스냅 오버레이 (UX §3.3 — W/E/R 단축키는 interaction이 처리)
@@ -1397,8 +1787,11 @@ async function boot(): Promise<void> {
       const collisionPanel = createCollisionLogPanel({
         onFocusEntity: (entityId) => {
           const node = visualNodeOf(entityId);
-          if (node && entityId !== GROUND_ENTITY_ID) pulseEntity(node);
-          appLog('info', `충돌 로그: '${entityId}' 하이라이트`);
+          if (node && entityId !== GROUND_ENTITY_ID) {
+            pulseEntity(node);
+            render.frameObject(node); // 라벨이 약속한 '포커스'를 실제로 수행한다
+          }
+          appLog('info', `충돌 로그: '${entityId}' 포커스`);
         },
         // 행 클릭 → 그 충돌 시점(timeSec)에 active였던 노드를 강조 (§3.6, Phase 10).
         // 기록된 노드 활성 시작 simTime 경계로 timeSec을 노드 인덱스로 접는다(근사 — loop 주석).
@@ -1416,13 +1809,37 @@ async function boot(): Promise<void> {
         },
       });
       built.collisionPanel = collisionPanel;
+      // 첫 충돌 안내 1회 + 오버레이/상태줄이 읽는 누적 카운트 (씬 리셋 시 함께 되돌린다)
+      let firstCollisionNoticed = false;
+      let collisionCountForOverlay = 0;
+      let lastCollisionPairForOverlay: string | null = null;
       const consolePanel = createConsolePanel();
       built.consolePanel = consolePanel;
-      built.dock = mountDock(workspace.slots.dock, [
-        { label: 'Timeline', content: timelinePanel.el },
-        { label: 'Collision Log', content: collisionPanel.el },
-        { label: 'Console', content: consolePanel.el },
-      ]);
+      built.dock = mountDock(
+        workspace.slots.dock,
+        [
+          { id: DOCK_TAB_ID.timeline, label: '타임라인', content: timelinePanel.el },
+          { id: DOCK_TAB_ID.collision, label: '충돌 로그', content: collisionPanel.el },
+          { id: DOCK_TAB_ID.console, label: '콘솔', content: consolePanel.el },
+        ],
+        {
+          // 접혀 있어도 "1/7 · 2.66s ▓▓░░"가 탭바에 남는다 — 접기의 정보 손실이 0이다
+          strip: timelinePanel.stripEl,
+          initialCollapsed: workspace.isDockCollapsed(),
+          // 독은 자기 본문만 접는다 — 그리드 슬롯을 실제로 줄이는 건 워크스페이스다.
+          // 이 배선이 없으면 접어도 뷰포트가 1px도 커지지 않는다 (UX_AUDIT C-1).
+          onCollapseChange: (collapsed) => {
+            workspace.setDockCollapsed(collapsed);
+          },
+          // 충돌 로그를 열면 미확인 카운트를 리셋해 배지 소스와 동기화한다
+          onTabActivated: (tabId) => {
+            if (tabId === DOCK_TAB_ID.collision) {
+              collisionPanel.resetUnseen();
+              built.dock?.setBadge(DOCK_TAB_ID.collision, 0);
+            }
+          },
+        },
+      );
       // 독의 fixed 오버레이 기본값을 슬롯 흐름으로 중화 (workspace 편입)
       Object.assign(built.dock.el.style, {
         position: 'static',
@@ -1440,7 +1857,21 @@ async function boot(): Promise<void> {
       // (UX_DESIGN §3.3 "충돌 오브젝트 하이라이트 + 접촉점 마커" / §3.6 로그)
       built.offMonitor = monitor.subscribe((e) => {
         collisionPanel.addEvent(e);
+        // 비활성 탭에 쌓인 충돌을 탭 배지로 표면화한다 (UX_AUDIT C-7): 구 구현은
+        // waitForCollision을 포함한 시퀀스가 완주해도 충돌이 있었다는 표시가 화면
+        // 어디에도 없었다 — 이 제품의 존재 이유가 3번째 탭 뒤에 숨어 있었다.
+        built.dock?.setBadge(DOCK_TAB_ID.collision, collisionPanel.unseenCount());
+        if (e.phase === 'start') {
+          collisionCountForOverlay += 1;
+          lastCollisionPairForOverlay = `${e.a} × ${e.b}`;
+        }
+        viewportStatusRef?.setCollisionCount(collisionCountForOverlay);
         if (e.phase !== 'start') return;
+        // 첫 충돌 1회만 안내한다 — 매번 띄우면 학습적으로 무시된다
+        if (!firstCollisionNoticed) {
+          firstCollisionNoticed = true;
+          showToast('충돌이 감지되었습니다 — 하단 독의 «충돌 로그»를 확인하세요', 'warn');
+        }
         // "어디서" 부딪혔는지 — 물리에서 온 월드 접촉점 (sensor는 접촉점이 없다)
         if (e.point) contactMarkers.spawn(e.point, e.normal);
         // "무엇이" 부딪혔는지 — 관련 엔티티 펄스
@@ -1454,6 +1885,7 @@ async function boot(): Promise<void> {
       // 인스펙터 핸들 — 아래 재생 컨트롤·onTick 클로저가 참조하므로 먼저 선언한다
       // (마운트는 우측 패널 스택 조립 시점 — window.__sim 배선 이후)
       let inspectorRef: InspectorHandle | null = null;
+      let sceneOutlinerRef: SceneOutlinerHandle | null = null;
       let inspectorLastRefreshMs = 0;
       let inspectorLastEngineState: EngineState = 'idle';
 
@@ -1501,24 +1933,52 @@ async function boot(): Promise<void> {
         monitor.clear();
         collisionPanel.clear();
         contactMarkers.clear(); // 이전 실행의 접촉 마커가 되감기 후 남지 않게
+        collisionCountForOverlay = 0;
+        lastCollisionPairForOverlay = null;
+        firstCollisionNoticed = false;
+        built.dock?.setBadge(DOCK_TAB_ID.collision, 0);
+        viewportStatusRef?.setCollisionCount(0);
         armFromStart();
       };
 
       // 재생 컨트롤은 Orchestrator를 경유한다(§5): Play/Pause/Stop/Step/속도가 모두 노드 단위
       // 오케스트레이션 계층을 통과해 파사드·사람 조작이 같은 진실을 본다. ⏭ Step은 물리 1
       // tick이 아니라 "노드 1개"다(§5) — 물리-tick 프레임 스텝(engine.stepOnce)은 UI에서 내린다.
+      // 실행은 레이아웃의 1급 상태다 (UX_AUDIT C-9): ▶Play가 그래프를 56px 노드 스트립으로
+      // 접어 뷰포트를 넓히고, ⏹Stop이 복원한다. UX_DESIGN §2 "실행 중 뷰포트 우선 확장,
+      // 그래프는 최소 높이 유지" + §8 "실행 중 Viewport+활성 노드 스트립"의 구현이다.
+      // §1의 동시 가시성 원칙은 유지된다 — 그래프가 사라지는 게 아니라 얇아진다.
+      let flowModeBeforeRun: 'full' | 'strip' | 'off' | null = null;
+      const enterRunLayout = (): void => {
+        document.body.dataset.runState = 'running';
+        if (flowModeBeforeRun !== null) return;
+        const mode = workspace.getFlowMode();
+        if (mode !== 'full') return;
+        flowModeBeforeRun = mode;
+        workspace.setFlowMode('strip');
+      };
+      const exitRunLayout = (idle: boolean): void => {
+        document.body.dataset.runState = idle ? 'idle' : 'paused';
+        if (!idle || flowModeBeforeRun === null) return;
+        workspace.setFlowMode(flowModeBeforeRun);
+        flowModeBeforeRun = null;
+      };
+
       const playbackControls = {
         play: (): void => {
           armSequenceIfAvailable();
           orchestrator.play();
+          enterRunLayout();
           refreshOverlay(); // engine.play() 직후 동기 갱신 — rAF 지연 없이 'Running · node k/n' 전이 (§5)
         },
         pause: (): void => {
           orchestrator.pause();
+          exitRunLayout(false);
           refreshOverlay(); // 'Paused' 전이를 즉시 반영 (정지에는 onActiveNode 방출이 없다)
         },
         stop: (): void => {
           orchestrator.stop();
+          exitRunLayout(true);
           refreshOverlay(); // 'Idle' 전이를 즉시 반영
         },
         stepOnce: (): void => {
@@ -1527,6 +1987,7 @@ async function boot(): Promise<void> {
           refreshOverlay(); // 노드 스텝 재생 전이를 즉시 반영 (경계 정지는 onTick이 뒤따라 반영)
           // 노드 스텝은 엔진을 잠시 재생 후 경계에서 멈춘다 — 인스펙터는 onTick 상태 전이로 갱신됨
           inspectorRef?.refresh();
+        sceneOutlinerRef?.refresh();
         },
         setSpeed: (speedMult: number): void => {
           // select 옵션은 ENGINE_SPEED_OPTIONS에서 생성되므로 항상 유효하다
@@ -1537,11 +1998,13 @@ async function boot(): Promise<void> {
       // 재생 컨트롤은 커맨드바 중앙 슬롯에 — 씬마다 재마운트한다 (속도 select 등
       // 뷰 상태가 씬을 가로질러 새지 않는다: 새 엔진의 기본 속도 1×와 표시가 일치)
       const playbackBar = mountPlaybackBar(
-        commandBar.center,
+        commandBar.rowBTransport,
         playbackControls,
         ENGINE_SPEED_OPTIONS,
       );
       built.playbackBar = playbackBar;
+      currentPlayback = playbackControls;
+      activePlaybackBar = playbackBar;
 
       // ⚙ '충돌 시 자동 정지' 토글 (§5 "예기치 않은 충돌 시 자동 ⏸") — 재생 바 옆, 기본 off.
       // 켜면 로봇–환경/사물의 비의도 충돌(waitForCollision 대상이 아닌 로봇 접촉)에서 자동
@@ -1571,20 +2034,56 @@ async function boot(): Promise<void> {
       autoPauseLabel.appendChild(autoPauseCheckbox);
       autoPauseLabel.appendChild(autoPauseText);
       autoPauseLabel.title = '예기치 않은 로봇 충돌에서 자동 ⏸ + 해당 노드 강조 (§5)';
-      commandBar.center.appendChild(autoPauseLabel);
+      setCommandBarPriority(autoPauseLabel, COMMAND_BAR_PRIORITY.misc);
+      commandBar.rowBTransport.appendChild(autoPauseLabel);
       built.autoPauseControl = autoPauseLabel;
 
       // 뷰포트 좌하단 실행 오버레이 (UX_DESIGN §3.3/§5) — Phase 10 오케스트레이션 배지가
       // 기존 statusline의 상태 라인을 대체한다. statusline은 "빈 씬 중앙 안내"만 담당하도록
       // 상태 라인 el을 숨겨 남긴다(중앙 안내는 setEmptyHintVisible로 씬 편집과 계속 연동).
-      const viewportStatus = mountViewportStatus(workspace.slots.viewport, {
+      const viewportStatus: ViewportStatusHandle = mountViewportStatus(workspace.slots.viewport, {
+        onFocusCollisionLog: () => {
+          built.dock?.activateTab(DOCK_TAB_ID.collision);
+        },
         sceneName: spec.name,
         emptyScene: spec.entities.length === 0,
       });
       viewportStatus.el.style.display = 'none'; // run-overlay가 상태 라인을 대체 (중앙 빈 씬 안내만 유지)
       built.viewportStatus = viewportStatus;
+      viewportStatusRef = viewportStatus;
+
+      // F 키 / 충돌 로그 행 클릭이 쓰는 카메라 프레이밍 (UX_DESIGN §9).
+      // 구 구현에는 프레이밍이 아예 없어서, 충돌 로그의 "오브젝트 포커스" 안내가
+      // 실제로는 펄스만 시켰다 — 대상이 화면 밖이면 사용자는 아무것도 보지 못했다.
+      resetCameraView = (): void => {
+        render.resetCamera();
+      };
+      focusSelectedEntity = (): void => {
+        const id = interaction.selectedId;
+        if (id === null) {
+          render.resetCamera();
+          return;
+        }
+        const node = visualNodeOf(id);
+        if (node) render.frameObject(node);
+      };
 
       const runOverlay = mountRunOverlay(workspace.slots.viewport);
+
+      // 실행 계측 HUD (UX_AUDIT C-15) — 시뮬레이터를 자처하는데 FPS/RTF/스텝 지표가
+      // 하나도 없었다. CLAUDE.md §2.3의 고정 timestep 결정론과 PRD NFR-2의 프레임 예산이
+      // 런타임에 **관측 가능한 사실**이 된다. Gazebo/Isaac Sim 사용자는 RTF를 먼저 본다.
+      const statsHud = mountStatsHud(workspace.slots.viewport);
+      built.statsHud = statsHud;
+      let lastStatsSimSec = engine.simTimeSec;
+      let lastStatsWallMs = performance.now();
+      const specColliderCount = (): number =>
+        editor.spec.entities.reduce((n, e) => n + (e.physics?.colliders.length ?? 0), 0);
+
+      // 드래그 배치 힌트 (UX_AUDIT C-17) — 라이브러리 카드를 끌 때 "여기에 놓을 수 있다"
+      const dropHint = mountDropHint(workspace.slots.viewport);
+      built.dropHint = dropHint;
+      activeDropHint = dropHint;
       built.runOverlay = runOverlay;
       /** 마지막 오버레이 스냅샷 — 파사드 overlayText()가 순수 요약(run-overlay.overlaySummary)으로 그린다. */
       let lastOverlayState: RunOverlayState = {
@@ -1621,6 +2120,10 @@ async function boot(): Promise<void> {
           // 선택 상태를 뷰포트에 상시 노출 — 우측 패널은 스크롤로 가려질 수 있고,
           // 선택이 풀린 줄 모른 채 방향키를 누르는 실패 연쇄가 여기서 끊긴다.
           selectedEntityId: interaction.selectedId,
+          // 충돌 축 (UX_AUDIT C-7) — '충돌 N건' 세그먼트 + 3초 스로틀 요약 발화.
+          // 0건도 표시한다: "감지가 돌고 있다"는 신호 자체가 정보다.
+          collisionCount: collisionCountForOverlay,
+          lastCollisionPair: lastCollisionPairForOverlay,
         };
       };
 
@@ -1648,6 +2151,20 @@ async function boot(): Promise<void> {
 
       // rAF당 1회: 재생 바 + 타임라인 리드아웃 + 상호작용 헬퍼 갱신 (물리 tick과 분리)
       built.offTick = engine.onTick((info) => {
+        {
+          // 벽시계 0.25s 창으로 RTF를 갱신한다 — 매 tick 갱신은 숫자가 떨려 읽을 수 없다
+          const nowMs = performance.now();
+          const wallSec = (nowMs - lastStatsWallMs) / 1000;
+          if (wallSec >= 0.25) {
+            statsHud.update({
+              rtf: computeRtf(info.simTimeSec - lastStatsSimSec, wallSec),
+              entityCount: editor.spec.entities.length,
+              colliderCount: specColliderCount(),
+            });
+            lastStatsSimSec = info.simTimeSec;
+            lastStatsWallMs = nowMs;
+          }
+        }
         interaction.update(); // BoxHelper 아웃라인이 이동/애니메이션 중 선택 대상을 따라간다
         // 접촉점 마커 감쇠 — 벽시계 기준이라 일시정지 중에도 자연스럽게 사라진다
         contactMarkers.update(performance.now());
@@ -1687,9 +2204,11 @@ async function boot(): Promise<void> {
           if (nowMs - inspectorLastRefreshMs >= INSPECTOR_REFRESH_INTERVAL_MS) {
             inspectorLastRefreshMs = nowMs;
             inspectorRef?.refresh();
+        sceneOutlinerRef?.refresh();
           }
         } else if (inspectorStateChanged) {
           inspectorRef?.refresh();
+        sceneOutlinerRef?.refresh();
         }
       });
 
@@ -1917,13 +2436,52 @@ async function boot(): Promise<void> {
         onSelect: (id) => {
           interaction.select(id);
         },
-      });
+        // 목록(아웃라이너)은 좌 패널이 소유한다 — 아웃라이너 ≠ 프로퍼티 (UX_AUDIT C-16).
+        // 한 컬럼에 두면 속성 폼이 길어질 때 목록이 화면 밖으로 밀려, 선택을 바꾸려면
+        // 스크롤부터 해야 했다(로봇 선택 시 최대 865px).
+      }, { showList: false });
       built.inspector = inspector;
+
+      // 씬 아웃라이너 — 좌 패널 하단(라이브러리 아래). 좌 패널 콘텐츠는 y≈540에서 끝나고
+      // 329px가 비어 있었으므로 추가 화면 비용은 0이다.
+      const sceneOutliner = mountSceneOutliner(workspace.slots.left, {
+        listEntities: () => editor.spec.entities.map((e) => ({ id: e.id, type: e.type })),
+        onSelect: (id) => {
+          interaction.select(id); // 선택 진실은 interaction — 변경 가드가 루프를 막는다
+        },
+      });
+      Object.assign(sceneOutliner.el.style, {
+        flex: '1 1 42%',
+        minHeight: '120px',
+        borderRadius: '0',
+        borderLeft: 'none',
+        borderRight: 'none',
+        borderBottom: 'none',
+      } satisfies Partial<CSSStyleDeclaration>);
+      built.sceneOutliner = sceneOutliner;
+      sceneOutlinerRef = sceneOutliner;
       adoptIntoStack(inspector.el, RIGHT_STACK_ORDER.inspector);
       inspectorRef = inspector;
 
       // 엔티티 편집 폼 (UX §3.5 (A) — 이름/Transform/Dimensions/Physics 쓰기)
       const entityEditor = mountEntityEditor(rightStack, {
+        // 오브젝트를 지울 방법이 UI에 아예 없었다 — core에 removeEntity가 완전 구현돼
+        // 있는데 호출부가 window.__sim 자동화 파사드뿐이라, 라이브러리에서 넣을 수만
+        // 있고 뺄 수 없는 add-only 함정이었다 (UX_AUDIT C-4).
+        onDeleteEntity: (id) => {
+          runEdit(() => {
+            editorFacade.removeEntity(id); // 재생 중 로봇 제거 가드가 안에 있다
+          });
+          interaction.select(null);
+          toasts.show('success', `'${id}' 삭제됨`, {
+            action: {
+              label: '실행 취소',
+              onClick: () => {
+                void history.undo();
+              },
+            },
+          });
+        },
         getEntity: (id) => {
           const entity = editor.spec.entities.find((e) => e.id === id);
           return entity ? structuredClone(entity) : null;
@@ -2002,6 +2560,13 @@ async function boot(): Promise<void> {
        * 은 계속 돈다. 다음 ▶ Play가 편집본을 처음부터 재생한다.
        */
       const commitFlowSequence = (seq: ControlSequence): void => {
+        // 시퀀스만 바뀌어도 문서는 미저장이다 — 구 저장은 이 축을 통째로 버렸다 (C-3)
+        queueMicrotask(markDocumentChanged);
+        // 노드 편집(삭제·재정렬·복제·파라미터·교체 생성)을 Undo 대상으로 만든다 (C-4).
+        // 구 구현에서는 15분간 손질한 시퀀스가 Del 한 번에 복구 불가로 사라졌다.
+        history.flushPending(); // 직전 씬 편집 burst와 경계를 세운다
+        history.noteChange(() => ({ scene: editor.serialize(), sequence: seq }));
+        history.flushPending();
         const wasArmed = sequenceArmed;
         currentSequence = seq;
         if (wasArmed) {
@@ -2156,6 +2721,15 @@ async function boot(): Promise<void> {
           }
         },
         paletteContext: flowPaletteContext,
+        // 빈 플로우의 '자연어로 만들기' → 커맨드바 자연어 입력에 포커스 (UX_AUDIT C-12).
+        // 구 구현은 여기서 "Phase 9에서 제공됩니다"라고 **거짓 안내**를 했다 — 플래너는
+        // 이미 출시되어 있었고, 첫 사용자가 가장 도움이 필요한 순간에 이탈시켰다.
+        onRequestNlFocus: () => {
+          const field = nlInput?.el.querySelector<HTMLInputElement>('[data-testid="nl-text"]');
+          if (field === null || field === undefined) return;
+          field.focus();
+          field.select();
+        },
       });
       built.flowCanvas = flowCanvas;
 
@@ -2582,6 +3156,7 @@ async function boot(): Promise<void> {
       // 이 리스너를 통해 인스펙터/편집 폼에 전파된다. 각 모듈의 변경 가드가 루프를 막는다.
       interaction.onSelect((id) => {
         inspector.select(id);
+        sceneOutliner.select(id);
         entityEditor.showFor(id);
         refreshOverlay(); // 선택 리드아웃('선택 <id>')을 rAF 지연 없이 즉시 반영
         if (id !== null) {
@@ -2594,6 +3169,7 @@ async function boot(): Promise<void> {
           if (node) pulseEntity(node);
         }
         inspector.refresh();
+        sceneOutliner.refresh();
       });
 
       // ── 편집 통지 → 파생 상태 재동기화 + 히스토리 기록 ────────────────
@@ -2602,6 +3178,7 @@ async function boot(): Promise<void> {
         syncJointPanel(); // 로봇 추가/삭제/개명 → 관절 슬라이더 패널 재구성
         resyncFlowWithSceneEdit(e); // rename 참조 리매핑 · 기본 로봇 채택 (플로우 잠김 방지)
         inspector.refresh();
+        sceneOutliner.refresh();
         viewportStatus.setEmptyHintVisible(editor.spec.entities.length === 0);
         if (e.kind === 'rename') {
           // 이전 id의 선택은 rebuildPickables가 해제했다 — 새 id를 재선택해 연속성 유지
@@ -2617,7 +3194,10 @@ async function boot(): Promise<void> {
         // 개별 스냅샷이 된다 — "undo 1회 = 구조 변경 1개" (ui/history.ts 계약).
         const discrete = e.kind === 'add' || e.kind === 'remove' || e.kind === 'rename';
         if (discrete) history.flushPending(); // 직전 연속 burst를 먼저 확정
-        history.noteChange(() => editor.serialize());
+        history.noteChange(() => ({
+          scene: editor.serialize(),
+          sequence: currentSequence,
+        }));
         if (discrete) history.flushPending();
       });
 
@@ -2683,7 +3263,9 @@ async function boot(): Promise<void> {
       jsonViewer.refresh(); // 시퀀스 뷰어를 새 씬 진실로 갱신
       // 히스토리: 새 "논리 씬"이면 스택 리셋 + 기준 스냅샷. 히스토리 복원 재로드면
       // 스택을 건드리지 않는다 (SceneHistory가 스택 이동을 소유).
-      if (!opts.fromHistory) history.reset(active.editor.serialize());
+      if (!opts.fromHistory) {
+        history.reset({ scene: active.editor.serialize(), sequence: active.validSequence ?? null });
+      }
       return { ok: true };
     } catch (err) {
       // 빌드 도중 실패 — 이전 씬은 이미 해제되어 빈 상태로 남는다. 사유는 호출자
@@ -2721,7 +3303,7 @@ async function boot(): Promise<void> {
         return { ok: false, errors: result.errors, sceneLost: result.stage === 'build' };
       },
       switchToUpload: async (payload, fileName): Promise<SceneSwitchResult> => {
-        const { scene, sequence } = unwrapUploadEnvelope(payload);
+        const { scene, sequence } = parseDocument(payload);
         const result = await loadScene({ scene, sequence });
         if (result.ok) {
           updateUrlSceneParam(null); // 업로드 씬은 딥링크 불가 — 파라미터 제거
@@ -2747,8 +3329,19 @@ async function boot(): Promise<void> {
         }
         return spec;
       },
+      // 저장은 **씬 + 시퀀스 봉투**로 나간다 (UX_AUDIT C-3)
+      saveDocument: () => {
+        saveDocumentToFile();
+      },
+      onShowHelp: () => {
+        helpSheet.open();
+      },
     },
+    { helpHost: commandBar.rowAEnd },
   );
+  dirtyTracker.onChange((dirty) => {
+    sceneControls.setDirty(dirty);
+  });
   commandBar.left.appendChild(undoButton);
   commandBar.left.appendChild(redoButton);
 
@@ -2795,7 +3388,10 @@ async function boot(): Promise<void> {
     importDialog.openWith(file);
   });
 
-  mountLibrary(workspace.slots.left, {
+  const library = mountLibrary(workspace.slots.left, {
+    onDragState: (dragActive, label) => {
+      activeDropHint?.setActive(dragActive, label);
+    },
     onPlace: (entitySpec, dropClient) => {
       const scene = active;
       if (!scene) return;
@@ -2808,6 +3404,12 @@ async function boot(): Promise<void> {
     uniquify: (base) => active?.uniquifyId(base) ?? base,
     onImportRequest: () => importFileInput.click(),
   });
+  // 좌 슬롯 세로 배분: 라이브러리(카드 그리드) 60 / 씬 아웃라이너 40.
+  // 아웃라이너는 씬 빌드마다 재마운트되므로 배분은 슬롯 쪽에서 고정한다.
+  Object.assign(library.el.style, {
+    flex: '1 1 58%',
+    minHeight: '0',
+  } satisfies Partial<CSSStyleDeclaration>);
 
   // 뷰포트 드롭: 라이브러리 카드(TEMPLATE_MIME) 또는 3D 파일 (UX §3.2 드롭 계약, §4.4)
   workspace.slots.viewport.addEventListener('dragover', (e: DragEvent) => {
@@ -3009,7 +3611,7 @@ async function boot(): Promise<void> {
 
   // nl-input (커맨드바 중앙-좌 — 재생 컨트롤 앞). 생성 요청만 발행하고 실행·검증·그래프
   // 로드는 runGenerate가 담당한다 (nl-input은 core/planner를 모른다 — CLAUDE.md §3).
-  nlInput = mountNlInput(commandBar.center, {
+  nlInput = mountNlInput(commandBar.rowBCommand, {
     generate: (nl, mode) => runGenerate(nl, mode).then(() => undefined),
     isBusy: () => generating,
   });
@@ -3042,6 +3644,51 @@ async function boot(): Promise<void> {
   }
   sceneControls.setCurrent(bootSceneName);
   workspace.notifyResize(); // 슬롯 편입 직후 캔버스 크기를 워크스페이스 그리드에 맞춘다
+
+  // 부트 직후를 "저장됨" 기준선으로 삼는다 — 이후의 편집만 미저장으로 센다
+  {
+    // 명시 타입: `active`는 클로저(loadScene) 안에서만 대입되므로 여기서 CFA가 null로
+    // 좁혀 있다 — 선언 타입으로 되돌려 읽는다.
+    const scene = getActiveScene();
+    if (scene !== null) {
+      dirtyTracker.markSaved(scene.editor.serialize(), scene.validSequence ?? null);
+    }
+    setDocumentTitle(scene?.spec.name ?? null, false);
+  }
+  dismissBoot();
+
+  // ── 이전 작업 복원 (UX_AUDIT C-3) ────────────────────────────────
+  //
+  // 브라우저 완결형이라는 장점이 정확히 반대로 작동하던 지점이다 — 데스크톱 앱은
+  // 크래시해도 복구 파일이 있지만, 이 앱은 탭 실수 하나로 0이 됐다.
+  void (async (): Promise<void> => {
+    const draft = await documentStore.loadDraft().catch(() => null);
+    if (draft === null) return;
+    const banner = mountRestoreBanner(document.body, {
+      ageText: describeAge(draft.updatedAtIso, Date.now()),
+      originLabel: draft.originLabel,
+      onRestore: () => {
+        void (async (): Promise<void> => {
+          const result = await loadScene({
+            scene: draft.doc.scene,
+            sequence: draft.doc.sequence,
+          });
+          if (result.ok) {
+            updateUrlSceneParam(null);
+            appLog('info', `이전 작업 복원: '${draft.doc.name}'`);
+            showToast(`'${draft.doc.name}' 복원됨`, 'info');
+          } else {
+            appLog('error', `복원 실패: ${result.errors.join(' / ')}`);
+            showToast('복원에 실패했습니다 — 콘솔 탭을 확인하세요', 'warn');
+          }
+        })();
+      },
+      onDismiss: () => {
+        void documentStore.clearDraft();
+      },
+    });
+    void banner;
+  })();
 }
 
 boot().catch((err: unknown) => {

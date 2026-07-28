@@ -3,22 +3,39 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>robot-sim-web</title>
+    <title>Workcell — 브라우저에서 완결되는 로봇 시뮬레이션 스튜디오</title>
+    <meta name="description" content="설치도 계정도 없이 브라우저에서 로봇 워크셀을 구성하고, 자연어로 제어 시퀀스를 만들고, 충돌을 감지한다." />
+    <meta name="theme-color" content="#11141C" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+
+    <!-- 자체 호스팅 웹폰트. 동적 서브셋이라 브라우저가 실제 쓰는 unicode-range만 받는다
+         (전체 3.1MB 중 한국어 UI 실사용은 통상 100~250KB). font-display:swap이라
+         렌더 블로킹이 없다 — 시스템 폰트로 즉시 그리고 Pretendard가 교체된다. -->
+    <link rel="preload" as="style" href="/fonts/pretendard.css" />
+    <link rel="stylesheet" href="/fonts/pretendard.css" />
+
     <style>
-      /* 베이스 레이어 — 상세 토큰/컴포넌트 스타일은 src/ui/theme.ts가 주입한다 */
+      /* 부트 레이어만 — 토큰/컴포넌트 스타일은 전부 src/ui/theme.ts가 소유한다.
+         여기 값은 FOUC 방지용 최소 복제이며, theme.ts의 SURFACE.base / COLOR.text /
+         FONT.ui와 같은 값이어야 한다(바뀌면 함께 고칠 것). */
       :root {
         color-scheme: dark;
       }
-      html, body {
+      html,
+      body {
         margin: 0;
         padding: 0;
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: #14161a;
-        color: #cfd4db;
-        font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans KR', sans-serif;
+        background: #11141c; /* = theme.ts SURFACE.base */
+        color: #c7cedb; /* = theme.ts COLOR.text */
+        font-family:
+          'Pretendard Variable', Pretendard, system-ui, -apple-system, 'Segoe UI', Roboto,
+          sans-serif;
         -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
       }
       #app {
         width: 100%;
@@ -28,12 +45,65 @@
         display: block;
       }
       ::selection {
-        background: rgba(230, 126, 34, 0.35);
+        background: rgba(124, 106, 246, 0.35); /* = theme.ts COLOR.accent @ 35% */
+      }
+
+      /* 첫 페인트 ~ WASM 초기화 사이의 부트 표시. main.ts가 제거한다. */
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: #11141c;
+        z-index: 500;
+        transition: opacity 220ms cubic-bezier(0.2, 0, 0, 1);
+      }
+      #boot[data-hiding='true'] {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #boot .boot-mark {
+        width: 44px;
+        height: 44px;
+        border-radius: 11px;
+        background: linear-gradient(135deg, #8b7bff, #5b48e0);
+        box-shadow: 0 8px 28px rgba(91, 72, 224, 0.35);
+        animation: boot-breathe 1.6s ease-in-out infinite;
+      }
+      #boot .boot-text {
+        font-size: 12px;
+        line-height: 18px;
+        color: #a2acc0;
+        letter-spacing: 0.01em;
+      }
+      @keyframes boot-breathe {
+        0%,
+        100% {
+          transform: scale(1);
+          opacity: 0.85;
+        }
+        50% {
+          transform: scale(1.08);
+          opacity: 1;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot .boot-mark {
+          animation: none;
+        }
       }
     </style>
   </head>
   <body>
+    <a class="rsw-skip-link" href="#workcell-main">본문으로 건너뛰기</a>
     <div id="app"></div>
+    <div id="boot" role="status" aria-live="polite">
+      <div class="boot-mark" aria-hidden="true"></div>
+      <div class="boot-text">Workcell 시작 중 — 물리 엔진 준비</div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
