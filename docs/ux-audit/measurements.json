@@ -1,0 +1,1291 @@
+{
+  "layout_1920x1080": {
+    "window": {
+      "w": 1920,
+      "h": 1080
+    },
+    "commandBar": {
+      "w": 1920,
+      "h": 44,
+      "x": 0,
+      "y": 0
+    },
+    "left": {
+      "w": 240,
+      "h": 820,
+      "x": 0,
+      "y": 44
+    },
+    "viewport": {
+      "w": 1390,
+      "h": 574,
+      "x": 245,
+      "y": 44
+    },
+    "flowGraph": {
+      "w": 1390,
+      "h": 241,
+      "x": 245,
+      "y": 623
+    },
+    "right": {
+      "w": 280,
+      "h": 820,
+      "x": 1640,
+      "y": 44
+    },
+    "dock": {
+      "w": 1920,
+      "h": 211,
+      "x": 0,
+      "y": 869
+    },
+    "viewportSharePct": 38.5,
+    "barOverflowing": false,
+    "barScrollW": 1920,
+    "barClientW": 1920,
+    "overlapCount": 1,
+    "overlaps": [
+      {
+        "a": "충돌 시 자동 정지",
+        "b": "on",
+        "px": 13
+      }
+    ],
+    "dockUnusedPx": 0,
+    "canvas": {
+      "cssW": 1390,
+      "cssH": 574
+    },
+    "docOverflowX": false,
+    "errorsNone": true,
+    "pageErrors": []
+  },
+  "layout_1600x900": {
+    "window": {
+      "w": 1600,
+      "h": 900
+    },
+    "commandBar": {
+      "w": 1600,
+      "h": 44,
+      "x": 0,
+      "y": 0
+    },
+    "left": {
+      "w": 240,
+      "h": 640,
+      "x": 0,
+      "y": 44
+    },
+    "viewport": {
+      "w": 1070,
+      "h": 394,
+      "x": 245,
+      "y": 44
+    },
+    "flowGraph": {
+      "w": 1070,
+      "h": 241,
+      "x": 245,
+      "y": 443
+    },
+    "right": {
+      "w": 280,
+      "h": 640,
+      "x": 1320,
+      "y": 44
+    },
+    "dock": {
+      "w": 1600,
+      "h": 211,
+      "x": 0,
+      "y": 689
+    },
+    "viewportSharePct": 29.3,
+    "barOverflowing": false,
+    "barScrollW": 1600,
+    "barClientW": 1600,
+    "overlapCount": 8,
+    "overlaps": [
+      {
+        "a": "nl-text",
+        "b": "▶ Play",
+        "px": 60
+      },
+      {
+        "a": "nl-text",
+        "b": "⏸ Pause",
+        "px": 10
+      },
+      {
+        "a": "교체",
+        "b": "⏸ Pause",
+        "px": 46
+      },
+      {
+        "a": "이어서",
+        "b": "⏸ Pause",
+        "px": 8
+      },
+      {
+        "a": "이어서",
+        "b": "⏹ Stop",
+        "px": 44
+      },
+      {
+        "a": "✨ 생성",
+        "b": "⏹ Stop",
+        "px": 12
+      },
+      {
+        "a": "✨ 생성",
+        "b": "⏭ Step",
+        "px": 49
+      },
+      {
+        "a": "충돌 시 자동 정지",
+        "b": "on",
+        "px": 13
+      }
+    ],
+    "dockUnusedPx": 0,
+    "canvas": {
+      "cssW": 1070,
+      "cssH": 394
+    },
+    "docOverflowX": false,
+    "errorsNone": true,
+    "pageErrors": []
+  },
+  "layout_1440x900": {
+    "window": {
+      "w": 1440,
+      "h": 900
+    },
+    "commandBar": {
+      "w": 1440,
+      "h": 44,
+      "x": 0,
+      "y": 0
+    },
+    "left": {
+      "w": 240,
+      "h": 640,
+      "x": 0,
+      "y": 44
+    },
+    "viewport": {
+      "w": 910,
+      "h": 394,
+      "x": 245,
+      "y": 44
+    },
+    "flowGraph": {
+      "w": 910,
+      "h": 241,
+      "x": 245,
+      "y": 443
+    },
+    "right": {
+      "w": 280,
+      "h": 640,
+      "x": 1160,
+      "y": 44
+    },
+    "dock": {
+      "w": 1440,
+      "h": 211,
+      "x": 0,
+      "y": 689
+    },
+    "viewportSharePct": 27.7,
+    "barOverflowing": false,
+    "barScrollW": 1440,
+    "barClientW": 1440,
+    "overlapCount": 13,
+    "overlaps": [
+      {
+        "a": "↶",
+        "b": "▶ Play",
+        "px": 5
+      },
+      {
+        "a": "↷",
+        "b": "nl-text",
+        "px": 32
+      },
+      {
+        "a": "↷",
+        "b": "▶ Play",
+        "px": 32
+      },
+      {
+        "a": "nl-text",
+        "b": "▶ Play",
+        "px": 48
+      },
+      {
+        "a": "nl-text",
+        "b": "⏸ Pause",
+        "px": 40
+      },
+      {
+        "a": "교체",
+        "b": "⏸ Pause",
+        "px": 24
+      },
+      {
+        "a": "교체",
+        "b": "⏹ Stop",
+        "px": 16
+      },
+      {
+        "a": "이어서",
+        "b": "⏹ Stop",
+        "px": 46
+      },
+      {
+        "a": "이어서",
+        "b": "⏭ Step",
+        "px": 6
+      },
+      {
+        "a": "✨ 생성",
+        "b": "⏭ Step",
+        "px": 48
+      },
+      {
+        "a": "✨ 생성",
+        "b": "0.25×0.5×1×2×4×",
+        "px": 13
+      },
+      {
+        "a": "충돌 시 자동 정지",
+        "b": "on",
+        "px": 13
+      },
+      {
+        "a": "충돌 시 자동 정지",
+        "b": "플로우",
+        "px": 51
+      }
+    ],
+    "dockUnusedPx": 0,
+    "canvas": {
+      "cssW": 910,
+      "cssH": 394
+    },
+    "docOverflowX": false,
+    "errorsNone": true,
+    "pageErrors": []
+  },
+  "layout_1366x768": {
+    "window": {
+      "w": 1366,
+      "h": 768
+    },
+    "commandBar": {
+      "w": 1366,
+      "h": 44,
+      "x": 0,
+      "y": 0
+    },
+    "left": {
+      "w": 240,
+      "h": 508,
+      "x": 0,
+      "y": 44
+    },
+    "viewport": {
+      "w": 836,
+      "h": 262,
+      "x": 245,
+      "y": 44
+    },
+    "flowGraph": {
+      "w": 836,
+      "h": 241,
+      "x": 245,
+      "y": 311
+    },
+    "right": {
+      "w": 280,
+      "h": 508,
+      "x": 1086,
+      "y": 44
+    },
+    "dock": {
+      "w": 1366,
+      "h": 211,
+      "x": 0,
+      "y": 557
+    },
+    "viewportSharePct": 20.9,
+    "barOverflowing": false,
+    "barScrollW": 1366,
+    "barClientW": 1366,
+    "overlapCount": 17,
+    "overlaps": [
+      {
+        "a": "💾 저장",
+        "b": "▶ Play",
+        "px": 2
+      },
+      {
+        "a": "↶",
+        "b": "nl-text",
+        "px": 30
+      },
+      {
+        "a": "↶",
+        "b": "▶ Play",
+        "px": 32
+      },
+      {
+        "a": "↷",
+        "b": "nl-text",
+        "px": 32
+      },
+      {
+        "a": "↷",
+        "b": "▶ Play",
+        "px": 10
+      },
+      {
+        "a": "↷",
+        "b": "⏸ Pause",
+        "px": 16
+      },
+      {
+        "a": "nl-text",
+        "b": "▶ Play",
+        "px": 48
+      },
+      {
+        "a": "nl-text",
+        "b": "⏸ Pause",
+        "px": 40
+      },
+      {
+        "a": "교체",
+        "b": "⏸ Pause",
+        "px": 24
+      },
+      {
+        "a": "교체",
+        "b": "⏹ Stop",
+        "px": 16
+      },
+      {
+        "a": "이어서",
+        "b": "⏹ Stop",
+        "px": 46
+      },
+      {
+        "a": "이어서",
+        "b": "⏭ Step",
+        "px": 6
+      },
+      {
+        "a": "✨ 생성",
+        "b": "⏭ Step",
+        "px": 48
+      },
+      {
+        "a": "✨ 생성",
+        "b": "0.25×0.5×1×2×4×",
+        "px": 13
+      },
+      {
+        "a": "충돌 시 자동 정지",
+        "b": "on",
+        "px": 13
+      },
+      {
+        "a": "충돌 시 자동 정지",
+        "b": "플로우",
+        "px": 58
+      },
+      {
+        "a": "충돌 시 자동 정지",
+        "b": "{} JSON",
+        "px": 24
+      }
+    ],
+    "dockUnusedPx": 0,
+    "canvas": {
+      "cssW": 836,
+      "cssH": 262
+    },
+    "docOverflowX": false,
+    "errorsNone": true,
+    "pageErrors": []
+  },
+  "layout_1280x720": {
+    "window": {
+      "w": 1280,
+      "h": 720
+    },
+    "commandBar": {
+      "w": 1280,
+      "h": 44,
+      "x": 0,
+      "y": 0
+    },
+    "left": {
+      "w": 240,
+      "h": 460,
+      "x": 0,
+      "y": 44
+    },
+    "viewport": {
+      "w": 750,
+      "h": 214,
+      "x": 245,
+      "y": 44
+    },
+    "flowGraph": {
+      "w": 750,
+      "h": 241,
+      "x": 245,
+      "y": 263
+    },
+    "right": {
+      "w": 280,
+      "h": 460,
+      "x": 1000,
+      "y": 44
+    },
+    "dock": {
+      "w": 1280,
+      "h": 211,
+      "x": 0,
+      "y": 509
+    },
+    "viewportSharePct": 17.4,
+    "barOverflowing": false,
+    "barScrollW": 1280,
+    "barClientW": 1280,
+    "overlapCount": 20,
+    "overlaps": [
+      {
+        "a": "💾 저장",
+        "b": "nl-text",
+        "px": 33
+      },
+      {
+        "a": "💾 저장",
+        "b": "▶ Play",
+        "px": 45
+      },
+      {
+        "a": "↶",
+        "b": "nl-text",
+        "px": 32
+      },
+      {
+        "a": "↶",
+        "b": "▶ Play",
+        "px": 7
+      },
+      {
+        "a": "↶",
+        "b": "⏸ Pause",
+        "px": 19
+      },
+      {
+        "a": "↷",
+        "b": "nl-text",
+        "px": 13
+      },
+      {
+        "a": "↷",
+        "b": "교체",
+        "px": 13
+      },
+      {
+        "a": "↷",
+        "b": "⏸ Pause",
+        "px": 32
+      },
+      {
+        "a": "nl-text",
+        "b": "▶ Play",
+        "px": 48
+      },
+      {
+        "a": "nl-text",
+        "b": "⏸ Pause",
+        "px": 40
+      },
+      {
+        "a": "교체",
+        "b": "⏸ Pause",
+        "px": 24
+      },
+      {
+        "a": "교체",
+        "b": "⏹ Stop",
+        "px": 16
+      },
+      {
+        "a": "이어서",
+        "b": "⏹ Stop",
+        "px": 46
+      },
+      {
+        "a": "이어서",
+        "b": "⏭ Step",
+        "px": 6
+      },
+      {
+        "a": "✨ 생성",
+        "b": "⏭ Step",
+        "px": 48
+      },
+      {
+        "a": "✨ 생성",
+        "b": "0.25×0.5×1×2×4×",
+        "px": 13
+      },
+      {
+        "a": "충돌 시 자동 정지",
+        "b": "on",
+        "px": 13
+      },
+      {
+        "a": "충돌 시 자동 정지",
+        "b": "플로우",
+        "px": 40
+      },
+      {
+        "a": "충돌 시 자동 정지",
+        "b": "{} JSON",
+        "px": 63
+      },
+      {
+        "a": "on",
+        "b": "플로우",
+        "px": 13
+      }
+    ],
+    "dockUnusedPx": 0,
+    "canvas": {
+      "cssW": 750,
+      "cssH": 214
+    },
+    "docOverflowX": false,
+    "errorsNone": true,
+    "pageErrors": []
+  },
+  "layout_1024x768": {
+    "window": {
+      "w": 1024,
+      "h": 768
+    },
+    "commandBar": {
+      "w": 1024,
+      "h": 44,
+      "x": 0,
+      "y": 0
+    },
+    "left": {
+      "w": 240,
+      "h": 508,
+      "x": 0,
+      "y": 44
+    },
+    "viewport": {
+      "w": 494,
+      "h": 262,
+      "x": 245,
+      "y": 44
+    },
+    "flowGraph": {
+      "w": 494,
+      "h": 241,
+      "x": 245,
+      "y": 311
+    },
+    "right": {
+      "w": 280,
+      "h": 508,
+      "x": 744,
+      "y": 44
+    },
+    "dock": {
+      "w": 1024,
+      "h": 211,
+      "x": 0,
+      "y": 557
+    },
+    "viewportSharePct": 16.5,
+    "barOverflowing": true,
+    "barScrollW": 1106,
+    "barClientW": 1024,
+    "overlapCount": 24,
+    "overlaps": [
+      {
+        "a": "낙하 박스 (falling-boxes",
+        "b": "▶ Play",
+        "px": 12
+      },
+      {
+        "a": "📂 업로드",
+        "b": "nl-text",
+        "px": 79
+      },
+      {
+        "a": "📂 업로드",
+        "b": "▶ Play",
+        "px": 41
+      },
+      {
+        "a": "📂 업로드",
+        "b": "⏸ Pause",
+        "px": 32
+      },
+      {
+        "a": "💾 저장",
+        "b": "교체",
+        "px": 46
+      },
+      {
+        "a": "💾 저장",
+        "b": "이어서",
+        "px": 16
+      },
+      {
+        "a": "💾 저장",
+        "b": "⏸ Pause",
+        "px": 29
+      },
+      {
+        "a": "💾 저장",
+        "b": "⏹ Stop",
+        "px": 31
+      },
+      {
+        "a": "↶",
+        "b": "이어서",
+        "px": 32
+      },
+      {
+        "a": "↶",
+        "b": "⏹ Stop",
+        "px": 22
+      },
+      {
+        "a": "↶",
+        "b": "⏭ Step",
+        "px": 4
+      },
+      {
+        "a": "↷",
+        "b": "✨ 생성",
+        "px": 32
+      },
+      {
+        "a": "↷",
+        "b": "⏭ Step",
+        "px": 32
+      },
+      {
+        "a": "nl-text",
+        "b": "▶ Play",
+        "px": 48
+      },
+      {
+        "a": "nl-text",
+        "b": "⏸ Pause",
+        "px": 40
+      },
+      {
+        "a": "교체",
+        "b": "⏸ Pause",
+        "px": 24
+      },
+      {
+        "a": "교체",
+        "b": "⏹ Stop",
+        "px": 16
+      },
+      {
+        "a": "이어서",
+        "b": "⏹ Stop",
+        "px": 46
+      },
+      {
+        "a": "이어서",
+        "b": "⏭ Step",
+        "px": 6
+      },
+      {
+        "a": "✨ 생성",
+        "b": "⏭ Step",
+        "px": 48
+      }
+    ],
+    "dockUnusedPx": 0,
+    "canvas": {
+      "cssW": 494,
+      "cssH": 262
+    },
+    "docOverflowX": false,
+    "errorsNone": true,
+    "pageErrors": []
+  },
+  "a11y": {
+    "interactiveCount": 119,
+    "unlabeledCount": 5,
+    "unlabeled": [
+      {
+        "tag": "INPUT",
+        "testid": "scene-upload-input",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "testid": "ne-enabled",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "testid": "import-file-input",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "testid": "planner-backend-rule",
+        "cls": ""
+      },
+      {
+        "tag": "INPUT",
+        "testid": "planner-backend-anthropic",
+        "cls": ""
+      }
+    ],
+    "smallTargetCount": 30,
+    "smallTargets": [
+      {
+        "testid": "autopause-toggle",
+        "text": "",
+        "w": 13,
+        "h": 13
+      },
+      {
+        "testid": "workspace-left-toggle",
+        "text": "«",
+        "w": 20,
+        "h": 20
+      },
+      {
+        "testid": "workspace-split-left",
+        "text": "",
+        "w": 5,
+        "h": 820
+      },
+      {
+        "testid": "workspace-split-flow-graph",
+        "text": "",
+        "w": 1390,
+        "h": 5
+      },
+      {
+        "testid": "flow-plus",
+        "text": "＋",
+        "w": 15,
+        "h": 15
+      },
+      {
+        "testid": "flow-plus",
+        "text": "＋",
+        "w": 15,
+        "h": 15
+      },
+      {
+        "testid": "flow-plus",
+        "text": "＋",
+        "w": 15,
+        "h": 15
+      },
+      {
+        "testid": "flow-plus",
+        "text": "＋",
+        "w": 15,
+        "h": 15
+      },
+      {
+        "testid": "flow-plus",
+        "text": "＋",
+        "w": 15,
+        "h": 15
+      },
+      {
+        "testid": "flow-plus",
+        "text": "＋",
+        "w": 15,
+        "h": 15
+      },
+      {
+        "testid": "flow-plus",
+        "text": "＋",
+        "w": 15,
+        "h": 15
+      },
+      {
+        "testid": "workspace-split-right",
+        "text": "",
+        "w": 5,
+        "h": 820
+      },
+      {
+        "testid": "joint-panel-collapse",
+        "text": "▾ 접기",
+        "w": 48,
+        "h": 20
+      },
+      {
+        "testid": null,
+        "text": "",
+        "w": 238,
+        "h": 16
+      },
+      {
+        "testid": null,
+        "text": "",
+        "w": 238,
+        "h": 16
+      },
+      {
+        "testid": null,
+        "text": "",
+        "w": 238,
+        "h": 16
+      },
+      {
+        "testid": null,
+        "text": "",
+        "w": 238,
+        "h": 16
+      },
+      {
+        "testid": null,
+        "text": "",
+        "w": 238,
+        "h": 16
+      },
+      {
+        "testid": null,
+        "text": "",
+        "w": 238,
+        "h": 16
+      },
+      {
+        "testid": null,
+        "text": "",
+        "w": 238,
+        "h": 16
+      },
+      {
+        "testid": null,
+        "text": "",
+        "w": 238,
+        "h": 16
+      },
+      {
+        "testid": "inspector-collapse",
+        "text": "▾ 접기",
+        "w": 48,
+        "h": 20
+      },
+      {
+        "testid": "workspace-split-dock",
+        "text": "",
+        "w": 1920,
+        "h": 5
+      },
+      {
+        "testid": "timeline-marker",
+        "text": "0 gripper",
+        "w": 71,
+        "h": 17
+      },
+      {
+        "testid": "timeline-marker",
+        "text": "1 moveJoints",
+        "w": 88,
+        "h": 17
+      },
+      {
+        "testid": "timeline-marker",
+        "text": "2 setJoints",
+        "w": 82,
+        "h": 17
+      },
+      {
+        "testid": "timeline-marker",
+        "text": "3 waitForCollision",
+        "w": 123,
+        "h": 17
+      },
+      {
+        "testid": "timeline-marker",
+        "text": "4 gripper",
+        "w": 71,
+        "h": 17
+      },
+      {
+        "testid": "timeline-marker",
+        "text": "5 wait",
+        "w": 53,
+        "h": 17
+      },
+      {
+        "testid": "timeline-marker",
+        "text": "6 moveJoints",
+        "w": 88,
+        "h": 17
+      }
+    ],
+    "targetsUnder24px": 30,
+    "landmarks": [
+      {
+        "tag": "DIV",
+        "role": "group",
+        "testid": null
+      },
+      {
+        "tag": "DIV",
+        "role": "separator",
+        "testid": "workspace-split-left"
+      },
+      {
+        "tag": "SPAN",
+        "role": "status",
+        "testid": "run-overlay-live"
+      },
+      {
+        "tag": "DIV",
+        "role": "separator",
+        "testid": "workspace-split-flow-graph"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-plus"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-plus"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-plus"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-plus"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-plus"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-plus"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-plus"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-node"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-node"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-node"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-node"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-node"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-node"
+      },
+      {
+        "tag": "g",
+        "role": "button",
+        "testid": "flow-node"
+      },
+      {
+        "tag": "DIV",
+        "role": "menu",
+        "testid": "flow-palette"
+      },
+      {
+        "tag": "DIV",
+        "role": "separator",
+        "testid": "workspace-split-right"
+      },
+      {
+        "tag": "DIV",
+        "role": "alert",
+        "testid": "ne-errors"
+      },
+      {
+        "tag": "DIV",
+        "role": "separator",
+        "testid": "workspace-split-dock"
+      },
+      {
+        "tag": "TR",
+        "role": "button",
+        "testid": "collision-row"
+      },
+      {
+        "tag": "TR",
+        "role": "button",
+        "testid": "collision-row"
+      },
+      {
+        "tag": "TR",
+        "role": "button",
+        "testid": "collision-row"
+      },
+      {
+        "tag": "DIV",
+        "role": "alert",
+        "testid": "scene-error"
+      },
+      {
+        "tag": "DIV",
+        "role": "dialog",
+        "testid": null
+      },
+      {
+        "tag": "DIV",
+        "role": "group",
+        "testid": null
+      },
+      {
+        "tag": "DIV",
+        "role": "group",
+        "testid": null
+      },
+      {
+        "tag": "DIV",
+        "role": "group",
+        "testid": null
+      }
+    ],
+    "hasH1": false,
+    "htmlLang": "ko",
+    "title": "robot-sim-web",
+    "liveRegions": 2,
+    "contrastFailures": [],
+    "contrastSampleCount": 18,
+    "contrastWorst": [
+      {
+        "text": "«",
+        "color": "rgb(139, 147, 161)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 5.86,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "엔티티 (3)",
+        "color": "rgb(139, 147, 161)",
+        "fontSizePx": 11,
+        "weight": 400,
+        "ratio": 5.86,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "0 gripper",
+        "color": "rgb(154, 161, 171)",
+        "fontSizePx": 10,
+        "weight": 400,
+        "ratio": 5.89,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "Collision Log",
+        "color": "rgb(139, 147, 161)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 6,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "simTime 2.50s",
+        "color": "rgb(154, 161, 171)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 6.96,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "2.50s",
+        "color": "rgb(154, 161, 171)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 7.12,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "충돌 시 자동 정지",
+        "color": "rgb(154, 161, 171)",
+        "fontSizePx": 11,
+        "weight": 400,
+        "ratio": 7.12,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "교체",
+        "color": "rgb(240, 168, 96)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 7.66,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "Running",
+        "color": "rgb(240, 168, 96)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 9.25,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "📂 업로드",
+        "color": "rgb(207, 212, 219)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 10.31,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "▣",
+        "color": "rgb(207, 212, 219)",
+        "fontSizePx": 20,
+        "weight": 400,
+        "ratio": 10.31,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "Box · 박스",
+        "color": "rgb(207, 212, 219)",
+        "fontSizePx": 11,
+        "weight": 400,
+        "ratio": 10.31,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "Idle",
+        "color": "rgb(207, 212, 219)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 12.16,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "🦾",
+        "color": "rgb(207, 212, 219)",
+        "fontSizePx": 11,
+        "weight": 400,
+        "ratio": 12.17,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "🗣",
+        "color": "rgb(207, 212, 219)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 12.45,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "arm-and-boxes",
+        "color": "rgb(236, 238, 241)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 15.6,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "Timeline",
+        "color": "rgb(236, 238, 241)",
+        "fontSizePx": 12,
+        "weight": 400,
+        "ratio": 15.98,
+        "required": 4.5,
+        "pass": true
+      },
+      {
+        "text": "1/총 7",
+        "color": "rgb(236, 238, 241)",
+        "fontSizePx": 11,
+        "weight": 400,
+        "ratio": 15.98,
+        "required": 4.5,
+        "pass": true
+      }
+    ],
+    "fontSizeDistribution": {
+      "12px": 67,
+      "11px": 20,
+      "20px": 8,
+      "10px": 7
+    }
+  },
+  "keyboard": {
+    "note": "listeners not enumerable; see code grep",
+    "scripts": 1
+  },
+  "rightStack": {
+    "scrollH": 820,
+    "clientH": 820,
+    "overflowing": false
+  }
+}

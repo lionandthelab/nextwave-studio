@@ -1497,3 +1497,197 @@ anchorProbe 파사드), `src/ui/inspector/entity-editor.ts`(폼 대상 고정 + 
 `src/ui/workspace.ts`(우 패널 폭 확정), `src/ui/inspector/entity-editor.ts`(안내 문구 축약 + 줄바꿈),
 `src/main.ts`(관절 패널 재구성 · anchorScreenPoint 파사드), `scripts/gate-browser.mjs`(two-arms
 제스처/회전/되감기 판별력), `docs/USAGE.md` §5.2, `EXPERIMENTS.md`(이 항목).
+
+---
+
+## Phase 11 — 제품화 (Studio Hardening) · 2026-07-28
+
+`docs/UX_AUDIT.md`(5인 디자인 팀 진단, 통합 이슈 C-1~C-18)의 실행. **새 능력을 추가하지 않고**
+이미 있는 능력이 신뢰·보존·발견되게 만든다. 진단 근거 수치는 전부 실행 중인 앱을 Playwright로
+계측한 것이며 증거는 `docs/ux-audit/`에 있다.
+
+### 결정 1 — 공간 예산을 상수에서 정책으로 (C-1)
+
+- 문제: 세로 크롬(바 44 + 독 211 + 그래프 241 + 스플리터 10 = **506px**)과 가로 크롬(**530px**)이
+  창 크기와 무관한 상수라, 뷰포트 면적이 `(W−530)×(H−506)`이라는 결정론적 함수였다. 실측 4개 지점이
+  이 식과 정확히 일치했다(1080−506=574 / 900−506=394 / 768−506=262 / 720−506=214). 1366×768에서
+  뷰포트는 화면의 **20.9%**, 3.19:1 레터박스였다. 스플리터를 최대로 끌어도 41.5%가 상한이었다 —
+  기본값 문제가 아니라 **하한값 정책 문제**였다.
+- 수정: 세로 크롬을 `clamp()`로, 중앙을 `grid-template-rows: minmax(240px,1fr) auto var(--rsw-flow-h)`로
+  바꿔 **뷰포트 하한을 그리드 차원에서 보장**한다. 독을 기본 접힘으로 두되 탭바에 진행 스트립을 남겨
+  정보 손실을 0으로 만들었다. 하한 재산정(dock 120→112, flowGraph 200→148, right 220→200).
+- 트레이드오프: `flowGraph.minPx` 200 → 148은 Phase 7의 "그래프가 항상 보인다" 요구를 약화시키는
+  것처럼 보이지만, 그 요구의 **의도**는 strip 모드(56px)가 더 싸게 만족시킨다.
+- 실측(전/후 뷰포트 점유율): 1920 38.5→**48.8%** / 1600 29.3→**40.7%** / 1440 27.7→**38.5%** /
+  1366 20.9→**33.2%** / 1280 17.4→**29.9%** / 1024 16.5→**37.2%** / 768폭 뷰포트 240px→**696px**.
+
+### 결정 2 — 커맨드바 겹침은 세 줄의 문제였다 (C-2)
+
+- 문제: 겹침이 미관이 아니라 **기능 소실**이었다. 겹친 영역에서 DOM 뒤 형제가 포인터를 가로채,
+  1280×720에서 되돌리기/다시하기 버튼(폭 28px)이 100% 피복되어 클릭 불가였고 자연어 입력창과
+  생성 버튼이 재생 버튼 뒤로 사라졌다. 실측 겹침: 1920→1 / 1600→8 / 1440→13 / 1366→17 /
+  1280→20 / 1024→24.
+- 원인: `scene-controls.ts`의 세 줄. `left`/`right`가 `flexShrink:0`인데 `center`만 `minWidth:0` +
+  **`justifyContent:'center'`** 라, center 컨텐츠가 좌우 **대칭으로** 넘쳐 양쪽 이웃 위에 얹혔다.
+  `bar`에 `overflow` 미지정이라 밖으로 그려지고 `.ui-btn`은 `nowrap`이라 줄바꿈도 없었다.
+- 수정: `justify-content: flex-start` + `bar{overflow:hidden}` + 세 슬롯 모두 `flexShrink:1/minWidth:0`.
+  이것만으로 **겹침이 물리적으로 불가능**해진다. 그 위에 2행 구조(UX_DESIGN §2 다이어그램이 이미
+  그렇게 그려 놓았다) + P0~P6 우선순위 오버플로 + 아이콘 전용 모드를 얹었다.
+- 실측: 전 해상도에서 실제 겹침 **0**(남은 1건은 라벨이 자기 체크박스를 감싼 부모-자식 포함).
+
+### 결정 3 — 문서(Document) 모델 도입 (C-3)
+
+- 문제: 작업물이 3중으로 소실됐다. (a) 저장이 `SceneSpec`만 직렬화해 **시퀀스를 버렸다** —
+  업로드는 `{scene, sequence}` 봉투를 받는데 저장은 봉투를 만들지 않는 비대칭. (b) `localStorage`/
+  `sessionStorage`가 완전히 비어 있어(플래너 설정 1건 제외) 새로고침 한 번에 전부 휘발.
+  (c) `confirm(`/`beforeunload`/dirty 표시가 repo 전체 **0건**.
+- 수정: `src/ui/document.ts` — `{version, name, scene, sequence, assets}` 봉투 + IndexedDB 디바운스
+  자동저장 + `DirtyTracker`(직렬화 비교, 상태 변화 시에만 통지) + `beforeunload`(미저장일 때만).
+  확장자를 `.workcell.json`으로 바꿔 "이 파일이 전부다"를 이름이 약속하게 했다.
+- 하위 호환: `parseDocument`가 세 형식(문서 / 구 봉투 / SceneSpec 단독)을 전부 받는다.
+  `SceneSpec`에는 `scene` 필드가 없어 모호하지 않다.
+
+### 결정 4 — 되돌릴 수 있다는 확신은 탐색의 전제조건이다 (C-4)
+
+- 문제: (a) `editor.removeEntity`가 core에 완전 구현돼 있는데 호출부가 `window.__sim` 자동화
+  파사드뿐이라 **오브젝트를 지울 UI가 없었다**(add-only 함정). (b) `SceneHistory`가 `SceneSpec`만
+  저장해 플로우 그래프 편집(노드 삭제·재정렬·복제·파라미터·교체 생성)이 전부 복구 불가였다.
+  `Ctrl+Z`가 "때때로만 동작하는" 것은 아예 없는 것보다 나쁘다 — 잘못된 안전감을 준다.
+- 수정: 스냅샷 타입을 `HistorySnapshot = {scene, sequence}`로 넓히고 `commitFlowSequence`에서도
+  `noteChange`를 부른다. 복원 경로(`restoreSceneFromHistory`)가 이미 `{scene, sequence}` 봉투를
+  받고 있어 배선 비용이 작았다. 엔티티 삭제는 인스펙터 헤더 버튼 + 토스트 실행취소 액션.
+
+### 결정 5 — 전역 키 리스너 5개를 단일 라우터로 (C-6)
+
+- 문제: `window`에 keydown을 거는 곳이 5군데였고 각자 방어했다. **Space를 3개가** 나눠 가졌고
+  (재생·충돌로그 행·그래프 팬), 가드가 `BUTTON`을 제외하지 않아 포커스된 버튼의 Space 활성화가
+  파괴되고 충돌 로그 행을 키보드로 여는 순간 시뮬이 재생됐다. **방향키를 2개가** 나눠 가져
+  스플리터 조절과 3D nudge가 동시에 일어났다. `docs/UX_DESIGN.md` §9 규정 8종 중 스펙대로 동작하는
+  것은 2종뿐이었고 좌우 방향키는 스펙(Step)과 **반대 기능**에 배선돼 있었다.
+- 수정: `src/ui/shortcuts.ts` — 스코프(`data-shortcut-scope`) 판정 + **위젯 소유권 규칙**
+  (버튼의 Space/Enter, 목록·분할자의 방향키는 위젯의 것이다)을 한곳에 두고, 모든 전역 단축키가
+  이 라우터를 통과한다. `playback.ts`는 `togglePlay()`만 제공하고 키 바인딩을 갖지 않는다.
+- 도움말 시트는 **`router.list()`가 반환하는 실제 등록 바인딩만** 그린다 — 문서를 베끼면 구현되지
+  않은 키를 광고하게 되고 그건 도움말이 없는 것보다 나쁘다.
+
+### 결정 6 — 액센트를 주황에서 바이올렛으로, 역할을 3분할 (C-11/C-14)
+
+- 문제: (a) `bgApp`와 `bgPanel`의 대비비가 **1.001:1**, `borderSoft`와 `bgRaised`가 **동일 헥스**
+  (#22252b)라 표면 고도가 색으로 존재하지 않았다. 반투명(0.93)인데 blur가 없어 슬라이드 패널이
+  하위 콘텐츠를 글자 단위로 통과시켰다. (b) 액센트 한 색이 **8가지 의미를 겸직**했고,
+  `.ui-btn--accent`가 `background`를 건드리지 않아 재생 버튼이 나머지 트랜스포트와 같은 시각 무게였다.
+- 수정: `SURFACE` 6단계 사다리(각 단계 ≥1.14:1, 계산 검증) + `BORDER` 4단계(항상 얹힌 표면보다
+  밝다) + 액센트 역할 3분할(면=주요 액션 / 보더=토글 / **선택은 별도 축 `SELECT` 스카이블루**).
+- **액센트 색 변경 근거**: 구 주황(#e67e22)은 "로봇 팔 색과 일관"을 의도했으나, 뷰포트 안의 따뜻한
+  오브젝트와 크롬이 같은 온도라 크롬이 앞으로 나왔다. 차가운 바이올렛(#7C6AF6)은 보색 대비로 크롬을
+  뒤로 물리고, 3D 선택(청색)과도 명확히 갈린다. 청색 선택은 Blender/Onshape/Isaac Sim 공통 관행이다.
+- 부작용 처리: 가장 밝은 `SURFACE.modal` 위에서도 `text`/`label`/`muted`가 전부 AA를 넘도록
+  재산정했다(muted 4.68:1이 하한). 값 변경 시 재계산 필요 — 각 토큰 주석에 검산값을 남겼다.
+
+### 결정 7 — snake 레이아웃의 perRow는 폭이 아니라 fit 줌으로 고른다 (C-10)
+
+- 문제: `ZOOM_MIN=0.4` + 노드 피치 224px 때문에 "맞춤"이 전체를 담지 못하는 지점이 1366폭에서
+  **9노드**였다(데모 시퀀스가 이미 7노드). snake 도입 후 `nodesPerRow`가 **폭만** 봐서 836×240
+  페인에서 k=2가 뽑혔고, 7노드가 4줄로 접혀 세로가 구속 조건이 되며 fit 줌이 **33%** 로 떨어졌다 —
+  단일 행(47%)보다 나빴다.
+- 수정: `bestPerRow(n, paneW, paneH)`가 `k=1..n` 각각의 fit 배율을 계산해 argmax를 취한다.
+  **단일 행(k=n)이 후보에 포함되므로 결과가 단일 행보다 나쁠 수 없다** — 이 회귀가 구조적으로
+  재발 불가능해진다. 클램프 전 원값으로 비교해야 상·하한 동률이 argmax를 무의미하게 만들지 않는다.
+- 실측(836×240): 7노드 33%→**55%**(LOD full 복귀) · 12노드 28%→55% · 30노드 12%→33% ·
+  80노드 12%→23%. LOD full이 유지되는 상한이 n=7 미만에서 **n=12**까지 올라갔다.
+
+### 결정 8 — 충돌을 화면에 등장시킨다 (C-7)
+
+- 문제: `waitForCollision`을 포함한 7/7 시퀀스가 완주해도 **충돌이 있었다는 표시가 화면 어디에도
+  없었다**(`docs/ux-audit/07-sequence-done-1920.png`). 독 탭에 배지 API 자체가 없었고, 비시각
+  사용자에게는 시각 신호 3종(로그 행·펄스·마커)뿐이라 아무 신호도 만들지 않았다(WCAG 4.1.3 실패).
+  빨강이 **6개 값 · 4개 hue**로 흩어져 로그 행과 3D 마커를 눈으로 잇는 것이 색으로 뒷받침되지 않았다.
+- 수정: 독 탭 카운트 배지 + 상태줄 `충돌 N` 상시 표시(0건 포함 — "감지가 돌고 있다"가 정보다) +
+  첫 충돌 1회 토스트 + `COLLISION` 램프 단일화.
+- **로그 스트림에 `aria-live`를 걸지 않는다**: 물리 스텝마다 이벤트가 쏟아지면 polite 큐가 포화되어
+  사용자가 다른 조작을 해도 몇 분간 과거 충돌만 읽고, 링버퍼의 앞 행 제거도 변경으로 집계돼 중복
+  발화한다. 대신 3초 스로틀 **요약**을 별도 live 영역으로 발화한다.
+
+### 결정 9 — 실행은 레이아웃의 1급 상태다 (C-9)
+
+- 문제: `docs/UX_DESIGN.md` §2가 "실행 중 뷰포트 우선 확장"을 규정했는데 엔진 상태에 반응하는
+  레이아웃 코드가 0줄이었다. Idle과 Running 화면의 시각 차이가 7px 점의 펄스 + 칩 하나의 보더 +
+  텍스트뿐이었다.
+- 수정: `FlowMode: 'full' | 'strip' | 'off'`. 재생이 그래프를 56px 노드 스트립으로 접고 정지가
+  복원한다 — §1의 동시 가시성을 버리지 않으면서 관찰이 필요한 순간에 뷰포트가 넓어진다.
+  `body[data-run-state]`로 커맨드바 하단에 액센트 진행 스트립을 띄워 주변시로도 잡히게 했다.
+
+### 결정 10 — 아웃라이너를 좌 패널로, 프로퍼티는 우 패널에 (C-16)
+
+- 문제: 280px 한 컬럼에 카드 3개가 쌓이고 그중 하나가 아웃라이너와 프로퍼티를 동시에 담아,
+  Transform이 편집 가능/읽기 전용으로 **중복** 표시되고 빈 상태 문구가 2개 동시 노출됐다.
+  `main.ts` 주석이 대가를 자백하고 있었다: "로봇 선택 시 ee-pos-x까지 최대 865px 스크롤".
+- 수정: 목록을 `mountSceneOutliner`로 분리해 좌 패널 하단에 배치(좌 패널 콘텐츠는 y≈540에서 끝나고
+  **329px가 비어 있었다** — 추가 화면 비용 0). 프로 3D 툴은 예외 없이 둘을 분리한다(Blender
+  Outliner ≠ Properties, Unity Hierarchy 좌 / Inspector 우).
+- 함정: `paintLeft()`가 펼침 시 `display = ''`로 되돌려 인라인 `flex`를 지웠다 — 좌 슬롯의 세로
+  스택이 무너져 아웃라이너가 패널 밖으로 밀려 잘렸다. `''` 대신 `'flex'`로 명시해야 한다.
+
+### 결정 11 — 제품 셸 (C-12)
+
+- 문제: `<title>`이 패키지 slug, 파비콘 없음, 실사용 `<h1>` 0개(유일한 h1은 **부팅 실패 오버레이
+  전용**), 랜드마크 0개. 빈 플로우가 **이미 출시된 기능**을 "Phase 9에서 제공됩니다"라고 안내해,
+  첫 사용자가 가장 도움이 필요한 순간에 거짓 정보로 이탈시켰다.
+- 수정: 제품명 **Workcell**(`ui/brand.ts` 단일 진실) · SVG 파비콘 · 동적 `document.title`(미저장 시
+  점 접두) · 워드마크 `<h1>` 승격 · `header/nav/main/aside/section` 랜드마크 · 스킵 링크 ·
+  `?` 도움말 시트. **사용자 노출 문자열에 내부 로드맵 어휘(Phase N) 금지**를 규칙으로 세웠다.
+- 네이밍 근거: **workcell**은 "로봇+지그+부품이 한 셀에 놓인 작업 단위"를 뜻하는 로보틱스 표준
+  용어로 `SceneSpec`이 기술하는 대상과 1:1 일치한다. 상위 브랜드는 워크스페이스 경로의 NextWave가 흡수.
+
+### 결정 12 — 폰트 자체 호스팅 (C-14)
+
+- 문제: `FONT.ui` 스택에 Noto Sans KR이 있었지만 **어디서도 로드하지 않았다**(`@font-face` 0건).
+  Windows에서 라틴은 Segoe UI, 한글은 Malgun Gothic으로 갈려 x-height·수직 메트릭이 어긋났고,
+  같은 UI가 OS마다 다른 타이포그래피를 가졌다.
+- 수정: Pretendard Variable(한글+라틴 통합 메트릭, OFL) **동적 서브셋 92개**를 `public/fonts/`에
+  자체 호스팅. 전체 3.1MB지만 브라우저는 실제 쓰는 unicode-range만 받는다(한국어 UI 통상 100~250KB).
+  수치 리드아웃은 JetBrains Mono(92KB) + **`tabular-nums` 고정** — 구 시스템은 `tabular-nums`가
+  전 코드베이스 0회라 매 프레임 갱신되는 simTime·관절값이 자릿수 폭 지터를 냈다.
+- 대안 기각: 전체 variable 단일 파일(2.06MB)은 첫 로드 비용이 커서, "설치 없음"이 셀링 포인트인
+  제품에 맞지 않는다.
+
+### 진행 방식
+
+기반 모듈(theme/icons/a11y/workspace/shortcuts/document/brand/help-sheet)을 먼저 세우고, 그 위에서
+UI 디렉터리 5곳(인스펙터 / 플로우그래프 / 독 / 커맨드바 / 라이브러리·피드백·뷰포트)을 **병렬로**
+이행한 뒤 `main.ts`에서 통합했다. 병렬 작업자는 `main.ts`·기반 모듈을 건드리지 않고 배선 요청을
+코드로 제출하는 규약을 썼다 — 공유 파일 충돌 없이 5개 디렉터리를 동시에 옮길 수 있었다.
+
+### 검증 (전부 실측)
+
+- `tsc --noEmit` 통과 · ESLint 오류 0 · vitest **41 files / 978 tests 전부 통과**(Phase 10 대비 +219).
+- `npm run build` 성공.
+- 브라우저 게이트 **6종 ALL PASS**: orchestration · planner · flow-graph · arm-sequence ·
+  scene-builder · scene-switch.
+- 해상도 7종 실측(전/후)은 위 결정 1·2에 기재. 페이지 오류 전 해상도 0건.
+- `<h1>` 1개 · 랜드마크 `header:1 nav:1 main:1 aside:1 section:5` · `title="arm-and-boxes — Workcell"`.
+- 증거: `docs/ux-audit/`(진단 전 22장) + `docs/ux-audit/after/`(수정 후 7장) + `measurements.json`.
+
+### 남은 것 (Phase 11 범위 밖으로 명시)
+
+- **물리 스텝 시간(ms/frame)**: Stats HUD가 자리를 잡아 뒀으나 `core/engine`이
+  `EngineTickInfo.physicsMsPerFrame`을 노출하기 전까지 대시(—)로 표시된다. 계층 규칙상 `ui`가
+  측정할 수 없다.
+- **3D 배치 고스트**: 드롭 힌트(가장자리 하이라이트 + "여기에 놓기")까지만 구현했다.
+  UX_DESIGN §3.3의 "바닥 레이캐스트 지점 반투명 고스트"는 `render`에
+  `beginPlacementPreview/updatePlacementPreview/endPlacementPreview`가 추가되어야 완결된다.
+- **문서 라이브러리 UI**: `document.ts`에 IndexedDB 문서 컬렉션(`putDocument`/`listDocuments`)이
+  구현돼 있으나 씬 select에 "내 문서" optgroup을 붙이는 UI는 미구현이다.
+- **레이아웃 프리셋 UI**: `workspace.applyPreset('default'|'sceneBuild'|'flowEdit'|'runObserve')`가
+  구현돼 있으나 메뉴 노출이 없다.
+- **URL fragment 공유 링크**: 정적 호스팅에서 가능한 최대치로 백로그에 남긴다.
+
+### 영향 파일
+
+**신규**: `src/ui/icons.ts` · `a11y.ts` · `shortcuts.ts` · `document.ts` · `brand.ts` · `help-sheet.ts` ·
+`viewport/stats-hud.ts` · `viewport/drop-hint.ts` · `public/favicon.svg` · `public/fonts/**` ·
+`docs/UX_AUDIT.md` · `docs/ux-audit/**`.
+**전면 개편**: `src/ui/theme.ts` · `workspace.ts` · `command-bar/scene-controls.ts` ·
+`flow-graph/canvas.ts` · `inspector/inspector.ts` · `dock/dock.ts` · `index.html`.
+**수정**: 나머지 `src/ui/**` 전량 · `src/main.ts` · `src/ui/history.ts`(HistorySnapshot) ·
+`src/render/renderer.ts`(frameObject/resetCamera) · 대응 테스트 전량.

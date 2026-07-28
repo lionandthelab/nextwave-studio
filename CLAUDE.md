@@ -1,4 +1,4 @@
-# CLAUDE.md — robot-sim-web
+# CLAUDE.md — Workcell (repo: robot-sim-web)
 
 > 이 파일은 Claude Code가 이 저장소에서 작업할 때 가장 먼저 읽고, 항상 준수해야 하는
 > 프로젝트 헌법(harness)이다. 개별 작업 지시보다 이 문서의 규칙이 우선한다.
@@ -6,6 +6,11 @@
 ---
 
 ## 1. 프로젝트 한 줄 정의
+
+**제품명은 `Workcell`이다** (상위 브랜드 NextWave Studio). 저장소 이름(`robot-sim-web`)은
+제품명이 아니다 — 사용자에게 보이는 모든 곳(탭 제목·워드마크·문서)에서는 `Workcell`을 쓴다.
+정체성 상수의 단일 진실은 `src/ui/brand.ts`이며, 제품명 리터럴을 다른 곳에 흩지 않는다.
+저장 파일 확장자는 `.workcell.json`이고 `{scene, sequence, assets}` 봉투다.
 
 브라우저에서 완결되는 **간소화된 IsaacSim형 로봇 시뮬레이터**. 로봇/사물 오브젝트로
 가상 환경을 구성하고, 로봇 제어 시퀀스를 재생하며, **로봇–사물 충돌을 감지**한다.
@@ -61,7 +66,25 @@
    후 결과가 스키마 검증을 통과해야 하며, 노드 좌표·실행 상태는 순수 표현으로 실행에
    영향하지 않는다. (`docs/UX_DESIGN.md` §6)
 
-9. **생성물은 검증·사람 승인 후에만 실행한다.**
+9. **디자인 토큰은 `src/ui/theme.ts`가 단일 진실이다.**
+   색·타입·간격·반경·모션·아이콘 치수를 모듈에 하드코딩하지 않는다. 인라인 `fontSize`
+   리터럴과 raw px 간격은 금지 — `applyType(el, TYPE.*)`와 `SPACE.*`를 쓴다.
+   아이콘은 `src/ui/icons.ts`의 SVG를 쓴다(**이모지·딩벳 금지** — OS마다 다른 그림이 나오고
+   `currentColor`를 못 받아 상태 변화가 반쪽이 된다). 액센트는 **역할이 3분할**되어 있다:
+   면(`--primary`)=주요 액션 / 보더(`--accent`)=토글 상태 / **선택은 `SELECT`(청색) 별도 축**.
+   텍스트 토큰은 **가장 밝은 표면(`SURFACE.modal`) 위에서도** 대비 ≥ 4.5:1이어야 한다.
+
+10. **전역 단축키의 단일 소유자는 `src/ui/shortcuts.ts` 라우터다.**
+   모듈이 `window`에 `keydown`을 직접 걸지 않는다. 모듈은 "무엇을 할지"만 제공하고
+   통합자가 라우터에 등록한다. 소유자 없는 키맵은 반드시 충돌로 수렴한다(§9 참조).
+   도움말 시트는 **실제 등록된 바인딩만** 그린다 — 문서에만 있는 키를 광고하지 않는다.
+
+11. **작업물은 문서(document)로 보존된다.**
+   저장은 `SceneSpec` 단독이 아니라 `{scene, sequence, assets}` 봉투다. 시퀀스만 바뀌어도
+   미저장(dirty)이며, 편집 커밋은 IndexedDB에 자동저장된다. 파괴적 동작에는 **되돌릴 경로**
+   (Undo 또는 실행취소 토스트)가 반드시 있어야 한다 — 되돌릴 수 없으면 사용자는 탐색을 멈춘다.
+
+12. **생성물은 검증·사람 승인 후에만 실행한다.**
    자연어 플래너 출력은 스키마 검증을 통과한 뒤에만 실행 대상이 되고, 자동 실행하지
    않는다 — 사용자가 검토 후 Play를 눌러야 한다(human-in-the-loop). 미검증/무효 출력은
    시뮬레이터로 보내지 않는다. (`docs/PLANNER.md` §6)
@@ -84,6 +107,7 @@ robot-sim-web/
 │   ├── DATA_MODEL.md      ← SceneSpec / EntitySpec / ControlSequence 스키마
 │   ├── SIMULATION.md      ← 시뮬 루프·제어 player·충돌 감지(Rapier API)
 │   ├── UX_DESIGN.md       ← 화면 UX 설계서(워크스페이스·노드그래프·씬빌더·실행)
+│   ├── UX_AUDIT.md        ← 5인 디자인 팀 진단 + Phase 11 실행 결과 (증거: docs/ux-audit/)
 │   ├── PLANNER.md         ← 자연어 → ControlSequence 생성·검증·복구
 │   └── ROADMAP.md         ← 단계별 마일스톤 + 검증 게이트
 ├── .claude/commands/      ← Claude Code 커스텀 슬래시 커맨드
@@ -105,6 +129,13 @@ robot-sim-web/
     ├── schema/            ← 타입 정의 + 런타임 검증(zod 등)
     │                         (SceneSpec/ControlSequence + FlowGraph 뷰모델 변환)
     ├── ui/                ← 화면(UX_DESIGN.md 구현)
+    │   ├── theme.ts           디자인 토큰 단일 진실 (SURFACE/BORDER/TYPE/SPACE/MOTION/ICON)
+    │   ├── icons.ts           SVG 아이콘 세트 (currentColor 상속, IconName 타입)
+    │   ├── a11y.ts            trapFocus · rovingTabindex · createAnnouncer
+    │   ├── shortcuts.ts       단축키 단일 라우터 (스코프 + 위젯 소유권 규칙)
+    │   ├── document.ts        워크셀 문서 (봉투 저장 · IndexedDB 자동저장 · dirty)
+    │   ├── brand.ts           제품 정체성 상수
+    │   ├── help-sheet.ts      ? 도움말 · 단축키 시트
     │   ├── command-bar/       자연어 입력·생성·재생 컨트롤·씬 저장/로드·JSON 뷰어
     │   ├── library/           오브젝트/로봇 라이브러리 + 3D 임포트 다이얼로그
     │   ├── viewport/          3D 상호작용(선택·기즈모·배치·충돌 시각화)
@@ -136,6 +167,23 @@ UI 프레임워크에 의존하지 않는다(React든 vanilla든 재사용 가�
 - **부수효과 격리**: `core`의 순수 로직(스텝 보간, 시퀀스 진행)은 물리/렌더 없이
   단위 테스트 가능해야 한다.
 - **매직넘버 금지**: timestepHz, gravity, group 비트마스크 등은 상수/스키마로 노출.
+
+---
+
+## 4-b. UI 언어 정책
+
+한 화면에 영/한이 규칙 없이 섞이면 저자마다 다른 선택을 하게 된다. 축을 고정한다.
+
+1. **UI 크롬(패널 제목·버튼·메뉴·탭·안내 문구)은 한국어로 통일한다.**
+   `라이브러리` `인스펙터` `타임라인` `충돌 로그` `콘솔` `열기` `저장` `재생`.
+2. **도메인 식별자는 영문 원문을 유지한다.** `MoveJoints` `durationSec` `position (m)`
+   엔티티 id, 관절 이름 — 사용자가 JSON에서 보는 것과 일치해야 하므로 번역하지 않는다.
+3. **1과 2가 만나는 지점에는 `lang="en"`을 부여한다.** 노드 kind 라벨, 로그의 엔티티 id 등.
+   `lang="ko"` 아래 영문을 두면 한국어 TTS가 CamelCase를 철자로 읽는다(WCAG 3.1.2).
+   SVG `<text>`에도 `lang`이 동작한다.
+4. **이중 표기(`Box · 박스`)는 라이브러리 카드 한정 예외**다(첫 사용자 온보딩 목적).
+   다른 곳으로 번지지 않게 한다.
+5. **사용자에게 보이는 문자열에 내부 로드맵 어휘(`Phase N`)를 쓰지 않는다.**
 
 ---
 
@@ -208,6 +256,9 @@ Rapier interaction group은 0–15의 16개 그룹만 존재한다. 이 프로�
 작업을 "완료"로 보고하기 전 아래를 만족해야 한다.
 
 - [ ] `tsc --noEmit` 통과, ESLint 경고 0
+- [ ] 새 UI는 `theme.ts` 토큰만 소비 (인라인 fontSize/raw px 간격/이모지 아이콘 0건)
+- [ ] 새 전역 단축키는 `shortcuts.ts` 라우터에 등록 (window 직접 바인딩 0건)
+- [ ] 새 파괴적 동작에 되돌릴 경로(Undo 또는 실행취소 토스트)가 있음
 - [ ] 관련 순수 로직 단위 테스트 통과
 - [ ] 샘플 씬이 로드되고 지정 프레임레이트에서 물리가 안정적으로 도는지 확인
 - [ ] 의도한 충돌 쌍이 EventQueue로 실제 감지되어 로그에 남는지 확인
