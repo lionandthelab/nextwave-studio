@@ -1371,6 +1371,48 @@ async function main() {
           JSON.stringify({ lastStatus: last?.status, final }));
       }
 
+      // (d-2) 완주 = 실행 종료: 엔진이 서고 simTime이 더 가지 않는다.
+      // 회귀 배경: 구 동작은 물리 루프가 계속 돌아 simTime이 영원히 올라갔고, 사용자에게는
+      // "끝났는데 안 멈춘다"로 보였다. 씬 상태는 보존한다(⏹ 정지와 달리 리셋하지 않는다).
+      const doneT1 = await page.evaluate(() => ({
+        state: window.__sim.engine.state,
+        simTimeSec: window.__sim.engine.simTimeSec,
+      }));
+      await page.waitForTimeout(1200);
+      const doneT2 = await page.evaluate(() => window.__sim.engine.simTimeSec);
+      if (doneT1.state === 'paused' && Math.abs(doneT2 - doneT1.simTimeSec) < 1e-6) {
+        pass('orchestration: 완주 후 실행 종료 (엔진 정지 · simTime 고정)',
+          `state=${doneT1.state} simTime=${doneT1.simTimeSec.toFixed(3)} (1.2s 뒤 동일)`);
+      } else {
+        fail('orchestration: 완주 후 실행 종료 (엔진 정지 · simTime 고정)',
+          JSON.stringify({ state: doneT1.state, t1: doneT1.simTimeSec, t2: doneT2 }));
+      }
+
+      // (d-3) 완주 후 ▶ 재생 = 처음부터 다시 실행.
+      // 회귀 배경: armSequenceIfAvailable이 sequenceArmed=true면 조기 반환해서, 완주 상태의
+      // ▶는 완전한 no-op이었다 — ⏹ 정지를 눌러야만 다시 재생할 수 있었다.
+      await page.evaluate(() => {
+        document.querySelector('[data-testid="playback-play"]').click();
+      });
+      const replayDeadline = Date.now() + ORCH_REALTIME_DEADLINE_MS;
+      let replay = null;
+      for (;;) {
+        replay = await page.evaluate(() => ({
+          status: window.__sim.player.status,
+          index: window.__sim.player.currentStepIndex,
+          state: window.__sim.engine.state,
+        }));
+        if (replay.status === 'running' && replay.state === 'playing') break;
+        if (Date.now() > replayDeadline) break;
+        await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+      }
+      if (replay.status === 'running' && replay.state === 'playing') {
+        pass('orchestration: 완주 후 ▶ 재생이 처음부터 다시 실행한다',
+          `status=${replay.status} index=${replay.index} engine=${replay.state}`);
+      } else {
+        fail('orchestration: 완주 후 ▶ 재생이 처음부터 다시 실행한다', JSON.stringify(replay));
+      }
+
       // (e) stepNode: 신선한 리셋에서 정확히 노드 1개 전진 (커서 +1, sim은 일부만 전진)
       await orchStop();
       const beforeStep = await page.evaluate(() => ({

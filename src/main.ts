@@ -1955,17 +1955,40 @@ async function boot(): Promise<void> {
        * 콜백에만 걸면 시퀀스가 자연 종료될 때(사용자가 아무것도 누르지 않았을 때)
        * 아무도 상태를 되돌리지 않아 영원히 '실행 중'으로 남는다.
        */
-      const paintRunState = (seqRunning: boolean, engineState: EngineState): void => {
+      const paintRunState = (
+        seqRunning: boolean,
+        seqDone: boolean,
+        engineState: EngineState,
+      ): void => {
+        // 완주는 '일시정지'가 아니라 '끝'이다 — 완료 시 엔진을 세우므로 engineState는
+        // 'paused'지만, 사용자에게 이 상태의 의미는 idle(다시 실행 가능)이다.
         document.body.dataset.runState = seqRunning
           ? 'running'
-          : engineState === 'paused'
+          : !seqDone && engineState === 'paused'
             ? 'paused'
             : 'idle';
       };
 
+      /**
+       * 시퀀스가 방금 완주했는가 (running → done 전이) — 완료 처리를 1회만 하기 위한 래치.
+       */
+      let seqCompletionHandled = false;
+
       const playbackControls = {
         play: (): void => {
-          armSequenceIfAvailable();
+          // 완주 후 ▶는 "다시 실행"이다. armSequenceIfAvailable은 sequenceArmed가 true면
+          // 조기 반환하므로, 완주 상태(player.status==='done')에서는 아무 일도 일어나지
+          // 않았다 — 정지를 눌러야만 동작하던 원인. 처음부터 결정론적으로 되감는다.
+          if (sequenceArmed && player.status === 'done') {
+            // ⏹ 정지 → ▶ 재생과 **같은 경로**다(게이트가 이미 증명하는 결정론적 리플레이).
+            // resetScene()만 부르면 씬 바디는 되감기지만 simTimeSec이 이어져,
+            // 같은 "처음부터"인데 정지 경로와 시간 표시가 달라진다.
+            orchestrator.stop();
+            seqCompletionHandled = false;
+            appLog('info', '시퀀스 다시 실행 — 처음부터');
+          } else {
+            armSequenceIfAvailable();
+          }
           orchestrator.play();
           refreshOverlay(); // engine.play() 직후 동기 갱신 — rAF 지연 없이 'Running · node k/n' 전이 (§5)
         },
@@ -2171,7 +2194,21 @@ async function boot(): Promise<void> {
         const seqRunningNow =
           sequenceArmed && info.state === 'playing' && player.status === 'running';
         const seqDoneNow = sequenceArmed && player.status === 'done';
-        paintRunState(seqRunningNow, info.state);
+
+        // 시퀀스가 끝나면 **실행도 끝난다.** 구 동작은 물리 루프가 계속 돌아 simTime이
+        // 영원히 올라갔고, 사용자에게는 "끝났는데 안 멈춘다"로 보였다.
+        // 씬 상태는 보존한다(⏹ 정지와 달리 리셋하지 않는다) — 결과를 그대로 관찰할 수 있다.
+        if (seqDoneNow && !seqCompletionHandled) {
+          seqCompletionHandled = true;
+          if (info.state === 'playing') {
+            orchestrator.pause();
+            appLog('info', '시퀀스 완주 — 실행 종료 (▶ 다시 실행으로 처음부터)');
+          }
+        } else if (!seqDoneNow) {
+          seqCompletionHandled = false;
+        }
+
+        paintRunState(seqRunningNow, seqDoneNow, info.state);
         playbackBar.update({
           engineState: info.state,
           simTimeSec: info.simTimeSec,
