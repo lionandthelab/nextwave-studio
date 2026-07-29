@@ -167,7 +167,7 @@ export function nodeKindMeta(kind: string): { icon: IconName; label: string } {
     case 'wait':
       return { icon: 'timer', label: 'Wait — 대기' };
     case 'waitForCollision':
-      return { icon: 'impact', label: 'WaitForCollision — 충돌 대기' };
+      return { icon: 'impact', label: 'WaitForCollision — 접촉 대기' };
     case 'label':
       return { icon: 'bookmark', label: 'Label — 라벨' };
     case 'goto':
@@ -1246,7 +1246,7 @@ export function mountNodeEditor(host: HTMLElement, deps: NodeEditorDeps): NodeEd
     });
     grid.appendChild(a.cell);
     grid.appendChild(b.cell);
-    paramsBody.appendChild(subCaption('충돌 대기 엔티티 쌍'));
+    paramsBody.appendChild(subCaption('접촉 대기 엔티티 쌍 (= 조작 대상 선언)'));
     paramsBody.appendChild(grid);
     styled(timeout.cell, { marginTop: SPACE.lg });
     paramsBody.appendChild(timeout.cell);

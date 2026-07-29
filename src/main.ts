@@ -67,6 +67,8 @@
 // 씬의 첫 로봇; 로봇 없는 씬은 시퀀스 검증(robot 참조)이 편집을 거부 — 한국어 안내).
 
 import { CollisionMonitor } from './core/collision';
+import { classifyContact, isCollision } from './core/collision-classify';
+import type { ContactClass } from './core/collision-classify';
 import {
   collisionQueryFromMonitor,
   robotApiFromRegistry,
@@ -1856,25 +1858,33 @@ async function boot(): Promise<void> {
       // 충돌 → 로그 패널 행 추가 + start 시 관련 오브젝트 빨강 펄스 + 접촉점 마커
       // (UX_DESIGN §3.3 "충돌 오브젝트 하이라이트 + 접촉점 마커" / §3.6 로그)
       built.offMonitor = monitor.subscribe((e) => {
-        collisionPanel.addEvent(e);
+        const contactClass = classifyCollision(e);
+        const isRealCollision = isCollision(contactClass);
+        collisionPanel.addEvent(e, contactClass);
         // 비활성 탭에 쌓인 충돌을 탭 배지로 표면화한다 (UX_AUDIT C-7): 구 구현은
         // waitForCollision을 포함한 시퀀스가 완주해도 충돌이 있었다는 표시가 화면
         // 어디에도 없었다 — 이 제품의 존재 이유가 3번째 탭 뒤에 숨어 있었다.
+        // 배지·카운터·토스트·펄스는 **진짜 충돌만** 센다. 집으려는 박스에 손을 대는 것은
+        // 시퀀스가 의도한 성공이지 사고가 아니다 — 그것까지 세면 진짜 사고가 소음에 묻힌다.
         built.dock?.setBadge(DOCK_TAB_ID.collision, collisionPanel.unseenCount());
-        if (e.phase === 'start') {
+        if (e.phase === 'start' && isRealCollision) {
           collisionCountForOverlay += 1;
           lastCollisionPairForOverlay = `${e.a} × ${e.b}`;
         }
         viewportStatusRef?.setCollisionCount(collisionCountForOverlay);
         if (e.phase !== 'start') return;
         // 첫 충돌 1회만 안내한다 — 매번 띄우면 학습적으로 무시된다
-        if (!firstCollisionNoticed) {
+        if (isRealCollision && !firstCollisionNoticed) {
           firstCollisionNoticed = true;
-          showToast('충돌이 감지되었습니다 — 하단 독의 «충돌 로그»를 확인하세요', 'warn');
+          showToast(
+            `예기치 않은 충돌 — ${e.a} × ${e.b}. 하단 독의 «충돌 로그»를 확인하세요`,
+            'warn',
+          );
         }
         // "어디서" 부딪혔는지 — 물리에서 온 월드 접촉점 (sensor는 접촉점이 없다)
         if (e.point) contactMarkers.spawn(e.point, e.normal);
-        // "무엇이" 부딪혔는지 — 관련 엔티티 펄스
+        // "무엇이" 부딪혔는지 — 관련 엔티티 펄스. **진짜 충돌만** 빨갛게 깜빡인다.
+        if (!isRealCollision) return;
         for (const entityId of [e.a, e.b]) {
           if (entityId === GROUND_ENTITY_ID) continue; // 바닥 전체 펄스는 소음 — 제외
           const node = visualNodeOf(entityId);
@@ -2884,38 +2894,25 @@ async function boot(): Promise<void> {
         return pairs;
       };
 
-      const collisionPairMatches = (e: CollisionEvent, x: string, y: string): boolean =>
-        (e.a === x && e.b === y) || (e.a === y && e.b === x);
-
       /**
-       * "예기치 않은" 충돌 판정 (§5 충돌 인지 정지). 오검출로 정상 실행을 오류로 물들이지
-       * 않도록 보수적으로 좁힌다(EXPERIMENTS 기록) — start phase의 로봇×비로봇 접촉 중
-       * 다음을 모두 만족할 때만 true:
-       *  - 바닥이 아님 (로봇이 서 있는 정상 접촉 제외),
-       *  - 어떤 waitForCollision 배리어의 대상 쌍도 아님 (조작 대상 접촉 제외),
-       *  - 상대가 동적 사물이 아님 (동적 사물과의 접촉은 정상 조작 — 밀기/파지).
-       * 즉 robot × 정적 환경(벽·기둥 등)의 비의도 접촉만 오류로 승격한다.
+       * 접촉 분류 — core/collision-classify의 순수 판정에 위임한다.
+       *
+       * 타겟(= 시퀀스가 접촉 대기 노드로 선언한 쌍)·바닥·감지 영역·사물끼리의 접촉은
+       * 충돌이 아니다. **로봇이 타겟 아닌 것에 부딪힌 경우만** 충돌이다.
+       *
+       * 구 판정은 "동적 사물과의 접촉은 정상 조작(밀기/파지)"이라며 옆 물건과의 충돌까지
+       * 통째로 면제했는데, 그러면 "타겟 외의 것에 부딪혔다"는 사고를 놓친다.
        */
-      const unexpectedCollision = (e: CollisionEvent): boolean => {
-        if (e.phase !== 'start') return false;
-        const robotIds = new Set(sceneHandle.robots.ids());
-        const aIsRobot = robotIds.has(e.a);
-        const bIsRobot = robotIds.has(e.b);
-        if (aIsRobot === bIsRobot) return false; // 로봇 미관여 or 로봇×로봇(self) — 대상 아님
-        const other = aIsRobot ? e.b : e.a;
-        if (other === GROUND_ENTITY_ID) return false; // 바닥은 정상 (로봇이 서 있음)
-        for (const [x, y] of awaitedCollisionPairs()) {
-          if (collisionPairMatches(e, x, y)) return false; // 조작 대상 — 정상 접촉
-        }
-        // 동적 사물과의 접촉은 정상 조작(밀기/파지) — 정적 환경과의 비의도 접촉만 승격
-        const otherEntity = editor.spec.entities.find((en) => en.id === other);
-        const otherIsDynamic =
-          otherEntity !== undefined &&
-          !isRobotSpec(otherEntity) &&
-          otherEntity.physics?.bodyType === 'dynamic';
-        if (otherIsDynamic) return false;
-        return true;
-      };
+      const classifyCollision = (e: CollisionEvent): ContactClass =>
+        classifyContact(e, {
+          robotIds: new Set(sceneHandle.robots.ids()),
+          targetPairs: awaitedCollisionPairs(),
+          groundId: GROUND_ENTITY_ID,
+        });
+
+      /** §5 충돌 인지 정지 — start phase의 진짜 충돌만 자동 정지를 트리거한다 */
+      const unexpectedCollision = (e: CollisionEvent): boolean =>
+        e.phase === 'start' && isCollision(classifyCollision(e));
 
       // core Engine/Player를 오케스트레이터의 좁은 표면으로 감싼다 (Rapier/three 비노출).
       // onTick의 state 타입 완화(EngineState → string), setSpeed 배율 검증은 engine이 수행.

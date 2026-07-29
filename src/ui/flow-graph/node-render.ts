@@ -10,7 +10,7 @@
 //   소관이며, 이 모듈은 "표시"만 책임진다.
 // - statusColor/statusLabelKo: 실행 상태 점 색 + 텍스트 라벨(색만으로 전달 금지 — UX §9)
 // - originBadge: 출처 배지 텍스트 (generated → 'AI', modified → '수정됨' — UX §3.4)
-// - PALETTE_GROUPS: ＋ 삽입 팔레트의 step 분류 (동작/시간/충돌/흐름 — Phase 8 요구)
+// - PALETTE_GROUPS: ＋ 삽입 팔레트의 step 분류 (동작/시간/접촉/흐름 — Phase 8 요구)
 // - nodeLod: 줌 배율 → 노드 상세도 정책 (UX_AUDIT C-10 확장성 천장)
 //
 // ── 이 모듈은 DOM에 의존하지 않는다 (canvas.test.ts는 node 환경에서 돈다) ──────
@@ -45,7 +45,7 @@ export function formatDurationSec(sec: number): string {
 
 // ── step 종류 메타 (아이콘 · 표시명 · 팔레트 그룹 · 색) ──────────────
 
-export type PaletteGroupKo = '동작' | '시간' | '충돌' | '흐름';
+export type PaletteGroupKo = '동작' | '시간' | '접촉' | '흐름';
 
 export interface StepKindMeta {
   /**
@@ -107,9 +107,12 @@ const KIND_META: Readonly<Record<string, StepKindMeta>> = {
   waitForCollision: {
     icon: 'impact',
     label: 'WaitForCollision',
-    groupKo: '충돌',
+    groupKo: '접촉',
     color: CATEGORY.collision,
-    descriptionKo: '두 엔티티의 충돌이 감지될 때까지 대기',
+    // "충돌 대기"는 오해를 부른다 — 이 노드는 **의도한 접촉**을 기다리는 배리어이고,
+    // 여기 적은 쌍이 곧 "조작 대상" 선언이라 충돌 판정에서 면제된다
+    // (core/collision-classify). 사고를 기다리는 것이 아니다.
+    descriptionKo: '두 엔티티가 닿을 때까지 대기 — 여기 적은 쌍이 조작 대상이 된다',
   },
   label: {
     icon: 'bookmark',
@@ -154,7 +157,7 @@ export interface PaletteGroup {
 export const PALETTE_GROUPS: readonly PaletteGroup[] = [
   { labelKo: '동작', kinds: ['moveJoints', 'setJoints', 'gripper'] },
   { labelKo: '시간', kinds: ['wait'] },
-  { labelKo: '충돌', kinds: ['waitForCollision'] },
+  { labelKo: '접촉', kinds: ['waitForCollision'] },
   { labelKo: '흐름', kinds: ['label', 'goto'] },
 ];
 

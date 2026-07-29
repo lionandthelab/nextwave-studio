@@ -708,8 +708,8 @@ describe('nodeSummary', () => {
 // ── 종류 메타 / 팔레트 그룹 ─────────────────────────────────────────
 
 describe('kindMeta / PALETTE_GROUPS', () => {
-  it('팔레트는 동작/시간/충돌/흐름 4그룹이고 모든 항목에 메타가 있다', () => {
-    expect(PALETTE_GROUPS.map((g) => g.labelKo)).toEqual(['동작', '시간', '충돌', '흐름']);
+  it('팔레트는 동작/시간/접촉/흐름 4그룹이고 모든 항목에 메타가 있다', () => {
+    expect(PALETTE_GROUPS.map((g) => g.labelKo)).toEqual(['동작', '시간', '접촉', '흐름']);
     for (const group of PALETTE_GROUPS) {
       for (const kind of group.kinds) {
         const meta = kindMeta(kind);

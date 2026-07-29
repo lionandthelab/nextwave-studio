@@ -26,11 +26,14 @@
 // 계층 규칙: schema의 CollisionEvent POJO만 안다. 이벤트 공급(모니터 구독)은
 // 글루(main.ts)가 addEvent 호출로 중계한다 — 이 모듈은 core를 import하지 않는다.
 
+import { CONTACT_CLASS_LABEL_KO } from '../../core/collision-classify';
+import type { ContactClass } from '../../core/collision-classify';
 import { rovingTabindex } from '../a11y';
 import { icon, makeIconButton } from '../icons';
 import {
   BORDER,
   BORDER_WIDTH,
+  COLLISION,
   COLOR,
   ICON,
   MOTION,
@@ -118,8 +121,14 @@ export interface CollisionLogOptions {
 
 export interface CollisionLogPanel {
   readonly el: HTMLElement;
-  /** 새 충돌 이벤트 1건 추가 (모니터 구독을 글루가 중계) */
-  addEvent(e: CollisionEvent): void;
+  /**
+   * 새 접촉 이벤트 1건 추가 (모니터 구독을 글루가 중계).
+   *
+   * `contactClass`는 통합자가 core/collision-classify로 판정해 넘긴다. 미주입이면
+   * 분류 없이 기록만 한다(하위 호환). **`unexpected`만 미확인 카운트에 들어간다** —
+   * 의도한 파지가 독 배지를 올리면 진짜 사고가 소음에 묻힌다.
+   */
+  addEvent(e: CollisionEvent, contactClass?: ContactClass): void;
   /** 모든 행 제거 (Stop/씬 리셋 시 — 결정론적 재생과 짝). 미확인 카운트도 0이 된다 */
   clear(): void;
   /**
@@ -236,7 +245,7 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
     { text: '시각' },
     { text: '엔티티 쌍' },
     { text: 'phase', en: true },
-    { text: 'kind', en: true },
+    { text: '분류', en: false },
     { text: '연동' },
   ];
   COLUMNS.forEach((col, i) => {
@@ -366,7 +375,7 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
     URL.revokeObjectURL(url);
   });
 
-  const addEvent = (e: CollisionEvent): void => {
+  const addEvent = (e: CollisionEvent, contactClass?: ContactClass): void => {
     // 자동 스크롤: 사용자가 위로 스크롤해 둔 상태면 유지(멈춤), 바닥이면 따라간다
     const stick =
       scroller.scrollTop + scroller.clientHeight >=
@@ -376,6 +385,7 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
     row.dataset.testid = 'collision-row';
     row.dataset.entityA = e.a;
     row.dataset.entityB = e.b;
+    if (contactClass !== undefined) row.dataset.contactClass = contactClass;
     row.classList.add('rsw-hover-row', 'rsw-clog-row');
     styled(row, { borderBottom: `${BORDER_WIDTH.hair} solid ${BORDER.subtle}` });
 
@@ -419,14 +429,26 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
     badge.setAttribute('lang', 'en');
     phaseCell.appendChild(badge);
 
+    // 분류 셀 — 물리 kind(contact/sensor)가 아니라 **사용자에게 의미 있는 분류**를 보인다.
+    // "arm × box_a / contact"는 그것이 성공인지 사고인지 말해 주지 않는다.
     const kindCell = styled(document.createElement('td'), {
-      color: e.kind === 'sensor' ? COLOR.infoText : COLOR.label,
       padding: `${SPACE.xxs} ${SPACE.xs}`,
       width: '1%',
       whiteSpace: 'nowrap',
     });
-    kindCell.textContent = e.kind;
-    kindCell.setAttribute('lang', 'en');
+    if (contactClass === undefined) {
+      kindCell.style.color = e.kind === 'sensor' ? COLOR.infoText : COLOR.label;
+      kindCell.textContent = e.kind;
+      kindCell.setAttribute('lang', 'en');
+    } else {
+      kindCell.style.color =
+        contactClass === 'unexpected'
+          ? COLLISION.text
+          : contactClass === 'sensor'
+            ? COLOR.infoText
+            : COLOR.muted;
+      kindCell.textContent = CONTACT_CLASS_LABEL_KO[contactClass];
+    }
 
     // 연동 어포던스: 이 행이 뷰포트/노드와 이어져 있음을 알리는 표적 아이콘
     // (hover/focus-within 시 강조 — ensureCollisionLogStyles). 이름은 버튼 aria-label이
@@ -463,7 +485,12 @@ export function createCollisionLogPanel(opts: CollisionLogOptions): CollisionLog
     events.push(e);
     while (tbody.childElementCount > MAX_ROWS) tbody.firstElementChild?.remove();
     while (events.length > MAX_ROWS) events.shift();
-    unseen += 1;
+    // 배지 소스: **충돌의 시작(start)만** 센다. 의도된 접촉은 세지 않고, stop은 같은
+    // 사건의 끝이라 새 건수가 아니다 — 상태줄 '충돌 N'과 같은 기준이어야 두 표시가
+    // 어긋나지 않는다. (분류 미주입 시엔 하위 호환으로 전부 센다.)
+    if (contactClass === undefined || (contactClass === 'unexpected' && e.phase === 'start')) {
+      unseen += 1;
+    }
     paintEmptyState();
     paintExportButton();
     scheduleRovingRefresh();
