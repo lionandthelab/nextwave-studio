@@ -163,7 +163,8 @@ export function mountHelpSheet(host: HTMLElement, deps: HelpSheetDeps): HelpShee
     body.appendChild(intro);
 
     // 그룹별 단축키 — 실제 등록된 것만
-    const bindings = deps.listShortcuts();
+    // hidden 별칭(←→↑↓의 나머지 3방향, Shift 미세 변형 등)은 대표 줄이 대신 표기한다
+    const bindings = deps.listShortcuts().filter((b) => b.hidden !== true);
     const groups = new Map<string, ShortcutBinding[]>();
     for (const b of bindings) {
       const list = groups.get(b.group);
@@ -208,7 +209,7 @@ export function mountHelpSheet(host: HTMLElement, deps: HelpSheetDeps): HelpShee
 
           const keys = document.createElement('span');
           styled(keys, { flex: 'none', display: 'flex', gap: SPACE.xs });
-          for (const part of formatKeys(b.keys).split(' + ')) {
+          for (const part of b.keysDisplay ?? formatKeys(b.keys).split(' + ')) {
             const kbd = document.createElement('kbd');
             kbd.className = 'rsw-kbd';
             kbd.textContent = part;

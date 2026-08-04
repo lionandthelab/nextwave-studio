@@ -45,6 +45,18 @@ export interface ShortcutBinding {
   readonly labelKo: string;
   /** 도움말 시트의 그룹 제목 */
   readonly group: string;
+  /**
+   * 도움말 시트에서 숨긴다 (기본 false).
+   *
+   * 한 조작이 여러 키로 들어오는 경우(←→↑↓, Shift 미세 변형)를 위한 것이다. 라우터는
+   * 키 하나당 바인딩 하나를 요구하므로 별칭이 필연적으로 생기는데, 그걸 전부 나열하면
+   * 시트가 같은 조작 8줄로 덮인다. **대표 바인딩 하나만 보이고**(keysDisplay로 키
+   * 묶음을 표기) 나머지는 숨긴다 — 시트가 "실제 등록된 것만 그린다"는 계약은 유지된다
+   * (숨긴 별칭도 대표 줄의 표기에 포함되므로 광고와 구현이 어긋나지 않는다).
+   */
+  readonly hidden?: boolean;
+  /** 시트에 표시할 키 토큰 override (예: ['←', '→', '↑', '↓']) — 없으면 formatKeys(keys) */
+  readonly keysDisplay?: readonly string[];
   /** 텍스트 입력 중에도 동작해야 하는가 (기본 false) */
   readonly allowInTextEntry?: boolean;
   /** 지금 이 바인딩이 유효한가 (예: 재생 중에는 편집 단축키 비활성) */

@@ -1,0 +1,207 @@
+<?xml version="1.0"?>
+<!--
+  scara4.urdf — robot-sim-web SCARA 4-DOF 로봇 + 흡착(진공) 그리퍼
+  프리미티브 지오메트리만 사용 (외부 메시 파일 불필요 — 정적 호스팅 친화).
+  URDF 표준 관례상 Z-up이며, 로딩 시 scene-loader가 Y-up으로 축 변환한다 (CLAUDE.md §4).
+  단위: 미터, 라디안.
+
+  ── 구조 (SCARA의 정체성: 수평면 회전 + 수직 직동) ────────────────────
+    base_link(기둥) ─J1(회전 Z)─ link1(상완, 0.22m) ─J2(회전 Z)─ link2(전완, 0.18m)
+                    ─J3(직동, 수직)─ link3(볼스크류 스플라인 축)
+                    ─J4(회전 Z, 손목)─ link4(흡착 헤드) ─흡착─ suction_pad
+
+  arm6(6축 관절팔)와 달리 J1·J2·J4가 전부 수직축 회전이라 말단 자세가 항상 아래를
+  향한다. 픽앤플레이스 평면 작업에 특화된 대신 자세를 기울일 수 없다.
+
+  ── 좌표/치수 요약 (전 관절 0일 때, URDF Z-up 기준) ──────────────────
+    작업면(전완 상단) z = 0.51 / 최대 수평 도달 반경 = 0.22 + 0.18 = 0.40 m
+    J3 스트로크 0 → 0.18 m (아래로 +). 패드 하단 z: 0.202(수축) → 0.022(최하강)
+-->
+<robot name="scara4">
+
+  <material name="scara_body">
+    <color rgba="0.83 0.85 0.88 1.0"/>
+  </material>
+  <material name="scara_accent">
+    <color rgba="0.09 0.62 0.61 1.0"/>
+  </material>
+  <material name="scara_dark">
+    <color rgba="0.16 0.18 0.21 1.0"/>
+  </material>
+  <material name="suction_rubber">
+    <color rgba="0.30 0.31 0.35 1.0"/>
+  </material>
+
+  <!-- ── 베이스: 받침 + 수직 기둥 (기둥 상단 z = 0.40) ──────────────── -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.085" length="0.03"/></geometry>
+      <material name="scara_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.215" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.052" length="0.37"/></geometry>
+      <material name="scara_body"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.085" length="0.03"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 0.215" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.052" length="0.37"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="2.5"/>
+      <inertia ixx="0.03" iyy="0.03" izz="0.01" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J1: 어깨 회전 (수직축) ────────────────────────────────────── -->
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.40" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.6" upper="2.6" effort="60" velocity="6.0"/>
+  </joint>
+  <link name="link1">
+    <visual>
+      <origin xyz="0 0 0.03" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.055" length="0.06"/></geometry>
+      <material name="scara_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.11 0 0.03" rpy="0 0 0"/>
+      <geometry><box size="0.22 0.075 0.06"/></geometry>
+      <material name="scara_accent"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.03" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.055" length="0.06"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.11 0 0.03" rpy="0 0 0"/>
+      <geometry><box size="0.22 0.075 0.06"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="1.2"/>
+      <inertia ixx="0.004" iyy="0.008" izz="0.008" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J2: 팔꿈치 회전 (수직축) ──────────────────────────────────── -->
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0.22 0 0.06" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.64" upper="2.64" effort="40" velocity="6.0"/>
+  </joint>
+  <link name="link2">
+    <visual>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.045" length="0.05"/></geometry>
+      <material name="scara_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.09 0 0.025" rpy="0 0 0"/>
+      <geometry><box size="0.18 0.062 0.05"/></geometry>
+      <material name="scara_body"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.045" length="0.05"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.09 0 0.025" rpy="0 0 0"/>
+      <geometry><box size="0.18 0.062 0.05"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.8"/>
+      <inertia ixx="0.002" iyy="0.004" izz="0.004" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J3: 수직 직동 (볼스크류 스플라인 축) ──────────────────────────
+       axis = (0,0,-1)이라 **관절값이 곧 하강 깊이(m)**다: 0 = 최상단(수축),
+       0.18 = 최하단. 부호가 뒤집힌 상한(-0.18..0)보다 시퀀스에서 읽기 쉽다.
+       축 시각 길이 0.44는 스트로크 0.18 + 하부 0.26이라, 완전 하강해도 전완과
+       축이 끊겨 보이지 않는다(실기의 스플라인 축이 위로 솟는 모습 그대로). -->
+  <joint name="joint3" type="prismatic">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0.18 0 0.05" rpy="0 0 0"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="0.0" upper="0.18" effort="80" velocity="0.6"/>
+  </joint>
+  <link name="link3">
+    <visual>
+      <origin xyz="0 0 -0.04" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.018" length="0.44"/></geometry>
+      <material name="scara_body"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.04" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.018" length="0.44"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.5"/>
+      <inertia ixx="0.008" iyy="0.008" izz="0.0002" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J4: 손목 회전 (수직축) ────────────────────────────────────── -->
+  <joint name="joint4" type="revolute">
+    <parent link="link3"/>
+    <child link="link4"/>
+    <origin xyz="0 0 -0.26" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.1416" upper="3.1416" effort="15" velocity="8.0"/>
+  </joint>
+  <link name="link4">
+    <visual>
+      <origin xyz="0 0 -0.015" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.03"/></geometry>
+      <material name="scara_accent"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.015" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.03"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.25"/>
+      <inertia ixx="0.0004" iyy="0.0004" izz="0.0002" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── 흡착 그리퍼: 프리즘 조인트 1개 ────────────────────────────────
+       평행 손가락 2개 대신 **패드 1개가 내려가 밀착**하는 축으로 표현한다.
+       값 0.0 = 떨어짐(open), 0.012 = 밀착(close) — 프로젝트의 gripper step은
+       RobotSpec.gripper = {joints, open, close}로 관절값을 구동하므로, 흡착도
+       관절 1개로 두면 기존 step/플레이어를 그대로 쓴다 (DATA_MODEL §4.1). -->
+  <joint name="suction_joint" type="prismatic">
+    <parent link="link4"/>
+    <child link="suction_pad"/>
+    <origin xyz="0 0 -0.03" rpy="0 0 0"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="0.0" upper="0.012" effort="20" velocity="0.05"/>
+  </joint>
+  <link name="suction_pad">
+    <visual>
+      <origin xyz="0 0 -0.009" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.024" length="0.018"/></geometry>
+      <material name="suction_rubber"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.009" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.024" length="0.018"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.0001" iyy="0.0001" izz="0.0001" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+</robot>

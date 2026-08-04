@@ -39,6 +39,7 @@ import type {
   BodyType,
   ColliderGroup,
   ColliderShape,
+  ConveyorSpec,
   EntitySpec,
   PhysicsSpec,
   Quat,
@@ -53,6 +54,16 @@ export const DIMENSION_MIN_M = 0.005;
 /** friction/restitution/density 클램프 범위 — 요구 §2 Physics */
 export const PHYSICS_PARAM_MIN = 0;
 export const PHYSICS_PARAM_MAX = 2;
+
+/** 컨베이어 속도 하한 (m/s) — validateScene이 0 이하를 거부하므로 폼에서 먼저 막는다 */
+export const CONVEYOR_SPEED_MIN_MPS = 0.01;
+const CONVEYOR_SPEED_STEP_MPS = 0.01;
+const CONVEYOR_SPEED_DECIMALS = 2;
+const CONVEYOR_SPEED_SCRUB_PER_PX = 0.002;
+/** 방향은 정규화되므로 크기는 무의미 — 부호/비율만 보이면 되어 소수 2자리로 충분 */
+const CONVEYOR_DIR_STEP = 0.1;
+const CONVEYOR_DIR_DECIMALS = 2;
+const CONVEYOR_DIR_SCRUB_PER_PX = 0.02;
 
 const DEG_TO_RAD = Math.PI / 180;
 const IDENTITY_QUAT: Quat = [0, 0, 0, 1];
@@ -126,6 +137,8 @@ export interface EntityEditorDeps {
   updateDimensions(id: string, shape: ColliderShape): void;
   /** → SceneEditor.updatePhysics — 바디+collider 재생성 */
   updatePhysics(id: string, physics: PhysicsSpec): void;
+  /** → SceneEditor.updateConveyor — 벨트 표면 구동(속도·방향·재순환) 재빌드 */
+  updateConveyor(id: string, conveyor: ConveyorSpec): void;
   /** null = 성공, string = 한국어 오류 메시지(중복 등 — 인라인 표시) */
   renameEntity(id: string, newId: string): string | null;
 }
@@ -661,11 +674,29 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
     });
   };
 
+  const bindCheckbox = (
+    box: HTMLInputElement,
+    get: (spec: EntitySpec) => boolean,
+  ): void => {
+    fieldBindings.push({
+      control: box,
+      populate: (spec): void => {
+        box.checked = get(spec);
+      },
+    });
+  };
+
   // ── 폼 시그니처: 섹션 구성이 바뀌는 조건 (바뀌면 재구축, 아니면 값만 populate) ─
   const formSignatureOf = (spec: EntitySpec): string => {
     const robot = deps.isRobot(spec.id);
     const shapeKind = robot ? null : (primitiveFormStateOf(spec)?.kind ?? null);
-    return [robot ? 'robot' : 'entity', shapeKind ?? '-', spec.physics !== undefined ? 'phys' : '-'].join('|');
+    return [
+      robot ? 'robot' : 'entity',
+      shapeKind ?? '-',
+      spec.physics !== undefined ? 'phys' : '-',
+      // conveyor 유무가 섹션 구성을 바꾼다 — 없으면 재구축 없이 섹션이 안 나타난다
+      spec.conveyor !== undefined ? 'conv' : '-',
+    ].join('|');
   };
 
   // ── 섹션 골격 (접기 — 셰브론 회전 규약은 makePanelHeader가 소유, UX_AUDIT C-18) ─
@@ -1013,6 +1044,108 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
     return section;
   };
 
+  // ── Conveyor 섹션 (벨트 표면 구동 — DATA_MODEL §4.2) ───────────────
+  //
+  // conveyor 블록이 있는 엔티티에만 나타난다. 방향은 **수평(XZ) 성분만** 의미가 있으므로
+  // Y를 입력받지 않는다 — 수직 방향은 정규화가 불가능해 validateScene이 거부하는 값이고,
+  // 입력란을 열어 두면 "왜 안 되지"를 사용자가 시행착오로 배우게 된다.
+  const buildConveyorSection = (formId: string, initial: ConveyorSpec): HTMLElement => {
+    const { section, body } = makeSection('Conveyor', 'ee-sec-conveyor');
+    body.appendChild(
+      subCaption(`벨트 표면이 위의 사물을 실어 나른다 — 방향은 엔티티 기준 수평(XZ)`),
+    );
+
+    /**
+     * 이 폼이 담당하는 엔티티의 현재 spec (선택이 바뀌었으면 null).
+     * Transform 섹션과 같은 이유의 가드다 — 값을 커밋하지 않은 채 다른 엔티티를 선택하면
+     * replaceChildren()이 포커스된 입력을 떼면서 지연 발화하는 native change가 **새로
+     * 선택된 엔티티**에 컨베이어 블록을 써 넣는다.
+     */
+    const formSpec = (): EntitySpec | null =>
+      currentId === formId ? deps.getEntity(formId) : null;
+
+    function commitConveyor(): void {
+      const spec = formSpec();
+      if (spec === null) return;
+      const base = spec.conveyor ?? initial;
+      const next: ConveyorSpec = {
+        direction: [
+          parseNumeric(dirX.input.value) ?? base.direction[0],
+          // 수직 성분은 표현할 수 없다(정규화 불가) — 원본이 갖고 있던 값을 그대로 둔다.
+          // 조용히 0으로 덮으면 사용자가 편집하지 않은 씬 데이터를 폼이 고쳐 쓰게 된다.
+          base.direction[1],
+          parseNumeric(dirZ.input.value) ?? base.direction[2],
+        ],
+        speedMps: Math.max(
+          CONVEYOR_SPEED_MIN_MPS,
+          parseNumeric(speed.input.value) ?? base.speedMps,
+        ),
+        recycle: recycleBox.checked,
+      };
+      deps.updateConveyor(spec.id, next);
+      // 편집이 거부됐을 수 있으므로(검증 실패 → 통합자가 토스트) **적용된 진실**을 다시
+      // 읽어 표시한다. next를 그대로 찍으면 폼만 거부된 값을 들고 스펙과 어긋난다.
+      const applied = deps.getEntity(spec.id)?.conveyor ?? base;
+      if (!isBusy(dirX.input)) {
+        dirX.input.value = formatFixed(applied.direction[0], CONVEYOR_DIR_DECIMALS);
+      }
+      if (!isBusy(dirZ.input)) {
+        dirZ.input.value = formatFixed(applied.direction[2], CONVEYOR_DIR_DECIMALS);
+      }
+      if (!isBusy(speed.input)) {
+        speed.input.value = formatFixed(applied.speedMps, CONVEYOR_SPEED_DECIMALS);
+      }
+      recycleBox.checked = applied.recycle === true;
+    }
+
+    const speed = numberCell({
+      label: '속도 (m/s)',
+      testId: 'ee-conveyor-speed',
+      step: CONVEYOR_SPEED_STEP_MPS,
+      min: CONVEYOR_SPEED_MIN_MPS,
+      decimals: CONVEYOR_SPEED_DECIMALS,
+      scrubPerPx: CONVEYOR_SPEED_SCRUB_PER_PX,
+      onCommit: commitConveyor,
+      onScrubActive,
+    });
+    const dirOpts = {
+      step: CONVEYOR_DIR_STEP,
+      decimals: CONVEYOR_DIR_DECIMALS,
+      scrubPerPx: CONVEYOR_DIR_SCRUB_PER_PX,
+      onCommit: commitConveyor,
+      onScrubActive,
+    } as const;
+    // UI 크롬은 한국어 (CLAUDE.md §4-b) — 축 문자 X/Z는 도메인 공통 기호다
+    const dirX = numberCell({ label: '방향 X', testId: 'ee-conveyor-dir-x', ...dirOpts });
+    const dirZ = numberCell({ label: '방향 Z', testId: 'ee-conveyor-dir-z', ...dirOpts });
+
+    const row = tripleRow();
+    row.appendChild(speed.cell);
+    row.appendChild(dirX.cell);
+    row.appendChild(dirZ.cell);
+    body.appendChild(row);
+
+    const recycleLabel = document.createElement('label');
+    recycleLabel.className = 'ui-check-label';
+    const recycleBox = document.createElement('input');
+    recycleBox.type = 'checkbox';
+    recycleBox.className = 'ui-check';
+    recycleBox.checked = initial.recycle === true;
+    recycleBox.dataset.testid = 'ee-conveyor-recycle';
+    recycleBox.addEventListener('change', commitConveyor);
+    const recycleText = styled(document.createElement('span'), { whiteSpace: 'normal' });
+    recycleText.textContent = '재순환 — 끝에 도달한 사물을 시작점으로 되돌린다';
+    recycleLabel.appendChild(recycleBox);
+    recycleLabel.appendChild(recycleText);
+    body.appendChild(recycleLabel);
+
+    bindNumber(speed.input, (s) => s.conveyor?.speedMps ?? null, CONVEYOR_SPEED_DECIMALS);
+    bindNumber(dirX.input, (s) => s.conveyor?.direction[0] ?? null, CONVEYOR_DIR_DECIMALS);
+    bindNumber(dirZ.input, (s) => s.conveyor?.direction[2] ?? null, CONVEYOR_DIR_DECIMALS);
+    bindCheckbox(recycleBox, (s) => s.conveyor?.recycle === true);
+    return section;
+  };
+
   // ── Physics 섹션 ───────────────────────────────────────────────────
   const buildPhysicsSection = (initialPhysics: PhysicsSpec): HTMLElement => {
     const initial = physicsFormStateOf(initialPhysics);
@@ -1248,6 +1381,9 @@ export function mountEntityEditor(host: HTMLElement, deps: EntityEditorDeps): En
     } else {
       const dimForm = primitiveFormStateOf(spec);
       if (dimForm !== null) content.appendChild(buildDimensionsSection(dimForm));
+      if (spec.conveyor !== undefined) {
+        content.appendChild(buildConveyorSection(spec.id, spec.conveyor));
+      }
       if (spec.physics !== undefined) content.appendChild(buildPhysicsSection(spec.physics));
     }
     populateAll(spec);

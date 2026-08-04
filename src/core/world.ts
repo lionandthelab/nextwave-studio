@@ -140,6 +140,13 @@ export class RapierWorld implements PhysicsWorld {
   // 'stop' 이벤트를 발행하므로, 이 매핑이 없으면 상대 엔티티가 start/stop 짝을 잃고
   // 접촉 상태가 '고착'된다 (Phase 4 CollisionMonitor·waitForCollision 이력 소비자 보호).
   private readonly removedColliderToEntity = new Map<ColliderId, EntityId>();
+  // collider 재생성(clearContactState)에 필요한 생성 인자. 되감기가 접촉 매니폴드를
+  // 버리려면 collider를 지웠다 다시 만들어야 하는데, Rapier는 생성 후 원본 스펙을
+  // 돌려주지 않으므로 여기 보관한다. Map은 삽입 순서를 보존한다(재생성 순서 = 최초
+  // 생성 순서 → 핸들 배정이 재현된다).
+  private readonly colliderSpecs = new Map<ColliderId, {
+    bodyId: BodyId; spec: ColliderSpec; entityId: EntityId;
+  }>();
   // 자기 접촉(같은 EntityId collider 쌍) 이벤트를 발행할 엔티티. 미등록 = 억제(기본).
   // 로봇 링크는 EntityId를 공유하므로 이 집합이 self-collision 스위치가 된다.
   private readonly selfContactEntities = new Set<EntityId>();
@@ -202,8 +209,36 @@ export class RapierWorld implements PhysicsWorld {
 
     const collider = this.world.createCollider(desc, body);
     this.colliderToEntity.set(collider.handle, entityId); // ★ 핸들 매핑 등록
+    this.colliderSpecs.set(collider.handle, { bodyId, spec, entityId });
     if (spec.isSensor) this.sensorColliders.add(collider.handle);
     return collider.handle;
+  }
+
+  /**
+   * 접촉 매니폴드를 버린다 (되감기 전용 — core/types.ts의 계약 주석 참조).
+   *
+   * collider를 제거하면 Rapier가 그 좁은 단계 상태를 함께 버린다. 같은 바디에 같은 스펙으로
+   * 다시 만들면 기하는 그대로이고 접촉 이력만 사라진다 — 새 월드에서 시작한 것과 같아진다.
+   *
+   * 제거로 생기는 'stop' 이벤트는 **의도적으로 버린다**. 되감기는 충돌 이력도 함께
+   * 비우므로(ui/orchestrator ⏹) 그 이벤트는 이미 지워진 과거에 속한다. 남겨 두면
+   * 되감기 직후의 로그에 "방금 떨어졌다"는 유령 이벤트가 찍힌다.
+   */
+  clearContactState(): void {
+    const entries = [...this.colliderSpecs.values()];
+    for (const handle of this.colliderSpecs.keys()) {
+      const collider: RAPIER.Collider | undefined = this.world.getCollider(handle);
+      if (collider) this.world.removeCollider(collider, false);
+      this.colliderToEntity.delete(handle);
+      this.sensorColliders.delete(handle);
+    }
+    this.colliderSpecs.clear();
+    // 제거가 만든 stop 이벤트를 삼킨다 — 되감은 뒤의 이력은 비어 있어야 한다.
+    this.eventQueue.drainCollisionEvents(() => {});
+    this.eventQueue.drainContactForceEvents(() => {});
+    for (const { bodyId, spec, entityId } of entries) {
+      this.createCollider(bodyId, spec, entityId);
+    }
   }
 
   removeEntity(entityId: EntityId): void {
@@ -220,6 +255,7 @@ export class RapierWorld implements PhysicsWorld {
       for (let i = 0; i < numColliders; i++) {
         const handle = body.collider(i).handle;
         this.colliderToEntity.delete(handle);
+        this.colliderSpecs.delete(handle);
         this.removedColliderToEntity.set(handle, entityId);
       }
       this.world.removeRigidBody(body);
@@ -326,6 +362,77 @@ export class RapierWorld implements PhysicsWorld {
 
   bodiesOfEntity(entityId: EntityId): readonly BodyId[] {
     return this.entityToBodies.get(entityId) ?? [];
+  }
+
+  /**
+   * 접촉 중인 동적 바디 조회 (core/types.ts 계약).
+   *
+   * Rapier의 `contactPairsWith(collider, cb)`는 **narrow-phase가 실제로 만든 접촉 쌍**을
+   * 돌려준다 — AABB 겹침 추정이 아니다. 센서 collider는 접촉 쌍을 만들지 않으므로
+   * (intersection 쌍이 된다) 벨트 표면이 sensor면 결과가 항상 비고, 그래서
+   * validateScene이 conveyor 표면의 isSensor를 거부한다.
+   *
+   * 중복 제거: 벨트가 여러 collider를 갖거나 상대가 여러 collider로 닿을 수 있으므로
+   * 바디 핸들 기준으로 dedupe한다. 자기 자신(같은 EntityId) 바디는 제외한다.
+   */
+  dynamicBodiesTouching(entityId: EntityId): readonly BodyId[] {
+    const bodies = this.entityToBodies.get(entityId);
+    if (!bodies || bodies.length === 0) return [];
+    const seen = new Set<BodyId>();
+    const out: BodyId[] = [];
+    for (const bodyId of bodies) {
+      const body = this.world.getRigidBody(bodyId);
+      if (!body) continue;
+      const colliderCount = body.numColliders();
+      for (let i = 0; i < colliderCount; i += 1) {
+        const beltCollider = body.collider(i);
+        this.world.contactPairsWith(beltCollider, (other) => {
+          const otherBody = other.parent();
+          if (!otherBody || !otherBody.isDynamic()) return;
+          const handle = otherBody.handle;
+          if (seen.has(handle)) return;
+          // 자기 엔티티의 바디는 구동 대상이 아니다 (로봇 링크끼리 등)
+          if (this.colliderToEntity.get(other.handle) === entityId) return;
+          // contactPairsWith는 **접촉 후보 쌍**을 준다 — 실제 접촉점이 0개인 근접 쌍도
+          // 포함된다. 여기서 매니폴드를 확인하지 않으면 벨트 위 몇 mm에 떠 있는 사물까지
+          // 구동돼 "닿지 않았는데 실려 간다". 계약("접촉 중")을 코드로 지킨다.
+          if (!this.hasSolverContact(beltCollider, other)) return;
+          seen.add(handle);
+          out.push(handle);
+        });
+      }
+    }
+    return out;
+  }
+
+  /** 두 collider 사이에 실제 solver 접촉점이 있는지 (step 직후에만 유효) */
+  private hasSolverContact(a: RAPIER.Collider, b: RAPIER.Collider): boolean {
+    let touching = false;
+    this.world.contactPair(a, b, (manifold) => {
+      if (manifold.numSolverContacts() > 0) touching = true;
+    });
+    return touching;
+  }
+
+  dynamicBodies(): readonly BodyId[] {
+    const out: BodyId[] = [];
+    // forEachRigidBody의 순회 순서는 엔진 내부 arena 순서로 결정론적이다
+    this.world.forEachRigidBody((body) => {
+      if (body.isDynamic()) out.push(body.handle);
+    });
+    return out;
+  }
+
+  getLinearVelocity(bodyId: BodyId): Vec3 {
+    const body = this.requireBody(bodyId, 'getLinearVelocity');
+    const v = body.linvel();
+    return [v.x, v.y, v.z];
+  }
+
+  setLinearVelocity(bodyId: BodyId, velocity: Vec3): void {
+    const body = this.requireBody(bodyId, 'setLinearVelocity');
+    if (!body.isDynamic()) return; // kinematic/fixed에는 의미가 없다 (계약)
+    body.setLinvel(toVector(velocity), true);
   }
 
   clear(): void {

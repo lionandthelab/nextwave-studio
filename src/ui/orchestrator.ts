@@ -288,7 +288,7 @@ export class Orchestrator {
   }
 
   /**
-   * ⏹ 정지 = 결정론적 재생 준비: 엔진 정지 → resetScene(씬 pose·player 커서·충돌 이력)
+   * ⏹ 정지 = 재생 준비: 엔진 정지 → resetScene(씬 pose·player 커서·충돌 이력·물리 접촉 상태)
    * → 오류/상태 전부 리셋(전부 pending, 활성 null). 다음 ▶ Play는 처음부터 재생한다.
    */
   stop(): void {

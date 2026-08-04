@@ -83,6 +83,12 @@
    저장은 `SceneSpec` 단독이 아니라 `{scene, sequence, assets}` 봉투다. 시퀀스만 바뀌어도
    미저장(dirty)이며, 편집 커밋은 IndexedDB에 자동저장된다. 파괴적 동작에는 **되돌릴 경로**
    (Undo 또는 실행취소 토스트)가 반드시 있어야 한다 — 되돌릴 수 없으면 사용자는 탐색을 멈춘다.
+   같은 이유로 **사람이 유발한 편집은 사물을 바닥 아래에 둘 수 없다**(`core/ground-clamp.ts`):
+   static은 물리가 밀어내지 않고, dynamic은 바닥 슬래브 밑으로 빠지면 무한 낙하해 화면에서
+   사라지며, 로봇 링크는 kinematic이라 자가 교정이 없다 — 지하 배치는 실수가 아니라 손실이다.
+   클램프는 편집 경로(기즈모·방향키·인스펙터·배치·치수)에만 걸고 **씬 JSON 로드는 손대지
+   않는다**(수작성 좌표를 조용히 고쳐 쓰면 파일과 화면이 어긋난다 — §2.5).
+   복구 조작으로 `End`(바닥에 붙이기)를 제공한다.
 
 12. **생성물은 검증·사람 승인 후에만 실행한다.**
    자연어 플래너 출력은 스키마 검증을 통과한 뒤에만 실행 대상이 되고, 자동 실행하지
@@ -117,6 +123,9 @@ robot-sim-web/
     │   ├── world.ts           Rapier world 래퍼
     │   ├── scene-loader.ts    SceneSpec → world + three.js
     │   ├── collision.ts       CollisionMonitor (EventQueue 소비)
+    │   ├── collision-classify.ts  의도된 접촉 vs 예기치 않은 충돌 분류 (순수)
+    │   ├── ground-clamp.ts    편집 배치의 바닥 하한 · 바닥에 붙이기 (순수, §2.11)
+    │   ├── conveyor.ts       컨베이어 표면 구동 + 재순환 (DATA_MODEL §4.2)
     │   ├── control/
     │   │   ├── player.ts       ControlSequence 해석기
     │   │   └── steps.ts        step 종류별 핸들러
@@ -139,6 +148,7 @@ robot-sim-web/
     │   ├── command-bar/       자연어 입력·생성·재생 컨트롤·씬 저장/로드·JSON 뷰어
     │   ├── library/           오브젝트/로봇 라이브러리 + 3D 임포트 다이얼로그
     │   ├── viewport/          3D 상호작용(선택·기즈모·배치·충돌 시각화)
+    │   │                        + selection-hud.ts 선택 조작 HUD(이동 키 안내·치수 ±·바닥)
     │   ├── flow-graph/        n8n형 노드 에디터(드래그 재정렬·삽입·삭제)
     │   ├── inspector/         컨텍스트 인스펙터(노드 파라미터 / 오브젝트 치수·Physics)
     │   ├── dock/              타임라인 · 충돌 로그 · 콘솔
@@ -202,7 +212,13 @@ Rapier interaction group은 0–15의 16개 그룹만 존재한다. 이 프로�
 
 - 로봇 링크끼리의 self-collision은 기본 **비활성**(URDF 인접 링크 무시).
 - "로봇–사물 충돌 감지"의 핵심 쌍: `ROBOT × OBJECT`, `ROBOT × ENV`.
-- 감지만 하고 튕기지 않아야 하는 영역은 `SENSOR_ZONE`(sensor=true)로 만든다.
+- 감지만 하고 튕기지 않아야 하는 영역은 `SENSOR_ZONE`(sensor=true)로 만들고,
+  **엔티티에 `tags: ['detection-zone']`을 붙여 의도를 선언한다**(`DETECTION_ZONE_TAG`).
+  태그 없는 sensor 정적 엔티티는 "단단해 보이는데 모든 것이 통과하는 유령 장애물"이며
+  결함으로 간주한다 — 반대로 **단단해야 할 것은 sensor가 아니어야 하고, 로봇이 있는
+  씬이라면 `collidesWith`에 `ROBOT` + `emitEvents: true`**여야 접촉이 로그에 남는다.
+  (쌍 필터는 양방향이다: 한쪽만 선언하면 이벤트가 0건이 된다.)
+  `src/core/sample-scenes.test.ts`가 모든 샘플 씬에 이 규칙을 강제한다.
 
 새 그룹이 필요하면 예약 슬롯에서 할당하고 이 표와 `EXPERIMENTS.md`에 기록한다.
 
@@ -217,8 +233,19 @@ Rapier interaction group은 0–15의 16개 그룹만 존재한다. 이 프로�
 4. 결정 사항·트레이드오프를 `EXPERIMENTS.md`에 append-only로 남긴다.
 
 ### 새 엔티티 종류를 추가할 때 (예: 컨베이어)
-`schema` 타입 확장 → `scene-loader`에 빌더 추가 → collider/그룹 배정 → 샘플 SceneSpec
-갱신 → 로드/충돌 동작 검증.
+`schema` 타입 확장 → `validate`의 zod 미러 + **교차 규칙** → `scene-loader`에 빌더/등록
+추가 → collider/그룹 배정 → 샘플 SceneSpec 갱신 → 로드/충돌 동작 검증.
+
+**컨베이어(`conveyor` 블록)가 이 워크플로의 레퍼런스다** (DATA_MODEL §4.2). 그때 배운 것:
+
+- 새 거동이 매 스텝 물리를 만져야 하면 `RobotRegistry` 패턴을 따른다 — 레지스트리를
+  `SceneHandle`이 소유하고 통합자가 `preStep`에서 `tickAll()`을 부른다.
+- 물리 조작이 필요하면 **`PhysicsWorld` 인터페이스를 넓힌다**. Rapier 타입을 core 밖으로
+  내보내지 않는다(§7) — MuJoCo 교체 시 새 구현만 추가하면 되도록.
+- 빌드 시점에 캐시한 기하가 있으면 **배치를 바꾸는 편집 경로마다 다시 만들어야 한다.**
+  `updateTransform`은 재빌드하지 않는다 — 여기서 조용히 어긋나기 쉽다.
+- 데이터가 표현할 수 없는 조합은 `superRefine`으로 **사람이 읽을 이유와 함께** 거부한다.
+  조용한 no-op은 사용자가 시행착오로 배우게 만든다.
 
 ### 새 제어 step을 추가할 때 (예: `follow-path`)
 `schema`의 `ControlStep` 유니온 확장 → `control/steps.ts`에 핸들러 → `player`가 라우팅

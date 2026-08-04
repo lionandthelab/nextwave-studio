@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RobotBinding, RobotRegistry } from './robots';
 import type { RobotBindingOptions } from './robots';
 import type { BodyId, ColliderId, ContactEvent, EntityId, PhysicsWorld, Pose } from './types';
+import type { Vec3 } from '../schema/types';
 import type { JointInfo, LinkColliderDef, RobotFkView } from './robot-types';
 
 // ── 테스트 상수 (매직넘버 금지 — CLAUDE.md §4) ──────────────────────
@@ -99,6 +100,9 @@ class MockPhysicsWorld implements PhysicsWorld {
   removeEntity(): void {
     throw new Error('MockPhysicsWorld.removeEntity: 이 테스트에서 호출되면 안 됩니다');
   }
+
+  /** 되감기 전용 — 이 테스트들은 되감기를 호출하지 않으므로 no-op이면 충분하다 */
+  clearContactState(): void {}
   getPose(): Pose {
     throw new Error('MockPhysicsWorld.getPose: 이 테스트에서 호출되면 안 됩니다');
   }
@@ -114,6 +118,17 @@ class MockPhysicsWorld implements PhysicsWorld {
   bodiesOfEntity(): readonly BodyId[] {
     return [];
   }
+  // 컨베이어 표면 구동 계약 (core/types.ts) — 이 목은 접촉/속도를 다루지 않는다
+  dynamicBodiesTouching(): readonly BodyId[] {
+    return [];
+  }
+  dynamicBodies(): readonly BodyId[] {
+    return [];
+  }
+  getLinearVelocity(): Vec3 {
+    return [0, 0, 0];
+  }
+  setLinearVelocity(): void {}
   clear(): void {}
   free(): void {}
 }

@@ -170,7 +170,25 @@ async function parseByFormat(format: ImportFormat, file: ModelFileInput): Promis
     }
     case 'obj': {
       try {
-        return new OBJLoader().parse(new TextDecoder().decode(file.buffer));
+        const root = new OBJLoader().parse(new TextDecoder().decode(file.buffer));
+        // OBJ는 재질을 별도 .mtl에 두는데 이 앱은 단일 파일 임포트라 MTL이 없다.
+        // 그대로 두면 OBJLoader 기본값(MeshPhongMaterial #ffffff)이 남아 씬의 PBR
+        // 조명 아래에서 혼자 납작한 흰색으로 뜬다 — STL 분기와 같은 기본 재질을 씌워
+        // "재질 정보 없는 임포트"의 모양을 한 곳으로 모은다.
+        root.traverse((obj) => {
+          if (!isMesh(obj)) return;
+          if (!obj.geometry.hasAttribute('normal')) obj.geometry.computeVertexNormals();
+          const previous = obj.material;
+          if (Array.isArray(previous)) previous.forEach((m) => m.dispose());
+          else previous.dispose();
+          obj.material = new THREE.MeshStandardMaterial({
+            color: IMPORTED_MESH_COLOR,
+            roughness: IMPORTED_MESH_ROUGHNESS,
+            metalness: IMPORTED_MESH_METALNESS,
+          });
+        });
+        root.name = 'imported:obj';
+        return root;
       } catch (err) {
         throw parseFailure(file.name, 'OBJ', err);
       }

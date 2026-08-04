@@ -8,11 +8,18 @@
 // - Undo/Redo는 ui 계층이 serialize() 스냅샷 스택으로 구현한다(전체 재로드 방식 —
 //   정확성 우선, EXPERIMENTS 기록).
 
-import type { ColliderShape, EntitySpec, PhysicsSpec, SceneSpec, Transform } from '../schema/types';
+import type {
+  ColliderShape,
+  ConveyorSpec,
+  EntitySpec,
+  PhysicsSpec,
+  SceneSpec,
+  Transform,
+} from '../schema/types';
 
 /** 편집 변경 종류 (onChange 통지용) */
 export type SceneEditKind =
-  | 'add' | 'remove' | 'transform' | 'dimensions' | 'physics' | 'rename' | 'reload';
+  | 'add' | 'remove' | 'transform' | 'dimensions' | 'physics' | 'conveyor' | 'rename' | 'reload';
 
 export interface SceneEditEvent {
   kind: SceneEditKind;
@@ -46,6 +53,13 @@ export interface SceneEditor {
 
   /** 물리 속성 편집: bodyType/그룹/마찰 등 — 바디+collider 재생성 */
   updatePhysics(id: string, physics: PhysicsSpec): void;
+
+  /**
+   * 컨베이어 표면 구동 편집 (속도·방향·재순환) — DATA_MODEL §4.2.
+   * 벨트 기하는 바인딩 생성 시점에 고정되므로 엔티티를 재빌드해 바인딩을 새로 만든다.
+   * conveyor 블록이 없던 엔티티에 붙이는 것도 허용한다(라이브러리 Plane → 벨트 승격).
+   */
+  updateConveyor(id: string, conveyor: ConveyorSpec): void;
 
   renameEntity(id: string, newId: string): void;
 

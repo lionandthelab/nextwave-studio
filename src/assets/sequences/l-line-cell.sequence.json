@@ -1,0 +1,392 @@
+{
+  "id": "l-line-cell",
+  "robot": "picker",
+  "loop": false,
+  "steps": [
+    {
+      "kind": "gripper",
+      "robot": "picker",
+      "note": "picker 그리퍼를 연다 — 벨트가 상자를 손 안으로 밀어 넣을 수 있게",
+      "state": "open",
+      "durationSec": 0.4
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "picker",
+      "note": "picker 진입 대기 — 벨트 B 픽 지점(x=0.668, z=0.48) 위 높은 곳",
+      "targets": {
+        "joint1": 0.0529,
+        "joint2": 0.3663,
+        "joint3": 1.3169,
+        "joint5": 1.4583,
+        "joint6": 0
+      },
+      "durationSec": 1.6,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "waitForCollision",
+      "note": "포토아이 gate_press가 item_b 도착을 감지",
+      "between": [
+        "item_b",
+        "gate_press"
+      ],
+      "timeoutSec": 12
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "press",
+      "note": "press 패드를 벨트 A 검사 지점(x=0.20) 위로 — 아직 높이 든 채",
+      "targets": {
+        "joint1": -1.2063,
+        "joint2": 0.8989,
+        "joint3": 0.05,
+        "joint4": 0
+      },
+      "durationSec": 1.4,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "press",
+      "note": "패드를 라인 높이로 내린다 (패드 하단 y=0.067 — 상자 윗면 아래)",
+      "targets": {
+        "joint3": 0.135
+      },
+      "durationSec": 0.4,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "waitForCollision",
+      "note": "item_b가 패드에 닿아 멈춘다 — 검사 위치 확보",
+      "between": [
+        "press",
+        "item_b"
+      ],
+      "timeoutSec": 15
+    },
+    {
+      "kind": "wait",
+      "note": "정지 확인",
+      "durationSec": 0.4
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "press",
+      "note": "패드를 살짝 들어 상자를 통과시킨다",
+      "targets": {
+        "joint3": 0.1
+      },
+      "durationSec": 0.15,
+      "easing": "linear"
+    },
+    {
+      "kind": "wait",
+      "note": "상자가 패드 바로 아래로 들어올 때까지 (0.049 m / 0.096 m·s⁻¹)",
+      "durationSec": 0.25
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "press",
+      "note": "상자 윗면을 눌러 검사 — 벨트가 못 이기고 상자가 멈춘다",
+      "targets": {
+        "joint3": 0.126
+      },
+      "durationSec": 0.2,
+      "easing": "linear"
+    },
+    {
+      "kind": "wait",
+      "note": "누른 채 유지 (검사 시간)",
+      "durationSec": 0.5
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "press",
+      "note": "press 패드 상승 — item_b는 라인을 계속 탄다",
+      "targets": {
+        "joint3": 0.02
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "picker",
+      "note": "picker 중간 높이로 하강 (관절 보간의 반경 부풀림을 나눠 rail_outer를 피한다)",
+      "targets": {
+        "joint2": 0.4503,
+        "joint3": 1.5319,
+        "joint5": 1.1594
+      },
+      "durationSec": 0.8,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "picker",
+      "note": "picker 픽 높이로 하강 — 벨트 B를 사이에 두고 조(jaw)를 열어 둔 채 대기 (TCP y=0.068)",
+      "targets": {
+        "joint2": 0.601,
+        "joint3": 1.6356,
+        "joint5": 0.905
+      },
+      "durationSec": 0.7,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "waitForCollision",
+      "note": "포토아이 gate_pick이 item_a 도착을 감지",
+      "between": [
+        "item_a",
+        "gate_pick"
+      ],
+      "timeoutSec": 25
+    },
+    {
+      "kind": "waitForCollision",
+      "note": "벨트가 item_a를 조 사이로 밀어 넣는다",
+      "between": [
+        "picker",
+        "item_a"
+      ],
+      "timeoutSec": 15
+    },
+    {
+      "kind": "wait",
+      "note": "상자가 조 한가운데로 들어올 때까지 (0.040 m / 0.107 m·s⁻¹)",
+      "durationSec": 0.35
+    },
+    {
+      "kind": "gripper",
+      "robot": "picker",
+      "note": "즉시 강하게 파지 — 조가 상자의 좌우면을 문다 (벨트 구동을 마찰로 이긴다)",
+      "state": 0.35,
+      "durationSec": 0.15
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "picker",
+      "note": "들어 올린다 (TCP y=0.135 — 레일보다 높게)",
+      "targets": {
+        "joint2": 0.4732,
+        "joint3": 1.5573,
+        "joint5": 1.1111
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "picker",
+      "note": "반경만 당겨 zone_handoff(x=0.45) 위로 — 호 이동 0.053 rad",
+      "targets": {
+        "joint1": 0,
+        "joint2": -0.2922,
+        "joint3": 2.3995,
+        "joint5": 1.0342
+      },
+      "durationSec": 1.6,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "picker",
+      "note": "인계 패드 바로 위까지 하강 (TCP y=0.045)",
+      "targets": {
+        "joint2": 0.0815,
+        "joint3": 2.548,
+        "joint5": 0.5122
+      },
+      "durationSec": 0.8,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "gripper",
+      "robot": "picker",
+      "note": "zone_handoff에 내려놓는다",
+      "state": "open",
+      "durationSec": 0.4
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "picker",
+      "note": "빠져나온다",
+      "targets": {
+        "joint2": -0.3507,
+        "joint3": 2.3368,
+        "joint5": 1.1556
+      },
+      "durationSec": 0.7,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "picker",
+      "note": "picker home 복귀 — palletizer 작업 공간을 비운다",
+      "targets": {
+        "joint1": 0,
+        "joint2": -0.6,
+        "joint3": 1.2,
+        "joint5": -0.6,
+        "joint6": 0
+      },
+      "durationSec": 2.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "gripper",
+      "robot": "palletizer",
+      "note": "palletizer 3지 클로를 연다",
+      "state": "open",
+      "durationSec": 0.4
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "palletizer",
+      "note": "먼저 제자리에서 높이 든다 (joint7 위상 — 손가락이 belt_out과 picker를 함께 피한다)",
+      "targets": {
+        "joint1": 0,
+        "joint2": 0.5865,
+        "joint3": 0,
+        "joint4": 0.8635,
+        "joint5": 0,
+        "joint6": 1.6916,
+        "joint7": 0.8568
+      },
+      "durationSec": 1.6,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "palletizer",
+      "note": "높은 자세로 zone_handoff 방위까지 선회 (레일 위를 넘어간다)",
+      "targets": {
+        "joint1": 1.6957
+      },
+      "durationSec": 1.8,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "palletizer",
+      "note": "인계 상자 바로 위로 접근",
+      "targets": {
+        "joint2": 0.6538,
+        "joint4": 1.2867,
+        "joint6": 1.201
+      },
+      "durationSec": 1.2,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "palletizer",
+      "note": "파지 높이로 하강 (인계된 상자 실측 위치 x=0.450, z=0.482 · 파지중심 y=0.024)",
+      "targets": {
+        "joint2": 0.7875,
+        "joint4": 1.3891,
+        "joint6": 0.965
+      },
+      "durationSec": 0.9,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "waitForCollision",
+      "enabled": false,
+      "note": "palletizer의 조작 대상은 item_a다 — 접촉을 만드는 것이 바로 다음 gripper step이라 배리어로는 기다릴 수 없어 비활성으로 선언만 한다(충돌 분류용)",
+      "between": [
+        "palletizer",
+        "item_a"
+      ],
+      "timeoutSec": 1
+    },
+    {
+      "kind": "gripper",
+      "robot": "palletizer",
+      "note": "파지 — 숫자 state (close는 손가락이 상자를 뚫는다)",
+      "state": 0.32,
+      "durationSec": 0.5
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "palletizer",
+      "note": "들어 올린다",
+      "targets": {
+        "joint2": 0.6538,
+        "joint4": 1.2867,
+        "joint6": 1.201
+      },
+      "durationSec": 0.9,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "palletizer",
+      "note": "팔레트 위로 — **호가 아니라 반경**을 당긴다(0.32→0.22). 호를 크게 돌리면 picker 베이스에 닿는다. joint1은 0.054rad만 틀어 두는데, 반경을 당기면 x가 belt_out 쪽으로 붙어 **완전히 벌린 3지 클로(반경 83mm)**가 벨트 안쪽면(0.540)을 스치기 때문이다(실측 1건).",
+      "targets": {
+        "joint2": 0.2332,
+        "joint4": 1.9003,
+        "joint6": 1.0081,
+        "joint1": 1.75
+      },
+      "durationSec": 1.2,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "palletizer",
+      "note": "팔레트로 하강 (상자중심 y=0.024 · 반경 0.22)",
+      "targets": {
+        "joint2": 0.4503,
+        "joint4": 2.021,
+        "joint6": 0.6703,
+        "joint1": 1.75
+      },
+      "durationSec": 0.7,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "gripper",
+      "robot": "palletizer",
+      "note": "zone_pallet에 적재",
+      "state": "open",
+      "durationSec": 0.5
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "palletizer",
+      "note": "높은 자세로 빠져나온다",
+      "targets": {
+        "joint2": 0.4397,
+        "joint4": 1.0898,
+        "joint6": 1.6122
+      },
+      "durationSec": 1.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "palletizer",
+      "note": "높은 자세로 원위치 선회",
+      "targets": {
+        "joint1": 0,
+        "joint7": 0
+      },
+      "durationSec": 2.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "robot": "palletizer",
+      "note": "palletizer home 복귀",
+      "targets": {
+        "joint2": 0.7,
+        "joint4": 1.1,
+        "joint6": 1.34
+      },
+      "durationSec": 1.2,
+      "easing": "easeInOut"
+    }
+  ]
+}

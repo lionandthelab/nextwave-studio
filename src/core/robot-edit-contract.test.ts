@@ -227,6 +227,7 @@ async function makeFixture(spec: SceneSpec): Promise<Fixture> {
     sync,
     renderApi,
     robots: handle.robots,
+    conveyors: handle.conveyors,
     builtEntities: handle.builtEntities,
   });
   return { world, sync, handle, editor, fakes };

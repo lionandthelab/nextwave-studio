@@ -32,6 +32,15 @@ const CAPSULE_CAP_SEGMENTS = 8;
 const CAPSULE_RADIAL_SEGMENTS = 24;
 const CYLINDER_RADIAL_SEGMENTS = 32;
 
+// ── 감지 존(트리거 볼륨) 표현 상수 ──────────────────────────────────
+/**
+ * 모서리 선의 밝기 배수. 면보다 밝아야 반투명 면 위에서 경계가 읽힌다.
+ * 색 자체는 씬 데이터(visual.color)에서 오고 여기서는 명도만 올린다.
+ */
+const EDGE_LIGHTEN = 0.55;
+/** 모서리 선의 최소 명도 — 어두운 씬 색이 배경에 묻히지 않게 */
+const EDGE_MIN_LIGHTNESS = 0.45;
+
 // ── 바닥 상수 ───────────────────────────────────────────────────────
 const DEFAULT_GROUND_SIZE_M = 20;
 const GROUND_THICKNESS_M = 0.02;
@@ -48,7 +57,18 @@ const GROUND_METALNESS = 0.0;
  * @throws convexHull / trimesh / fromVisual — 프리미티브가 아니므로 명시적으로 실패
  *         (에셋 메시 파이프라인은 Phase 3+).
  */
-export function primitiveMesh(shape: ColliderShape, color?: string): THREE.Mesh {
+export interface PrimitiveMeshStyle {
+  /** 0..1 (기본 1 = 불투명) — 감지 존처럼 통과 가능한 부피에 쓴다 */
+  readonly opacity?: number;
+  /** 모서리 선을 덧그린다 (반투명 부피의 경계를 읽히게) */
+  readonly edges?: boolean;
+}
+
+export function primitiveMesh(
+  shape: ColliderShape,
+  color?: string,
+  style?: PrimitiveMeshStyle,
+): THREE.Mesh {
   switch (shape.kind) {
     case 'box':
       return buildMesh(
@@ -57,12 +77,14 @@ export function primitiveMesh(shape: ColliderShape, color?: string): THREE.Mesh 
         ),
         color ?? DEFAULT_BOX_COLOR,
         shape.kind,
+        style,
       );
     case 'sphere':
       return buildMesh(
         new THREE.SphereGeometry(shape.radius, SPHERE_WIDTH_SEGMENTS, SPHERE_HEIGHT_SEGMENTS),
         color ?? DEFAULT_SPHERE_COLOR,
         shape.kind,
+        style,
       );
     case 'capsule':
       // CapsuleGeometry의 length 인자는 원통부 길이(캡 제외) — Rapier halfHeight×2와 1:1.
@@ -73,6 +95,7 @@ export function primitiveMesh(shape: ColliderShape, color?: string): THREE.Mesh 
         ),
         color ?? DEFAULT_CAPSULE_COLOR,
         shape.kind,
+        style,
       );
     case 'cylinder':
       return buildMesh(
@@ -81,6 +104,7 @@ export function primitiveMesh(shape: ColliderShape, color?: string): THREE.Mesh 
         ),
         color ?? DEFAULT_CYLINDER_COLOR,
         shape.kind,
+        style,
       );
     case 'convexHull':
     case 'trimesh':
@@ -122,9 +146,13 @@ export function groundMesh(sizeM: number = DEFAULT_GROUND_SIZE_M): THREE.Mesh {
  */
 export function disposeMeshResources(root: THREE.Object3D): void {
   root.traverse((obj) => {
-    if (!isMesh(obj)) return;
-    obj.geometry.dispose();
-    const material = obj.material;
+    // Mesh와 LineSegments(모서리 선) 모두 geometry/material을 소유한다 — 선만 빠뜨리면
+    // 씬을 전환할 때마다 감지 존 개수만큼 GPU 자원이 샌다.
+    const drawable = obj as Partial<THREE.Mesh & THREE.LineSegments>;
+    if (drawable.isMesh !== true && drawable.isLineSegments !== true) return;
+    drawable.geometry?.dispose();
+    const material = drawable.material;
+    if (material === undefined) return;
     if (Array.isArray(material)) {
       for (const m of material) m.dispose();
     } else {
@@ -133,19 +161,44 @@ export function disposeMeshResources(root: THREE.Object3D): void {
   });
 }
 
-function isMesh(obj: THREE.Object3D): obj is THREE.Mesh {
-  return (obj as Partial<THREE.Mesh>).isMesh === true;
-}
-
-function buildMesh(geometry: THREE.BufferGeometry, colorHex: string, kind: string): THREE.Mesh {
+function buildMesh(
+  geometry: THREE.BufferGeometry,
+  colorHex: string,
+  kind: string,
+  style?: PrimitiveMeshStyle,
+): THREE.Mesh {
+  const opacity = style?.opacity ?? 1;
+  const translucent = opacity < 1;
   const material = new THREE.MeshStandardMaterial({
     color: colorHex,
     roughness: PRIMITIVE_ROUGHNESS,
     metalness: PRIMITIVE_METALNESS,
+    transparent: translucent,
+    opacity,
+    // 반투명 부피는 깊이를 쓰지 않는다 — 쓰면 자기 뒷면이 앞면을 지워 속이 빈 껍데기로
+    // 보이고, 안에 든 사물이 존에 들어간 순간 사라진 것처럼 보인다.
+    depthWrite: !translucent,
+    side: translucent ? THREE.DoubleSide : THREE.FrontSide,
   });
   const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
+  // 통과 가능한 부피가 그림자를 드리우면 다시 "단단한 물체"로 읽힌다
+  mesh.castShadow = !translucent;
+  mesh.receiveShadow = !translucent;
   mesh.name = `primitive:${kind}`;
+
+  if (style?.edges === true) {
+    const edgeColor = new THREE.Color(colorHex);
+    // 면보다 밝게 — 반투명 면 위에서 경계가 보이도록 (HSL 명도만 올린다)
+    const hsl = { h: 0, s: 0, l: 0 };
+    edgeColor.getHSL(hsl);
+    edgeColor.setHSL(hsl.h, hsl.s, Math.max(EDGE_MIN_LIGHTNESS, hsl.l + EDGE_LIGHTEN));
+    const lines = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geometry),
+      new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: 1 }),
+    );
+    lines.name = `primitive:${kind}:edges`;
+    // 메시의 자식이므로 pose 동기화(RenderSync)와 선택 아웃라인이 그대로 따라온다
+    mesh.add(lines);
+  }
   return mesh;
 }

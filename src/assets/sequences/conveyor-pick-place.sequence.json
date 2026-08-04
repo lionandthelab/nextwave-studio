@@ -1,0 +1,314 @@
+{
+  "id": "conveyor-pick-place",
+  "robot": "arm",
+  "loop": false,
+  "steps": [
+    {
+      "kind": "gripper",
+      "state": "open",
+      "durationSec": 0.4
+    },
+    {
+      "kind": "moveJoints",
+      "note": "라인 위 대기 — 물건이 그 아래로 지나간다",
+      "targets": {
+        "joint1": -0.405,
+        "joint2": 0.459,
+        "joint3": 1.519,
+        "joint5": 1.163,
+        "joint6": 1.5708
+      },
+      "durationSec": 2.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "waitForCollision",
+      "note": "[1] 포토아이가 item_a 도착을 감지",
+      "between": [
+        "item_a",
+        "pick_gate"
+      ],
+      "timeoutSec": 20
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[1] 집을 높이로 하강",
+      "targets": {
+        "joint2": 0.5843,
+        "joint3": 1.5967,
+        "joint5": 0.96
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "waitForCollision",
+      "note": "[1] 라인이 item_a를 그리퍼까지 실어 온다",
+      "between": [
+        "arm",
+        "item_a"
+      ],
+      "timeoutSec": 12
+    },
+    {
+      "kind": "gripper",
+      "state": 0.55,
+      "note": "[1] 파지",
+      "durationSec": 0.4
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[1] 들어 올린다 (상자 높이보다 크게 — 대기 중인 상자를 넘는다)",
+      "targets": {
+        "joint2": 0.5127,
+        "joint3": 1.5523,
+        "joint5": 1.076
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[1] 든 채로 감지 존 위로 이송",
+      "targets": {
+        "joint1": -0.16
+      },
+      "durationSec": 1.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[1] 감지 존에 내려놓는다",
+      "targets": {
+        "joint2": 0.5843,
+        "joint3": 1.5967,
+        "joint5": 0.96
+      },
+      "durationSec": 0.6,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "gripper",
+      "state": "open",
+      "note": "[1] 놓기",
+      "durationSec": 0.35
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[1] 라인을 낮게 가로지르지 않도록 먼저 든다",
+      "targets": {
+        "joint2": 0.459,
+        "joint3": 1.519,
+        "joint5": 1.163
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[1] 라인 위 대기 자세로 복귀",
+      "targets": {
+        "joint1": -0.405
+      },
+      "durationSec": 1.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "waitForCollision",
+      "note": "[2] 포토아이가 item_b 도착을 감지",
+      "between": [
+        "item_b",
+        "pick_gate"
+      ],
+      "timeoutSec": 20
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[2] 집을 높이로 하강",
+      "targets": {
+        "joint2": 0.5843,
+        "joint3": 1.5967,
+        "joint5": 0.96
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "waitForCollision",
+      "note": "[2] 라인이 item_b를 그리퍼까지 실어 온다",
+      "between": [
+        "arm",
+        "item_b"
+      ],
+      "timeoutSec": 12
+    },
+    {
+      "kind": "gripper",
+      "state": 0.55,
+      "note": "[2] 파지",
+      "durationSec": 0.4
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[2] 들어 올린다 (상자 높이보다 크게 — 대기 중인 상자를 넘는다)",
+      "targets": {
+        "joint2": 0.5127,
+        "joint3": 1.5523,
+        "joint5": 1.076
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[2] 든 채로 감지 존 위로 이송",
+      "targets": {
+        "joint1": -0.16
+      },
+      "durationSec": 1.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[2] 감지 존에 내려놓는다",
+      "targets": {
+        "joint2": 0.5843,
+        "joint3": 1.5967,
+        "joint5": 0.96
+      },
+      "durationSec": 0.6,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "gripper",
+      "state": "open",
+      "note": "[2] 놓기",
+      "durationSec": 0.35
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[2] 라인을 낮게 가로지르지 않도록 먼저 든다",
+      "targets": {
+        "joint2": 0.459,
+        "joint3": 1.519,
+        "joint5": 1.163
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[2] 라인 위 대기 자세로 복귀",
+      "targets": {
+        "joint1": -0.405
+      },
+      "durationSec": 1.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "waitForCollision",
+      "note": "[3] 포토아이가 item_c 도착을 감지",
+      "between": [
+        "item_c",
+        "pick_gate"
+      ],
+      "timeoutSec": 20
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[3] 집을 높이로 하강",
+      "targets": {
+        "joint2": 0.5843,
+        "joint3": 1.5967,
+        "joint5": 0.96
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "waitForCollision",
+      "note": "[3] 라인이 item_c를 그리퍼까지 실어 온다",
+      "between": [
+        "arm",
+        "item_c"
+      ],
+      "timeoutSec": 12
+    },
+    {
+      "kind": "gripper",
+      "state": 0.55,
+      "note": "[3] 파지",
+      "durationSec": 0.4
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[3] 들어 올린다 (상자 높이보다 크게 — 대기 중인 상자를 넘는다)",
+      "targets": {
+        "joint2": 0.5127,
+        "joint3": 1.5523,
+        "joint5": 1.076
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[3] 든 채로 감지 존 위로 이송",
+      "targets": {
+        "joint1": -0.16
+      },
+      "durationSec": 1.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[3] 감지 존에 내려놓는다",
+      "targets": {
+        "joint2": 0.5843,
+        "joint3": 1.5967,
+        "joint5": 0.96
+      },
+      "durationSec": 0.6,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "gripper",
+      "state": "open",
+      "note": "[3] 놓기",
+      "durationSec": 0.35
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[3] 라인을 낮게 가로지르지 않도록 먼저 든다",
+      "targets": {
+        "joint2": 0.459,
+        "joint3": 1.519,
+        "joint5": 1.163
+      },
+      "durationSec": 0.5,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "[3] 라인 위 대기 자세로 복귀",
+      "targets": {
+        "joint1": -0.405
+      },
+      "durationSec": 1.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "home 복귀",
+      "targets": {
+        "joint1": 0,
+        "joint2": -0.6,
+        "joint3": 1.2,
+        "joint5": -0.6,
+        "joint6": 0
+      },
+      "durationSec": 1.8,
+      "easing": "easeInOut"
+    }
+  ]
+}

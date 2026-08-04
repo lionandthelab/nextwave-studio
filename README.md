@@ -33,7 +33,7 @@
 | 스키마 검증 | zod (`SceneSpec` / `ControlSequence` 런타임 검증) |
 | 빌드/테스트 | Vite + TypeScript strict + vitest + Playwright 게이트 |
 
-## 데모 씬 6종
+## 데모 씬 7종
 
 `?scene=<이름>` 쿼리 파라미터 또는 커맨드바의 씬 select로 전환한다.
 각 씬은 `scripts/gate-browser.mjs`의 자동 게이트로 검증된다.
@@ -46,12 +46,19 @@
 | `obstacle-avoidance` | 기둥을 위로 넘어가는 회피 경로 후 목표 박스 접촉 | `obstacle-avoidance`: arm×pillar 이벤트 **0건** + arm×target_box 접촉 start + done |
 | `collision-testbed` | 로봇 없는 물리 쇼케이스 — 반발 공 바운스, 저마찰 미끄럼 + 센서 게이트 통과, 구름 공의 스택 전도 | `collision-testbed`: 접촉 쌍 ≥3종 + 센서 start ≥1 + 전 바디 정착 |
 | `two-arms-collision` | 로봇팔 2대가 중앙에서 접촉 — 로봇↔로봇 충돌 감지 + 접촉점 마커 | `two-arms`: arm_left×arm_right 접촉 start + 접촉점 좌표 + 자기 링크 억제 + 방향키 이동 |
+| `conveyor-pick-place` | **컨베이어 라인** — 벨트가 물건을 계속 실어 오고(끝에서 시작점으로 순환), 포토아이가 도착을 감지하면 로봇이 집어 적재 레인에 넣는다. **상자 3개를 연속으로** 처리한다 | `conveyor-pick-place`: 벨트 이송 + 재순환 + 포토아이 3회 감지 + 픽 접촉 3회 + **세 상자 모두 존 안착** + 놓는 순간 파지 유지 + **arm×belt 0건** + 편집이 거동을 바꿈 |
+| `l-line-cell` | **ㄱ자 라인 셀** — 직각으로 이어진 벨트 2개(1.3m + 0.66m) 위에서 **손이 서로 다른 로봇 3대**가 차례로 일한다: SCARA-4 검사 프레스 → Arm-6 라인 피킹 → Cobot-7 팔레타이징 | `l-line-cell`: 코너 이송 3개 + 스테이션 3종 접촉 + 팔레트 안착(중심 좌표 판정) + 놓기 파지 유지 + **로봇×설비 0건** |
 
-추가로 씬이 아닌 **기능 게이트**가 저작·실행 계층을 검증한다: `--expect=scene-switch`
+추가로 씬이 아닌 **기능 게이트**가 저작·실행 계층을 검증한다: `--expect=mesh-import`
+(3D 파일 임포트 — glb/stl/obj 3종 파싱 · 스케일·Up-axis·피벗이 collider에 반영 · 임포트
+사물이 실제로 낙하해 바닥과 충돌 · trimesh가 단단함 · 손상 파일 거부) ·
+`--expect=robot-library`(로봇 3종이 서고 관절이 말단을 움직이고 손이 여닫힘) ·
+`--expect=scene-switch`
 (런타임 씬 전환, URDF 재로드 왕복) · `--expect=scene-builder`(드래그앤드롭 편집·undo) ·
 `--expect=flow-graph`(노드 편집 ↔ 유효 시퀀스 무손실 변환) · `--expect=planner`(자연어 →
 검증 → 그래프 로드, 무자동재생) · `--expect=orchestration`(노드 단위 실행·트라이페인 동기·
-결정론적 재실행). **ROADMAP Phase 0–10의 게이트가 전부 통과한다.**
+결정론적 재실행) · `--expect=viewport-edit`(바닥 하한·방향키 이동·선택 HUD).
+**ROADMAP Phase 0–10의 게이트가 전부 통과한다.**
 
 ## 실행법
 
@@ -81,8 +88,12 @@ npm run dev        # Vite 개발 서버 (기본 http://localhost:5173)
 npm run build      # tsc --noEmit + vite build → dist/
 npm run verify     # typecheck + lint + vitest (단위 테스트)
 
-# 브라우저 게이트 (vite build 선행, Playwright chromium 필요:
-#   npx playwright install chromium)
+# 브라우저 게이트 (Playwright chromium 필요: npx playwright install chromium)
+npm run gate               # 전체 13종 (build + 기능 6종 + 제공 예제 7종)
+npm run gate:samples       # 제공 예제 7종만 — 각 씬 로드 + 시퀀스 완주 + 충돌 감지
+npm run gate:viewport-edit # 뷰포트 편집 UX (바닥 하한 · 방향키 이동 · 선택 HUD)
+
+# 개별 실행 (vite build 선행 필요)
 node scripts/gate-browser.mjs --expect=arm-sequence
 node scripts/gate-browser.mjs --expect=collision-testbed   # 등 표의 --expect 값
 ```

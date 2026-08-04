@@ -259,6 +259,7 @@ async function makeFixture(
     sync,
     renderApi,
     robots: handle.robots,
+    conveyors: handle.conveyors,
     builtEntities: handle.builtEntities,
   });
   const events: SceneEditEvent[] = [];
@@ -514,6 +515,36 @@ describe('SceneEditorImpl — updateTransform', () => {
       f.sync.apply(0);
       const node = recordingView(f.handle.builtEntities.get('box_a')?.node);
       expect(node.lastPosition).toEqual(target);
+    } finally {
+      f.world.free();
+    }
+  });
+
+  /**
+   * ★ 회귀: 편집 결과가 **렌더 프레임을 기다리지 않고** 시각 노드에 반영돼야 한다.
+   *
+   * commit()은 prev만 갱신하고 Object3D는 렌더 루프의 apply()가 쓴다. 그런데 편집 중에는
+   * 엔진이 일시정지돼 있어 다음 프레임이 언제 올지 모르고, 기즈모 앵커와 방향키 이동은
+   * **시각 노드의 월드 행렬**을 기준점으로 삼는다 — 노드가 stale이면 다음 편집이 편집 전
+   * pose에서 다시 출발한다.
+   *
+   * 실측 증상: 일시정지 상태에서 →(5cm) 직후 Shift+→(1cm)를 빠르게 누르면 순 이동이
+   * 1cm가 아니라 4cm(= 5 − 1)로 나왔다. 프레임이 사이에 끼면 1cm — 같은 조작이 프레임
+   * 타이밍에 따라 다른 결과를 냈다.
+   */
+  it('편집 직후 시각 노드가 즉시 새 pose를 갖는다 — 다음 편집의 기준점이 stale하지 않다', async () => {
+    const first: Vec3 = [0.25, 0.5, 0];
+    const second: Vec3 = [0.5, 0.5, 0];
+    const f = await makeFixture();
+    try {
+      f.sync.commit();
+      f.editor.updateTransform('box_a', { position: first });
+      const node = recordingView(f.handle.builtEntities.get('box_a')?.node);
+      // apply()를 **부르지 않고** 확인한다 — 렌더 프레임 없이도 반영돼 있어야 한다
+      expect(node.lastPosition).toEqual(first);
+
+      f.editor.updateTransform('box_a', { position: second });
+      expect(node.lastPosition).toEqual(second);
     } finally {
       f.world.free();
     }

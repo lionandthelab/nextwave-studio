@@ -81,6 +81,11 @@ import {
 } from './core/control/steps';
 import { Engine, ENGINE_SPEED_OPTIONS } from './core/engine';
 import type { EngineSpeed, EngineState } from './core/engine';
+import {
+  clampPositionAboveGround,
+  groundedTransformForShape,
+  snapPositionToGround,
+} from './core/ground-clamp';
 import { GROUND_ENTITY_ID, SceneLoader } from './core/scene-loader';
 import type { RenderSceneApi, RobotHandle, SceneHandle, VisualNode } from './core/scene-loader';
 import { SceneEditorImpl } from './core/scene-editor';
@@ -94,11 +99,18 @@ import { mountContactMarkers } from './render/contact-marker';
 import type { ContactMarkers } from './render/contact-marker';
 import {
   isTypingTarget,
+  NUDGE_FINE_STEP_M,
+  NUDGE_STEP_M,
   ROTATION_SNAP_DEG,
   TRANSLATION_SNAP_M,
   ViewportInteraction,
 } from './render/interaction';
-import type { GizmoMode, TransformCommit, TypingTargetLike } from './render/interaction';
+import type {
+  GizmoMode,
+  NudgeAxis,
+  TransformCommit,
+  TypingTargetLike,
+} from './render/interaction';
 import {
   ASSET_SAVE_WARNING_KO,
   collectAssetRefs,
@@ -141,6 +153,7 @@ import { mountJointPanel } from './ui/inspector/joint-panel';
 import { mountImportDialog } from './ui/library/import-dialog';
 import { mountLibrary, TEMPLATE_MIME } from './ui/library/library';
 import { templateByKey } from './ui/library/templates';
+import { mountSelectionHud } from './ui/viewport/selection-hud';
 import { mountViewportStatus } from './ui/viewport/statusline';
 import type { ViewportStatusHandle } from './ui/viewport/statusline';
 import { computeRtf, mountStatsHud } from './ui/viewport/stats-hud';
@@ -211,16 +224,22 @@ import {
 import type {
   ColliderShape,
   CollisionEvent,
+  ConveyorSpec,
   ControlSequence,
   ControlStep,
   EntitySpec,
   FlowGraph,
   FlowNode,
   PhysicsSpec,
+  Quat,
   SceneSpec,
   Transform,
   Vec3,
 } from './schema';
+import conveyorPickPlaceSceneJson from './assets/scenes/conveyor-pick-place.scene.json';
+import lLineCellSceneJson from './assets/scenes/l-line-cell.scene.json';
+import lLineCellSequenceJson from './assets/sequences/l-line-cell.sequence.json';
+import conveyorPickPlaceSequenceJson from './assets/sequences/conveyor-pick-place.sequence.json';
 import fallingBoxesSceneJson from './assets/scenes/falling-boxes.scene.json';
 import armAndBoxesSceneJson from './assets/scenes/arm-and-boxes.scene.json';
 import pickAndPlaceSceneJson from './assets/scenes/pick-and-place.scene.json';
@@ -252,6 +271,13 @@ const SCENE_REGISTRY: Readonly<Record<string, SceneRegistryEntry>> = {
     sequence: obstacleAvoidanceSequenceJson,
   },
   'collision-testbed': { scene: collisionTestbedSceneJson },
+  // 컨베이어 라인 — 벨트가 물건을 계속 실어 오고 로봇이 집어 감지 존에 넣는다 (§4.2)
+  'conveyor-pick-place': {
+    scene: conveyorPickPlaceSceneJson,
+    sequence: conveyorPickPlaceSequenceJson,
+  },
+  // ㄱ자 라인 셀 — 직각으로 이어진 벨트 2개 위에서 로봇 3종이 각자 스테이션을 맡는다
+  'l-line-cell': { scene: lLineCellSceneJson, sequence: lLineCellSequenceJson },
   // 로봇↔로봇 충돌 데모 — 두 팔이 중앙에서 만나 접촉한다 (ROBOT×ROBOT 회귀 시연)
   'two-arms-collision': {
     scene: twoArmsCollisionSceneJson,
@@ -280,14 +306,52 @@ const INSPECTOR_REFRESH_INTERVAL_MS = 150;
 const TOAST_AUTO_HIDE_MS = 5000;
 /** 스케일 기즈모 → 치수 변환 시 half 치수 하한 (entity-editor 전체 치수 하한의 절반) */
 const MIN_HALF_DIMENSION_M = DIMENSION_MIN_M / 2;
-/**
- * 로봇 베이스 y 하한 (m). 로봇 링크는 kinematicPosition이라 바닥과 겹쳐도 물리가
- * 밀어내지 못한다(dynamic 오브젝트와 달리 자가 교정 없음) — 직접 조작 경로에서
- * UI가 바닥면(y=0) 아래로 내려가는 것을 막는다.
- */
-const ROBOT_BASE_MIN_Y_M = 0;
 /** 방향키 안내 토스트 최소 간격 (ms) — 키를 누르고 있어도 토스트가 쌓이지 않게 */
 const NUDGE_HINT_THROTTLE_MS = 2000;
+
+/**
+ * 기즈모 모드 키 (뷰포트 스코프). Unity/Isaac Sim의 W/E/R 관례를 그대로 따른다 —
+ * 3D 편집기에서 가장 널리 학습된 매핑이라 별도 안내 없이도 손이 먼저 안다.
+ */
+const GIZMO_MODE_KEYS: ReadonlyArray<{ key: string; mode: GizmoMode; labelKo: string }> = [
+  { key: 'W', mode: 'translate', labelKo: '기즈모 모드 — 이동(W) · 회전(E) · 스케일(R)' },
+  { key: 'E', mode: 'rotate', labelKo: '회전 기즈모' },
+  { key: 'R', mode: 'scale', labelKo: '스케일 기즈모' },
+];
+
+/**
+ * 선택 오브젝트 이동 키 (뷰포트 스코프). 방향키는 **카메라 기준** 수평,
+ * PageUp/PageDown은 월드 수직 — 화면에서 보이는 방향과 일치시키는 것이 3D 편집기의
+ * 보편 규약이다. `canonical`인 항목만 도움말 시트에 한 줄로 나오고 나머지는 별칭이다.
+ */
+const NUDGE_KEYS: ReadonlyArray<{
+  key: string;
+  axis: NudgeAxis;
+  canonical: boolean;
+  labelKo: string;
+  display?: readonly string[];
+}> = [
+  {
+    key: 'ArrowLeft',
+    axis: { kind: 'right', sign: -1 },
+    canonical: true,
+    labelKo: `선택 오브젝트 이동 — ${NUDGE_STEP_M * 100}cm · Shift ${NUDGE_FINE_STEP_M * 100}cm (카메라 기준)`,
+    display: ['←', '→', '↑', '↓'],
+  },
+  { key: 'ArrowRight', axis: { kind: 'right', sign: 1 }, canonical: false, labelKo: '오른쪽 이동' },
+  { key: 'ArrowUp', axis: { kind: 'forward', sign: 1 }, canonical: false, labelKo: '앞쪽 이동' },
+  { key: 'ArrowDown', axis: { kind: 'forward', sign: -1 }, canonical: false, labelKo: '뒤쪽 이동' },
+  {
+    key: 'PageUp',
+    axis: { kind: 'vertical', sign: 1 },
+    canonical: true,
+    labelKo: '선택 오브젝트 높이 조절 (월드 Y)',
+    display: ['PageUp', 'PageDown'],
+  },
+  { key: 'PageDown', axis: { kind: 'vertical', sign: -1 }, canonical: false, labelKo: '아래로 이동' },
+];
+/** 바닥 클램프 안내 토스트 최소 간격 (ms) — ↓를 누르고 있어도 토스트가 쌓이지 않게 */
+const GROUND_CLAMP_HINT_THROTTLE_MS = 2000;
 
 // ── 자동화/AI-native 훅 (Playwright 게이트 · 추후 ui 계층이 사용) ────
 
@@ -320,7 +384,7 @@ export interface SimPlayerFacade {
   /** ▶ Play와 동일: 최초 호출 시 검증된 시퀀스를 로드(arm)하고 엔진을 재생한다 */
   play(): void;
   pause(): void;
-  /** ⏹ Stop과 동일: 엔진 정지 + 씬/player/충돌 이력 리셋 (결정론적 재생 준비) */
+  /** ⏹ Stop과 동일: 엔진 정지 + 씬/player/충돌 이력 + 물리 접촉 상태 리셋 */
   stop(): void;
 }
 
@@ -348,6 +412,7 @@ export interface SimEditorFacade {
   updateTransform(id: string, transform: Transform): void;
   updateDimensions(id: string, shape: ColliderShape): void;
   updatePhysics(id: string, physics: PhysicsSpec): void;
+  updateConveyor(id: string, conveyor: ConveyorSpec): void;
   renameEntity(id: string, newId: string): void;
   removeEntity(id: string): void;
   /** 뷰포트 픽킹 대상 id 목록 (선택 가능 엔티티 — 바닥 제외) */
@@ -444,7 +509,7 @@ export interface SimOrchestratorFacade {
   play(): void;
   /** ⏸ 즉시 일시정지 */
   pause(): void;
-  /** ⏹ 정지 + 결정론적 재생 준비 (씬/player/충돌 이력 리셋) */
+  /** ⏹ 정지 + 재생 준비 (씬/player/충돌 이력 + 물리 접촉 상태 리셋) */
   stop(): void;
   /** ⏭ 노드 1개 전진 (물리 1 tick이 아니라 — §5) */
   stepNode(): void;
@@ -462,6 +527,22 @@ export interface SimOrchestratorFacade {
   overlayText(): string;
 }
 
+/**
+ * 3D 임포트 파사드 (게이트/자동화용 — UX_DESIGN §4.4).
+ *
+ * 다이얼로그를 **여는 것만** 노출한다. 파일 → 파싱 → 폼 → [추가]의 나머지 구간은
+ * 게이트가 다이얼로그 DOM(data-testid)으로 조작해 **사람이 쓰는 경로와 같은 코드**를
+ * 타게 한다. 파사드가 폼을 우회해 EntitySpec을 직접 조립하면 "다이얼로그는 망가졌는데
+ * 게이트는 초록"이 된다 — orchestrator 파사드가 playbackControls(=UI 재생 바)를 위임
+ * 호출하는 것과 같은 규약(§5 동기 강조).
+ */
+export interface SimMeshImportFacade {
+  /** 임포트 다이얼로그를 연다 — 라이브러리 ⬆ / 뷰포트 파일 드롭과 동일 진입점 */
+  open(file: File): void;
+  /** 이 세션에 등록된 임포트 에셋 ref 목록 ('asset://<n>', 등록 순서) */
+  assetRefs(): readonly string[];
+}
+
 /** window.__sim으로 노출되는 시뮬 핸들. Rapier 타입은 새지 않는다(PhysicsWorld 경계). */
 export interface SimHandle {
   readonly engine: Engine;
@@ -475,6 +556,7 @@ export interface SimHandle {
   readonly flowGraph: SimFlowGraphFacade;
   readonly planner: SimPlannerFacade;
   readonly orchestrator: SimOrchestratorFacade;
+  readonly meshImport: SimMeshImportFacade;
   readonly player?: SimPlayerFacade;
 }
 
@@ -950,6 +1032,16 @@ async function boot(): Promise<void> {
   /** '플로우' 토글 — 버튼과 단축키가 같은 함수를 부른다(동작 분기 금지) */
   let flowPaneToggler: (() => void) | null = null;
   let activeDropHint: DropHintHandle | null = null;
+  /**
+   * 현재 씬의 뷰포트 편집 명령 — 기즈모 모드 전환 · 선택 오브젝트 이동 · 바닥에 붙이기.
+   * 키 소유는 라우터(§2.10)에 있고 render/interaction은 명령만 제공한다.
+   */
+  let viewportEdit: {
+    setGizmoMode(mode: GizmoMode): void;
+    nudge(axis: NudgeAxis, fine: boolean): void;
+    snapToGround(): void;
+    hasSelection(): boolean;
+  } | null = null;
 
   // ── 도움말 · 단축키 시트 (UX_AUDIT C-12) ──────────────────────────
   //
@@ -1089,6 +1181,56 @@ async function boot(): Promise<void> {
       run: (e) => {
         e.preventDefault(); // 브라우저 '페이지 저장' 차단
         saveDocumentToFile();
+      },
+    },
+    // ── 뷰포트 편집 (scope: viewport — 3D 화면에 포커스가 있을 때만) ──
+    //
+    // 이전에는 render/interaction.ts가 window에 keydown을 직접 걸어 W/E/R·방향키를
+    // 처리했다. 라우터가 모르는 두 번째 키맵이었고, 그 결과 `→`는 **재생 Step과
+    // 오브젝트 이동을 동시에** 일으켰다(라우터의 preventDefault는 다른 리스너를 막지
+    // 못한다). 이제 두 조작 모두 이 표에 있고, 스코프가 소유권을 가른다:
+    // 뷰포트에 포커스 + 선택 있음 → 이동, 그 밖 → Step.
+    ...GIZMO_MODE_KEYS.map(({ key, mode, labelKo }, index) => ({
+      id: `edit.gizmo.${mode}`,
+      keys: key,
+      scope: 'viewport' as const,
+      group: '뷰포트 편집',
+      labelKo,
+      // 대표 줄 하나로 3종 모드를 표기한다 (W/E/R는 같은 조작의 세 상태)
+      hidden: index > 0,
+      keysDisplay: index === 0 ? GIZMO_MODE_KEYS.map((k) => k.key) : undefined,
+      run: (e: KeyboardEvent): void => {
+        e.preventDefault();
+        viewportEdit?.setGizmoMode(mode);
+      },
+    })),
+    ...NUDGE_KEYS.map(({ key, axis, canonical, labelKo, display }) =>
+      [false, true].map((fine) => ({
+        id: `edit.nudge.${key}${fine ? '.fine' : ''}`,
+        keys: fine ? `Shift+${key}` : key,
+        scope: 'viewport' as const,
+        group: '뷰포트 편집',
+        labelKo,
+        hidden: !canonical || fine,
+        keysDisplay: canonical && !fine ? display : undefined,
+        // 선택이 없으면 이 바인딩은 성립하지 않는다 — 라우터가 global의 Step으로
+        // 넘어가므로 "아무것도 선택하지 않은 채 →"는 규정대로 Step이 된다.
+        isEnabled: (): boolean => viewportEdit?.hasSelection() === true,
+        run: (e: KeyboardEvent): void => {
+          e.preventDefault(); // 방향키 페이지 스크롤 방지
+          viewportEdit?.nudge(axis, fine);
+        },
+      })),
+    ).flat(),
+    {
+      id: 'edit.snapGround',
+      keys: 'End',
+      scope: 'viewport',
+      group: '뷰포트 편집',
+      labelKo: '선택 오브젝트를 바닥에 붙이기',
+      run: (e) => {
+        e.preventDefault();
+        viewportEdit?.snapToGround();
       },
     },
     {
@@ -1313,8 +1455,8 @@ async function boot(): Promise<void> {
 
     // scene-loader(core)가 three를 모르도록, 좁은 RenderSceneApi를 여기서 구현해 주입
     const renderApi: RenderSceneApi = {
-      addPrimitive: (shape, color) => {
-        const mesh = primitiveMesh(shape, color);
+      addPrimitive: (shape, color, style) => {
+        const mesh = primitiveMesh(shape, color, style);
         render.scene.add(mesh); // 씬 루트 직접 자식 — RenderSync 바인딩 계약
         return mesh;
       },
@@ -1382,6 +1524,7 @@ async function boot(): Promise<void> {
       sync,
       renderApi,
       robots: sceneHandle.robots,
+        conveyors: sceneHandle.conveyors,
       builtEntities: sceneHandle.builtEntities,
     });
 
@@ -1410,6 +1553,7 @@ async function boot(): Promise<void> {
       playbackBar?: ReturnType<typeof mountPlaybackBar>;
       autoPauseControl?: HTMLElement;
       viewportStatus?: ReturnType<typeof mountViewportStatus>;
+      selectionHud?: ReturnType<typeof mountSelectionHud>;
       runOverlay?: ReturnType<typeof mountRunOverlay>;
       contactMarkers?: ContactMarkers;
       orchestrator?: Orchestrator;
@@ -1443,6 +1587,7 @@ async function boot(): Promise<void> {
       built.playbackBar?.dispose();
       built.autoPauseControl?.remove();
       built.viewportStatus?.dispose();
+      built.selectionHud?.dispose();
       built.runOverlay?.dispose();
       built.contactMarkers?.dispose();
       // flow 캔버스는 앱 수명 페인(workspace.slots.flowGraph) 안에 산다 — 씬 몫만 제거
@@ -1561,6 +1706,12 @@ async function boot(): Promise<void> {
             preStep: (simTimeSec, dtSec) => {
               if (sequenceArmed) player.step(simTimeSec, dtSec);
               sceneHandle.robots.tickAll();
+              // ③ 벨트 표면 구동 + 재순환 (DATA_MODEL §4.2). 로봇 FK push **뒤**에
+              //    돌아야 한다 — 같은 tick에서 둘 다 사물에 손을 대면 나중 것이 이기고,
+              //    벨트 위에서는 벨트가 이기는 것이 자연스럽다. 재순환의 teleport도
+              //    여기서 일어나므로 뒤따르는 sync.commit()이 새 pose를 prev로 잡는다
+              //    (순간이동 궤적이 그려지지 않는다 — engine.ts tick 순서).
+              sceneHandle.conveyors.tickAll();
             },
             // 접촉 이벤트 발행 (ARCHITECTURE §5 ③) — 이력 기록 + UI 구독자 통지
             onContacts: (events, simTimeSec) => {
@@ -1687,6 +1838,22 @@ async function boot(): Promise<void> {
       built.gizmoBar = gizmoBar;
       paintGizmoBar();
 
+      // 단축키 라우터가 부를 뷰포트 편집 명령 (씬 수명 — 다음 씬 빌드가 덮어쓴다).
+      // snapToGround는 아래 clampAboveGround 블록에서 정의되므로 지연 호출로 묶는다.
+      viewportEdit = {
+        setGizmoMode: (mode) => {
+          interaction.setMode(mode);
+          paintGizmoBar();
+        },
+        nudge: (axis, fine) => {
+          interaction.nudgeSelected(axis, fine);
+        },
+        snapToGround: () => {
+          snapSelectionToGround();
+        },
+        hasSelection: () => interaction.selectedId !== null,
+      };
+
       const isRobotEntity = (id: string): boolean => sceneHandle.robots.ids().includes(id);
 
       /**
@@ -1727,19 +1894,68 @@ async function boot(): Promise<void> {
       });
 
       /**
-       * 로봇 베이스가 바닥 아래로 내려가지 않도록 y를 클램프한다.
-       * 로봇 링크는 kinematicPosition이라 바닥(fixed ENV)과 겹쳐도 물리가 밀어내지
-       * 못한다 — dynamic 오브젝트와 달리 자가 교정이 없어 영구히 바닥에 박힌다.
-       * 직접 조작 경로(기즈모·방향키·인스펙터 입력)에서 UI가 막고 이유를 알린다.
-       * (파사드 __sim.editor.updateTransform은 자동화용이라 그대로 통과시킨다)
+       * 편집으로 제안된 위치를 **바닥 위**로 클램프한다 (core/ground-clamp.ts).
+       *
+       * 지하 배치는 되돌릴 길이 없는 작업물 손실이다: static은 물리가 밀어내지 않고,
+       * dynamic은 바닥 슬래브 밑으로 빠지면 무한 낙하해 화면에서 사라지며, 로봇 링크는
+       * kinematicPosition이라 자가 교정이 아예 없다. 직접 조작 경로(기즈모·방향키·
+       * 인스펙터 입력)에서 UI가 막고 이유를 알린다.
+       *
+       * 바닥이 없는 씬(environment.ground !== true)에서는 설 자리가 없으므로 클램프하지
+       * 않는다. 파사드 __sim.editor.updateTransform은 자동화용이라 그대로 통과시킨다.
        */
-      const clampRobotBaseY = (id: string, position: Vec3): Vec3 => {
-        if (!isRobotEntity(id) || position[1] >= ROBOT_BASE_MIN_Y_M) return position;
-        showToast(
-          `'${id}': 로봇 베이스는 바닥 아래로 내려갈 수 없습니다 — y를 ${ROBOT_BASE_MIN_Y_M}로 맞췄습니다`,
-          'warn',
+      let lastGroundClampHintMs = 0;
+      const clampAboveGround = (id: string, position: Vec3, rotation?: Quat): Vec3 => {
+        if (editor.spec.environment?.ground !== true) return position;
+        const entity = editor.spec.entities.find((e) => e.id === id);
+        if (entity === undefined) return position;
+        const result = clampPositionAboveGround(
+          entity,
+          position,
+          rotation ?? entity.transform.rotation,
         );
-        return [position[0], ROBOT_BASE_MIN_Y_M, position[2]];
+        if (!result.clamped) return result.position;
+        const now = performance.now();
+        if (now - lastGroundClampHintMs >= GROUND_CLAMP_HINT_THROTTLE_MS) {
+          lastGroundClampHintMs = now;
+          showToast(
+            `'${id}': 바닥 아래로는 내려갈 수 없습니다 — y를 ${result.minY.toFixed(3)} m로 맞췄습니다`,
+            'warn',
+          );
+        }
+        return result.position;
+      };
+
+      /**
+       * 치수 편집 + 바닥 재안착. 중심을 고정한 채 크기만 키우면 아래쪽 절반이 그대로
+       * 바닥을 뚫는다 — "바닥에 놓인 사물은 커져도 바닥에 놓여 있다"가 씬 편집기의
+       * 보편 동작이다. 두 연산을 한 runEdit 안에서 처리해 undo 한 번으로 되돌아간다.
+       */
+      const applyDimensions = (id: string, shape: ColliderShape): void => {
+        runEdit(() => {
+          const before = editor.spec.entities.find((e) => e.id === id);
+          editor.updateDimensions(id, shape);
+          if (before === undefined || editor.spec.environment?.ground !== true) return;
+          const grounded = groundedTransformForShape(before, shape);
+          if (grounded !== null) editor.updateTransform(id, grounded);
+        });
+      };
+
+      /**
+       * "바닥에 붙이기" — 최저점을 바닥 상면에 정확히 맞춘다 (Unity/Unreal의 snap-to-floor).
+       * 클램프와 달리 떠 있는 사물을 내리기도 하고, 이미 지하에 박힌 사물의 구제 경로다.
+       */
+      const snapSelectionToGround = (): void => {
+        const id = interaction.selectedId;
+        if (id === null) {
+          showToast('바닥에 붙일 대상이 없습니다 — 뷰포트에서 오브젝트를 먼저 선택하세요', 'info');
+          return;
+        }
+        const entity = editor.spec.entities.find((e) => e.id === id);
+        if (entity === undefined) return;
+        const position = snapPositionToGround(entity);
+        runEdit(() => editor.updateTransform(id, { ...entity.transform, position }));
+        showToast(`'${id}': 바닥에 붙였습니다 (y ${position[1].toFixed(3)} m)`, 'info');
       };
 
       // 기즈모 commit → SceneEditor 라우팅 (render/interaction.ts 헤더 계약):
@@ -1765,10 +1981,10 @@ async function boot(): Promise<void> {
           }
           // 스케일 배율 → 치수 편집으로 변환. updateDimensions가 엔티티를 스케일 1의
           // 새 메시+collider로 재생성하므로 드래그로 커진 시각 스케일은 자연히 소거된다.
-          runEdit(() => editor.updateDimensions(id, scaleShape(primitive, commit.scale)));
+          applyDimensions(id, scaleShape(primitive, commit.scale));
           return;
         }
-        const position = clampRobotBaseY(id, commit.position);
+        const position = clampAboveGround(id, commit.position, commit.rotation);
         runEdit(() => editor.updateTransform(id, { position, rotation: commit.rotation }));
       });
 
@@ -2097,6 +2313,30 @@ async function boot(): Promise<void> {
         if (node) render.frameObject(node);
       };
 
+      // 선택 조작 HUD (뷰포트 우하단) — 이동 키 안내 + 치수 한 칸 조정 + 바닥에 붙이기.
+      // 이미 구현돼 있던 방향키 이동과 치수 편집이 화면 어디에도 드러나지 않아 발견되지
+      // 않던 문제를 메운다 (ui/viewport/selection-hud.ts 헤더).
+      const selectionHud = mountSelectionHud(workspace.slots.viewport, {
+        stepDimension: (id, shape) => {
+          applyDimensions(id, shape);
+        },
+        snapToGround: () => {
+          snapSelectionToGround(); // End 키와 같은 함수 — 동작 분기 금지
+        },
+        clearSelection: () => {
+          interaction.select(null);
+        },
+      });
+      built.selectionHud = selectionHud;
+
+      /** HUD를 현재 선택/스펙으로 재동기화 (선택 변경·편집 통지 양쪽에서 호출) */
+      const refreshSelectionHud = (): void => {
+        const id = interaction.selectedId;
+        const entity =
+          id === null ? undefined : editor.spec.entities.find((e) => e.id === id);
+        selectionHud.setSelection(entity ?? null);
+      };
+
       const runOverlay = mountRunOverlay(workspace.slots.viewport);
 
       // 실행 계측 HUD (UX_AUDIT C-15) — 시뮬레이터를 자처하는데 FPS/RTF/스텝 지표가
@@ -2333,7 +2573,11 @@ async function boot(): Promise<void> {
         return entity.id;
       };
 
-      /** 드롭 좌표(null = 뷰포트 중앙)의 바닥 레이캐스트 지점에 배치 — y는 템플릿 유지 */
+      /**
+       * 드롭 좌표(null = 뷰포트 중앙)의 바닥 레이캐스트 지점에 배치 — y는 템플릿 유지.
+       * 템플릿/임포트가 어떤 y를 들고 오든 최저점이 바닥 위에 오도록 마지막에 클램프한다
+       * (지하 스폰 = 되돌릴 길 없는 손실 — core/ground-clamp.ts 헤더).
+       */
       const placeEntity = async (
         entity: EntitySpec,
         dropClient: { x: number; y: number } | null,
@@ -2342,6 +2586,12 @@ async function boot(): Promise<void> {
         const ground = interaction.raycastGround(client.x, client.y);
         if (ground) {
           entity.transform.position = [ground[0], entity.transform.position[1], ground[2]];
+        }
+        if (editor.spec.environment?.ground === true) {
+          entity.transform.position = clampPositionAboveGround(
+            entity,
+            entity.transform.position,
+          ).position;
         }
         return addEntityAndSelect(entity);
       };
@@ -2364,6 +2614,7 @@ async function boot(): Promise<void> {
         updateTransform: (id, transform) => editor.updateTransform(id, transform),
         updateDimensions: (id, shape) => editor.updateDimensions(id, shape),
         updatePhysics: (id, physics) => editor.updatePhysics(id, physics),
+        updateConveyor: (id, conveyor) => editor.updateConveyor(id, conveyor),
         renameEntity: (id, newId) => editor.renameEntity(id, newId),
         removeEntity: (id) => {
           // 안전 가드: 재생 중 로봇 제거는 player가 다음 tick에 사라진 로봇을 구동하려다
@@ -2540,15 +2791,18 @@ async function boot(): Promise<void> {
         },
         isRobot: isRobotEntity,
         updateTransform: (id, transform) => {
-          // 기즈모/방향키와 같은 규칙 — 로봇 베이스 y 하한 (clampRobotBaseY 주석)
-          const position = clampRobotBaseY(id, transform.position);
+          // 기즈모/방향키와 같은 규칙 — 바닥 하한 (clampAboveGround 주석)
+          const position = clampAboveGround(id, transform.position, transform.rotation);
           runEdit(() => editor.updateTransform(id, { ...transform, position }));
         },
         updateDimensions: (id, shape) => {
-          runEdit(() => editor.updateDimensions(id, shape));
+          applyDimensions(id, shape);
         },
         updatePhysics: (id, physics) => {
           runEdit(() => editor.updatePhysics(id, physics));
+        },
+        updateConveyor: (id, conveyor) => {
+          runEdit(() => editor.updateConveyor(id, conveyor));
         },
         renameEntity: (id, newId) => {
           try {
@@ -3174,6 +3428,18 @@ async function boot(): Promise<void> {
         overlayText: () => overlaySummary(lastOverlayState),
       };
 
+      // 3D 임포트 파사드 — 다이얼로그·에셋 저장소는 **앱 수명**이지만 게이트가 보는 훅은
+      // __sim 하나뿐이라 씬별 핸들에 실어 위임한다(plannerFacade가 앱 수명 runGenerate를
+      // 위임하는 것과 동일). importDialog는 이 함수 정의보다 뒤에 선언되지만 buildScene의
+      // 첫 호출은 그보다 뒤라 TDZ가 아니다.
+      const meshImportFacade: SimMeshImportFacade = {
+        open: (file) => {
+          pendingImportDrop = null; // 파일 선택 경로와 동일 — 뷰포트 중앙 배치
+          importDialog.openWith(file);
+        },
+        assetRefs: () => assetStore.refs(),
+      };
+
       // 씬 전환 후 게이트/자동화가 보는 핸들은 항상 "이" 씬의 새 인스턴스들이다
       window.__sim = {
         engine,
@@ -3187,6 +3453,7 @@ async function boot(): Promise<void> {
         flowGraph: flowFacade,
         planner: plannerFacade,
         orchestrator: orchestratorFacade,
+        meshImport: meshImportFacade,
         ...(playerFacade ? { player: playerFacade } : {}),
       };
 
@@ -3197,6 +3464,7 @@ async function boot(): Promise<void> {
         inspector.select(id);
         sceneOutliner.select(id);
         entityEditor.showFor(id);
+        refreshSelectionHud();
         refreshOverlay(); // 선택 리드아웃('선택 <id>')을 rAF 지연 없이 즉시 반영
         if (id !== null) {
           // 우측 스택 중재 (마지막 선택 승리): 엔티티 선택 → 노드 선택 해제 + 엔티티 폼.
@@ -3228,6 +3496,7 @@ async function boot(): Promise<void> {
           const entity = editor.spec.entities.find((s) => s.id === selectedId);
           if (entity) entityEditor.refreshFrom(structuredClone(entity));
         }
+        refreshSelectionHud(); // 위치·치수 리드아웃이 편집 결과를 즉시 반영
         // Undo 스냅샷: 연속 조정(transform/dimensions/physics) burst는 디바운스로
         // 1장에 합쳐지고, 구조 변경(add/remove/rename)은 flushPending으로 경계를 세워
         // 개별 스냅샷이 된다 — "undo 1회 = 구조 변경 1개" (ui/history.ts 계약).

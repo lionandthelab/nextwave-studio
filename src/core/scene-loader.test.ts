@@ -9,7 +9,7 @@ import fallingBoxesSceneJson from '../assets/scenes/falling-boxes.scene.json';
 import armAndBoxesSceneJson from '../assets/scenes/arm-and-boxes.scene.json';
 import { validateScene } from '../schema/validate';
 import { isRobotSpec } from '../schema/types';
-import type { RobotSpec, SceneSpec } from '../schema/types';
+import type { RobotSpec, SceneSpec, Vec3 } from '../schema/types';
 import type {
   BodyId,
   ColliderId,
@@ -391,6 +391,9 @@ class RecordingWorld implements PhysicsWorld {
     this.removedEntityIds.push(entityId);
   }
 
+  /** 되감기 전용 — 이 테스트들은 되감기를 호출하지 않으므로 no-op이면 충분하다 */
+  clearContactState(): void {}
+
   setKinematicPose(bodyId: BodyId, pose: Pose): void {
     this.kinematicCalls.push({
       bodyId,
@@ -420,6 +423,18 @@ class RecordingWorld implements PhysicsWorld {
   bodiesOfEntity(entityId: EntityId): readonly BodyId[] {
     return this.bodies.filter((b) => b.entityId === entityId).map((b) => b.bodyId);
   }
+
+  // 컨베이어 표면 구동 계약 (core/types.ts) — 이 목은 접촉/속도를 다루지 않는다
+  dynamicBodiesTouching(): readonly BodyId[] {
+    return [];
+  }
+  dynamicBodies(): readonly BodyId[] {
+    return [];
+  }
+  getLinearVelocity(): Vec3 {
+    return [0, 0, 0];
+  }
+  setLinearVelocity(): void {}
 
   clear(): void {}
   free(): void {}

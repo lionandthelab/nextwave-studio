@@ -22,8 +22,15 @@
 
 import type { SceneEditEvent, SceneEditKind, SceneEditor } from './scene-edit-types';
 import type { EntityId, PhysicsWorld, Pose } from './types';
+import type { ConveyorRegistry } from './conveyor';
 import type { RobotBinding, RobotRegistry } from './robots';
-import { attachRobotPhysics, buildEntity, buildObjectEntity, GROUND_ENTITY_ID } from './scene-loader';
+import {
+  attachRobotPhysics,
+  buildEntity,
+  buildObjectEntity,
+  GROUND_ENTITY_ID,
+  registerConveyor,
+} from './scene-loader';
 import type {
   BuiltEntityHandle,
   EntityBuildDeps,
@@ -34,6 +41,7 @@ import { validateScene } from '../schema/validate';
 import { isRobotSpec } from '../schema/types';
 import type {
   ColliderShape,
+  ConveyorSpec,
   EntitySpec,
   PhysicsSpec,
   Quat,
@@ -79,6 +87,12 @@ export interface SceneEditorDeps {
   /** 씬의 로봇 레지스트리 (SceneHandle.robots와 같은 인스턴스) — robot add/remove 갱신 */
   readonly robots: RobotRegistry;
   /**
+   * 씬의 컨베이어 레지스트리 (SceneHandle.conveyors와 같은 인스턴스).
+   * 벨트 기하는 빌드 시점 pose/collider에 고정되므로, 배치·치수·물리 편집으로
+   * 엔티티가 재빌드될 때 바인딩도 함께 재생성되어야 벨트가 새 자리에서 흐른다.
+   */
+  readonly conveyors: ConveyorRegistry;
+  /**
    * SceneLoader.build가 반환한 살아있는 빌드 레코드 Map (SceneHandle.builtEntities).
    * 편집기가 add/remove 시 함께 갱신해 reset()/dispose()가 항상 현재 상태를 본다.
    */
@@ -109,6 +123,7 @@ export class SceneEditorImpl implements SceneEditor {
       renderApi: deps.renderApi,
       sync: deps.sync,
       robots: deps.robots,
+      conveyors: deps.conveyors,
     };
   }
 
@@ -177,12 +192,10 @@ export class SceneEditorImpl implements SceneEditor {
       }
       // reset()이 편집된 배치로 돌아가도록 레코드의 초기 pose도 갱신
       record.initialPose = poseFromTransform(this.entityAt(next, index).transform);
-      // prev 스냅샷을 텔레포트된 pose로 갱신 — 갱신하지 않으면 paused/idle 프레임의
-      // sync.apply(alpha<1)가 다음 물리 tick의 commit()까지 편집 전 pose를 계속
-      // 보간해 그린다 (SceneHandle.reset()이 잡는 것과 동일한 stale-prev 함정,
-      // CLAUDE.md §2.1). 재빌드 경로(updateDimensions/updatePhysics)는 bind()가
-      // prev를 재스냅샷하므로 이 처리가 필요 없다.
-      this.sync.commit();
+      this.syncVisualsNow();
+      // 컨베이어는 기하를 빌드 시점 pose에 고정한다 — 배치가 바뀌면 바인딩을 다시
+      // 만들지 않으면 벨트는 옮겨졌는데 사물은 옛 자리의 진행축/끝점으로 실려 간다.
+      this.refreshConveyor(this.entityAt(next, index));
     } else if (record.node) {
       // 물리 없는 순수 장식 — 1회 배치 (불변식 §2.1의 시각 전용 예외)
       this.renderApi.setPose(record.node, pose.position, pose.rotation);
@@ -216,10 +229,34 @@ export class SceneEditorImpl implements SceneEditor {
       for (const bodyId of this.world.bodiesOfEntity(id)) {
         this.world.teleport(bodyId, pose);
       }
-      this.sync.commit();
+      this.syncVisualsNow();
     } else if (record.node) {
       this.renderApi.setPose(record.node, pose.position, pose.rotation);
     }
+  }
+
+  /**
+   * 편집으로 바뀐 물리 pose를 **그 자리에서** 시각 노드까지 밀어 넣는다
+   * (prev 스냅샷 갱신 + alpha=1 적용). 물리 → 시각 단방향이므로 §2.1을 지킨다.
+   *
+   * commit()만으로는 부족하다. commit은 prev만 갱신하고 Object3D는 렌더 루프의
+   * `apply(alpha)`가 쓴다 — 그런데 **편집 중에는 엔진이 일시정지**돼 있고(ui의 편집 정책),
+   * 다음 렌더 프레임이 언제 올지는 편집 코드가 알 수 없다. 그 사이에 다음 편집이 들어오면
+   * 문제가 된다: 기즈모 앵커와 방향키 이동은 **시각 노드의 월드 행렬**을 기준점으로 삼기
+   * 때문에(render/interaction.ts), 노드가 아직 갱신되지 않았으면 **편집 전 pose에서
+   * 다시 출발**한다.
+   *
+   * 실측: 일시정지 상태에서 `→`(5cm) 직후 `Shift+→`(1cm)를 빠르게 누르면 두 번째 이동이
+   * stale 기준점에서 계산돼 순 이동이 1cm가 아니라 4cm(= 5 − 1)로 나왔다. 렌더 프레임이
+   * 사이에 끼면 1cm가 나와, 같은 조작이 프레임 타이밍에 따라 다른 결과를 냈다
+   * (브라우저 게이트 viewport-edit가 잡았다).
+   *
+   * 재빌드 경로(updateDimensions/updatePhysics)는 bind()가 prev를 재스냅샷하고 노드를
+   * 새로 만들므로 이 처리가 필요 없다.
+   */
+  private syncVisualsNow(): void {
+    this.sync.commit();
+    this.sync.apply(1);
   }
 
   /**
@@ -233,7 +270,7 @@ export class SceneEditorImpl implements SceneEditor {
     record.robot.binding.teleportLinksToFk();
     record.robot.binding.tick();
     // prev 스냅샷 갱신 — SceneHandle.reset()과 동일 계약 (비로봇 분기 주석 참조)
-    this.sync.commit();
+    this.syncVisualsNow();
   }
 
   /**
@@ -287,6 +324,35 @@ export class SceneEditorImpl implements SceneEditor {
       this.entityAt(draft, index).physics = structuredClone(physics);
     });
     this.rebuildInPlace(id, index, next, 'physics');
+  }
+
+  /**
+   * 벨트 바인딩을 현재 스펙(배치 포함)으로 다시 만든다. conveyor가 없으면 no-op.
+   * updateTransform처럼 **재빌드 없이 pose만 바꾸는** 경로에서 호출한다 —
+   * updateDimensions/updatePhysics/rename은 rebuildInPlace가 이미 재등록한다.
+   */
+  private refreshConveyor(entity: EntitySpec): void {
+    if (entity.conveyor === undefined) return;
+    this.buildDeps.conveyors.remove(entity.id);
+    registerConveyor(entity, this.buildDeps);
+  }
+
+  /**
+   * 컨베이어 표면 구동 편집 (DATA_MODEL §4.2).
+   *
+   * 벨트 기하(진행축·반길이·상면 높이)는 ConveyorBinding 생성 시점에 pose/collider에서
+   * 확정되므로, 값만 바꿔 치는 경로가 없다 — 엔티티를 재빌드해 바인딩을 새로 만든다.
+   * 재빌드 경로는 실패 시 이전 스펙으로 복원하는 규약을 그대로 물려받는다.
+   *
+   * validateScene의 교차 규칙이 "static + fixed + box + 비-sensor"를 강제하므로, 그
+   * 조건을 만족하지 않는 엔티티에 붙이려 하면 검증 단계에서 한국어 오류로 거부된다.
+   */
+  updateConveyor(id: string, conveyor: ConveyorSpec): void {
+    const index = this.requireEntityIndex(id);
+    const next = this.validatedDraft((draft) => {
+      this.entityAt(draft, index).conveyor = structuredClone(conveyor);
+    });
+    this.rebuildInPlace(id, index, next, 'conveyor');
   }
 
   /**

@@ -15,9 +15,13 @@
 //   opts로 주입받는다 — render 계층은 ui/theme을 import하지 않는다(CLAUDE.md §3).
 //   기본값 0xe67e22는 ui/theme COLOR.accent와 같은 값을 "의도적으로" 중복 정의한 것.
 // - Transform 기즈모: three/examples TransformControls(three 패키지 내장 — 신규 런타임
-//   의존성 아님). 이동/회전/스케일 모드(setMode + 키보드 W/E/R, 입력 필드 타이핑 중엔
-//   무시), 스냅(0.05 m / 15°), 드래그 중 OrbitControls 비활성화(dragging-changed).
+//   의존성 아님). 이동/회전/스케일 모드(setMode), 스냅(0.05 m / 15°), 드래그 중
+//   OrbitControls 비활성화(dragging-changed).
 //   기즈모는 선택 루트에 직접 붙지 않고 **프록시 앵커 노드**에 붙는다 — 아래 참조.
+// - **키 바인딩은 이 모듈이 소유하지 않는다** (불변식 §2.10): setMode(W/E/R)와
+//   nudgeSelected(방향키)를 명령으로 제공할 뿐, 어떤 키가 그것을 부르는지는 통합자가
+//   ui/shortcuts.ts 라우터에 등록한다. keyToGizmoMode/keyToNudgeAxis는 그 등록을 돕는
+//   순수 매핑 함수이고, 이 모듈은 window에 keydown을 걸지 않는다.
 //
 // ── 기즈모 프록시 앵커 (로봇도 오브젝트처럼 잡히게 하는 핵심) ────────
 // TransformControls는 attach한 객체의 **원점**에 핸들을 그린다. 프리미티브는 원점이
@@ -522,32 +526,24 @@ export class ViewportInteraction {
     this.select(this.pickAt(event.clientX, event.clientY));
   };
 
-  private readonly handleKeyDown = (event: KeyboardEvent): void => {
-    // Ctrl+R(새로고침) 등 브라우저/앱 단축키를 가로채지 않는다
-    if (event.ctrlKey || event.metaKey || event.altKey) return;
-    if (isTypingTarget(event.target as TypingTargetLike | null)) return;
-    const mode = keyToGizmoMode(event.key);
-    if (mode !== null) {
-      this.setMode(mode);
-      return;
-    }
-    if (this.nudgeByKey(event)) event.preventDefault(); // 방향키 페이지 스크롤 방지
-  };
-
   /**
-   * 방향키로 선택 오브젝트를 이동한다 (UX_DESIGN §3.3 "단축키로 배치 조정").
+   * 선택 오브젝트를 한 칸 이동한다 (UX_DESIGN §3.3 "단축키로 배치 조정").
    *
-   * - ←/→/↑/↓: **카메라 기준** 수평 이동 — 화면에서 보이는 방향과 일치해 직관적이다.
-   * - PageUp/PageDown: 월드 Y(수직) 이동.
-   * - Shift 병용: 미세 이동(1cm).
+   * - `right`/`forward`: **카메라 기준** 수평 이동 — 화면에서 보이는 방향과 일치해 직관적이다.
+   * - `vertical`: 월드 Y(수직) 이동.
+   * - `fine`: 미세 이동(1cm).
    *
    * 기즈모 드래그와 **같은 커밋 경로**(onTransformCommit)를 쓴다 — 통합자가 물리
    * teleport까지 동일하게 처리하므로 이동 수단에 따라 동작이 갈리지 않는다.
-   * @returns 이동을 처리했으면 true
+   *
+   * 키 매핑은 **하지 않는다**: 어떤 키가 이 조작을 부르는지는 ui/shortcuts.ts 라우터가
+   * 소유한다(불변식 §2.10). render 계층이 window에 직접 keydown을 걸면 라우터가 모르는
+   * 두 번째 키맵이 생기고, 실제로 그 결과 `→`가 재생 Step과 오브젝트 이동을 **동시에**
+   * 일으켰다.
+   *
+   * @returns 이동을 처리했으면 true (선택이 없으면 false + onNudgeBlocked 통지)
    */
-  private nudgeByKey(event: KeyboardEvent): boolean {
-    const axis = keyToNudgeAxis(event.key);
-    if (axis === null) return false;
+  nudgeSelected(axis: NudgeAxis, fine = false): boolean {
     if (this.currentId === null) {
       // 조용한 무시 금지: "왜 아무 일도 안 일어나는지"를 통합자가 알려야 한다.
       // (빈 곳 클릭으로 선택이 풀린 줄 모르는 사용자가 방향키만 계속 누르는 실패 연쇄)
@@ -557,7 +553,7 @@ export class ViewportInteraction {
     const snapshot = this.decomposeSelectedRoot();
     if (snapshot === null) return false;
 
-    const step = event.shiftKey ? NUDGE_FINE_STEP_M : NUDGE_STEP_M;
+    const step = fine ? NUDGE_FINE_STEP_M : NUDGE_STEP_M;
     const delta = this.nudgeDelta(axis, step);
 
     const position: Vec3 = [
@@ -655,7 +651,8 @@ export class ViewportInteraction {
 
     this.domElement.addEventListener('pointerdown', this.handlePointerDown);
     this.domElement.addEventListener('pointerup', this.handlePointerUp);
-    window.addEventListener('keydown', this.handleKeyDown);
+    // keydown은 걸지 않는다 — 전역 단축키의 단일 소유자는 ui/shortcuts.ts 라우터다
+    // (불변식 §2.10). 통합자가 setMode/nudgeSelected를 라우터에 등록한다.
   }
 
   // ── 픽킹 대상 ─────────────────────────────────────────────────────
@@ -845,7 +842,6 @@ export class ViewportInteraction {
 
     this.domElement.removeEventListener('pointerdown', this.handlePointerDown);
     this.domElement.removeEventListener('pointerup', this.handlePointerUp);
-    window.removeEventListener('keydown', this.handleKeyDown);
 
     this.clearSelectionVisuals(); // emissive 원복 + 기즈모 detach
     this.currentId = null;

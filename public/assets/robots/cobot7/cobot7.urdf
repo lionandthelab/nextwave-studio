@@ -1,0 +1,365 @@
+<?xml version="1.0"?>
+<!--
+  cobot7.urdf — robot-sim-web 7축 협동로봇 + 3지(three-finger) 클로 그리퍼
+  프리미티브 지오메트리만 사용 (외부 메시 파일 불필요 — 정적 호스팅 친화).
+  URDF 표준 관례상 Z-up이며, 로딩 시 render/urdf.ts의 axisFix가 Y-up으로 변환한다 (CLAUDE.md §4).
+  단위: 미터, 라디안.
+
+  ── 축 배열: S-R-S (Spherical-Revolute-Spherical) 7-DOF ────────────────
+  arm6는 Z·Y·Y·Z·Y·Z 로 "6관절 직렬"이다. 여기는 Z·Y·Z·Y·Z·Y·Z 로 피치와 롤이
+  교대하며, 기능 단위로 묶으면
+
+      어깨 3축 (joint1 Z · joint2 Y · joint3 Z, 거의 한 점에서 교차)
+    + 팔꿈치 1축 (joint4 Y)
+    + 손목 3축 (joint5 Z · joint6 Y · joint7 Z, 한 점에서 교차)
+
+  가 된다. 어깨와 손목이 각각 3축 구면 관절이므로, 손끝 pose 6-DOF를 완전히 고정한
+  채로도 팔꿈치가 "손목–어깨" 축을 중심으로 원뿔면 위를 스윙하는 1-파라미터 자기운동
+  (null-space)이 남는다 — 사람이 손을 책상에 붙인 채 팔꿈치만 들었다 내리는 그 동작이고,
+  이것이 여유자유도(redundancy)다. arm6에는 없다: 관절을 하나 더 붙인 것이 아니라
+  어깨에 롤(joint3)을 끼워 넣어 구면 관절로 만든 것이 차이다.
+
+  joint2/joint4의 좌우 오프셋(+0.085 / -0.085)은 협동로봇 특유의 어깨 오프셋 형상이며
+  joint3=0에서 서로 상쇄되어 전완이 베이스 중심면으로 돌아온다.
+
+  오프셋 값의 하한은 기하가 정한다: link1 실린더 반지름 0.052 + link3 박스 반폭 0.028
+  = 0.080 m 이상이어야 상완이 어깨 기둥을 관통하지 않는다. 처음 값 0.048은 이보다
+  작아 joint2 범위의 양쪽 끝에서 20.6mm 파고들었다(OBB-SAT 실측).
+  selfCollision은 기본 off라(§5) 물리 이벤트가 나지 않으므로 화면으로만 드러난다 —
+  src/render/robot-self-clearance.test.ts가 이 회귀를 잡는다.
+
+  ── 그리퍼: 3지 revolute 클로 ────────────────────────────────────────
+  손가락 3개가 120° 간격(0°/120°/240°)으로 손바닥(link7)에 달려 **안쪽으로 굽는다**.
+  세 관절이 같은 값을 받으면(제어 계층 gripper step 규약: config.joints 전체 동일값)
+  동시에 오므라든다. 각 관절의 origin rpy가 손가락을 120°씩 돌려 놓으므로 같은 각도가
+  각자의 반경 방향 안쪽 굽힘이 된다.
+  값 -0.65 = 완전 열림, +0.10 = 완전 닫힘. (음수가 열림인 이유: 0 = 손가락이 공구축과
+  나란히 곧게 뻗은 상태이고, 그보다 더 벌리려면 바깥으로 젖혀야 한다.)
+
+  prismatic(반경 방향 직선 조임)이 아니라 revolute를 고른 이유:
+  이 시뮬레이터의 파지는 흡착도 조인트 구속도 없는 **순수 접촉 마찰**이고, 로봇 링크는
+  kinematicPosition 바디(무한 강성·위치 지령·힘 피드백 없음)다. 즉 접촉 법선력은 오직
+  "얼마나 파고들게 닫았는가"로 결정된다.
+  - prismatic 손가락의 접촉면은 공구축과 나란한 수직면이라 법선이 전부 수평이다.
+    사물을 드는 힘 전체가 μ·N 하나에 걸리고, N은 close 값을 mm 단위로 얼마나 맞췄는지에
+    좌우된다 — 덜 닫으면 떨어뜨리고 더 닫으면 튕겨 나간다.
+  - revolute 손가락은 끝마디 패드가 안쪽·손바닥 쪽으로 기울어(pad rpy="0 -0.75 0")
+    접촉 법선에 **축 방향 성분**이 생긴다. 사물이 마찰이 아니라 법선력으로 받쳐지는
+    기하학적 케이징이 되어 close 값 오차에 훨씬 관대하다.
+  - 라이브러리의 구(반지름 5cm)는 수직 평면 조(jaw)로는 적도 한 점에서만 닿아 굴러
+    빠지지만, 굽은 세 손가락은 적도 아래를 받쳐 가둔다.
+  실물 3지 그리퍼(Robotiq 3-Finger, Barrett Hand)가 모두 굽는 방식인 것도 같은 이유다.
+
+  색: 펄 화이트 셸 + 인디고 액센트 (arm6의 다크슬레이트+오렌지와 구분).
+-->
+<robot name="cobot7">
+
+  <material name="shell_white">
+    <color rgba="0.88 0.89 0.91 1.0"/>
+  </material>
+  <material name="accent_indigo">
+    <color rgba="0.45 0.35 0.85 1.0"/>
+  </material>
+  <material name="joint_dark">
+    <color rgba="0.18 0.20 0.24 1.0"/>
+  </material>
+  <material name="pad_charcoal">
+    <color rgba="0.20 0.21 0.24 1.0"/>
+  </material>
+
+  <!-- ── 베이스 ─────────────────────────────────────────── -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.062" length="0.05"/></geometry>
+      <material name="joint_dark"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.062" length="0.05"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="2.0"/>
+      <inertia ixx="0.012" iyy="0.012" izz="0.012" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J1: 어깨 요 (Z) — 구면 어깨 1/3 ─────────────────── -->
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.05" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.9" upper="2.9" effort="60" velocity="2.5"/>
+  </joint>
+  <link name="link1">
+    <visual>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.052" length="0.08"/></geometry>
+      <material name="shell_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.052" length="0.08"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="1.2"/>
+      <inertia ixx="0.006" iyy="0.006" izz="0.006" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J2: 어깨 피치 (Y) — 구면 어깨 2/3, 협동로봇 어깨 오프셋 +Y ── -->
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0.085 0.08" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.95" upper="1.95" effort="60" velocity="2.5"/>
+  </joint>
+  <!-- link2 = 어깨 드럼. J2 피치축(Y)을 감싸는 짧은 원통이라 J3가 J2에 거의 겹친다
+       (오프셋 45mm ≪ 상완 175mm) — 어깨가 사실상 구면 관절로 동작한다. -->
+  <link name="link2">
+    <visual>
+      <origin xyz="0 0 0.012" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.05" length="0.088"/></geometry>
+      <material name="accent_indigo"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.012" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.05" length="0.088"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="1.0"/>
+      <inertia ixx="0.004" iyy="0.004" izz="0.004" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J3: 상완 롤 (Z) — 구면 어깨 3/3. 여유자유도(팔꿈치 스윙)의 근원 ── -->
+  <joint name="joint3" type="revolute">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0 0 0.045" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.9" upper="2.9" effort="40" velocity="3.0"/>
+  </joint>
+  <!-- link3 = 상완 -->
+  <link name="link3">
+    <visual>
+      <origin xyz="0 0 0.0875" rpy="0 0 0"/>
+      <geometry><box size="0.056 0.056 0.175"/></geometry>
+      <material name="shell_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.0875" rpy="0 0 0"/>
+      <geometry><box size="0.056 0.056 0.175"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.9"/>
+      <inertia ixx="0.005" iyy="0.005" izz="0.002" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J4: 팔꿈치 피치 (Y) — 오프셋 -Y로 중심면 복귀. 과신전 없음 ── -->
+  <joint name="joint4" type="revolute">
+    <parent link="link3"/>
+    <child link="link4"/>
+    <origin xyz="0 -0.085 0.175" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.2" upper="2.59" effort="40" velocity="3.0"/>
+  </joint>
+  <!-- link4 = 전완 -->
+  <link name="link4">
+    <visual>
+      <origin xyz="0 0 0.075" rpy="0 0 0"/>
+      <geometry><box size="0.05 0.05 0.15"/></geometry>
+      <material name="shell_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.075" rpy="0 0 0"/>
+      <geometry><box size="0.05 0.05 0.15"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.7"/>
+      <inertia ixx="0.003" iyy="0.003" izz="0.001" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J5: 손목 롤 (Z) — 구면 손목 1/3 ─────────────────── -->
+  <joint name="joint5" type="revolute">
+    <parent link="link4"/>
+    <child link="link5"/>
+    <origin xyz="0 0 0.15" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.9" upper="2.9" effort="20" velocity="4.0"/>
+  </joint>
+  <link name="link5">
+    <visual>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.038" length="0.05"/></geometry>
+      <material name="accent_indigo"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.038" length="0.05"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.4"/>
+      <inertia ixx="0.001" iyy="0.001" izz="0.001" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J6: 손목 피치 (Y) — 구면 손목 2/3 ───────────────── -->
+  <joint name="joint6" type="revolute">
+    <parent link="link5"/>
+    <child link="link6"/>
+    <origin xyz="0 0 0.05" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.86" upper="1.86" effort="20" velocity="4.0"/>
+  </joint>
+  <link name="link6">
+    <visual>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><box size="0.05 0.05 0.05"/></geometry>
+      <material name="shell_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><box size="0.05 0.05 0.05"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.3"/>
+      <inertia ixx="0.001" iyy="0.001" izz="0.001" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── J7: 공구 롤 (Z, 플랜지) — 구면 손목 3/3 ─────────── -->
+  <joint name="joint7" type="revolute">
+    <parent link="link6"/>
+    <child link="link7"/>
+    <origin xyz="0 0 0.05" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.05" upper="3.05" effort="10" velocity="5.0"/>
+  </joint>
+  <!-- link7 = 손바닥(palm). 손가락 3개가 이 링크에 120° 간격으로 붙는다. -->
+  <link name="link7">
+    <visual>
+      <origin xyz="0 0 0.013" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.05" length="0.026"/></geometry>
+      <material name="joint_dark"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.013" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.05" length="0.026"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.25"/>
+      <inertia ixx="0.0005" iyy="0.0005" izz="0.0005" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ── 3지 클로 그리퍼 ────────────────────────────────────────────────
+       axis="0 -1 0"은 각 손가락 프레임에서 "국소 +Z(뻗은 방향)를 국소 -X(축 방향
+       안쪽)로" 기울인다 → 양수 = 닫힘, 음수 = 열림.
+       링크마다 프리미티브 2개: 근위 마디(곧은 박스) + 끝마디 패드(안쪽 -0.75 rad 기울임).
+       패드 기울기가 접촉 법선에 축 방향 성분을 주어 사물을 받쳐 가둔다 (파일 헤더 근거). -->
+
+  <!-- finger_a: 0° -->
+  <joint name="finger_a_joint" type="revolute">
+    <parent link="link7"/>
+    <child link="finger_a"/>
+    <origin xyz="0.04 0 0.026" rpy="0 0 0"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.70" upper="0.05" effort="10" velocity="2.0"/>
+  </joint>
+  <link name="finger_a">
+    <visual>
+      <origin xyz="0 0 0.029" rpy="0 0 0"/>
+      <geometry><box size="0.016 0.026 0.058"/></geometry>
+      <material name="shell_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.029" rpy="0 0 0"/>
+      <geometry><box size="0.016 0.026 0.058"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.0116 0 0.0704" rpy="0 -0.75 0"/>
+      <geometry><box size="0.013 0.024 0.034"/></geometry>
+      <material name="pad_charcoal"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.0116 0 0.0704" rpy="0 -0.75 0"/>
+      <geometry><box size="0.013 0.024 0.034"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.06"/>
+      <inertia ixx="0.0001" iyy="0.0001" izz="0.0001" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- finger_b: 120° -->
+  <joint name="finger_b_joint" type="revolute">
+    <parent link="link7"/>
+    <child link="finger_b"/>
+    <origin xyz="-0.02 0.034641 0.026" rpy="0 0 2.094395"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.70" upper="0.05" effort="10" velocity="2.0"/>
+  </joint>
+  <link name="finger_b">
+    <visual>
+      <origin xyz="0 0 0.029" rpy="0 0 0"/>
+      <geometry><box size="0.016 0.026 0.058"/></geometry>
+      <material name="shell_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.029" rpy="0 0 0"/>
+      <geometry><box size="0.016 0.026 0.058"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.0116 0 0.0704" rpy="0 -0.75 0"/>
+      <geometry><box size="0.013 0.024 0.034"/></geometry>
+      <material name="pad_charcoal"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.0116 0 0.0704" rpy="0 -0.75 0"/>
+      <geometry><box size="0.013 0.024 0.034"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.06"/>
+      <inertia ixx="0.0001" iyy="0.0001" izz="0.0001" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- finger_c: 240° -->
+  <joint name="finger_c_joint" type="revolute">
+    <parent link="link7"/>
+    <child link="finger_c"/>
+    <origin xyz="-0.02 -0.034641 0.026" rpy="0 0 4.188790"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.70" upper="0.05" effort="10" velocity="2.0"/>
+  </joint>
+  <link name="finger_c">
+    <visual>
+      <origin xyz="0 0 0.029" rpy="0 0 0"/>
+      <geometry><box size="0.016 0.026 0.058"/></geometry>
+      <material name="shell_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.029" rpy="0 0 0"/>
+      <geometry><box size="0.016 0.026 0.058"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.0116 0 0.0704" rpy="0 -0.75 0"/>
+      <geometry><box size="0.013 0.024 0.034"/></geometry>
+      <material name="pad_charcoal"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.0116 0 0.0704" rpy="0 -0.75 0"/>
+      <geometry><box size="0.013 0.024 0.034"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.06"/>
+      <inertia ixx="0.0001" iyy="0.0001" izz="0.0001" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+</robot>

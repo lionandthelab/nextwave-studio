@@ -14,6 +14,7 @@ import type {
   ColliderSpec,
   ControlSequence,
   ControlStep,
+  ConveyorSpec,
   Easing,
   EntitySpec,
   PhysicsSpec,
@@ -197,11 +198,48 @@ export const visualSpecSchema = z.object({
   primitive: colliderShapeSchema.optional(),
   color: z.string().optional(),
   packages: z.record(z.string(), z.string()).optional(),
+  opacity: z
+    .number()
+    .finite('visual.opacity는 유한한 수여야 합니다')
+    .min(0, 'visual.opacity는 0 이상이어야 합니다')
+    .max(1, 'visual.opacity는 1 이하여야 합니다')
+    .optional(),
+  edges: z.boolean().optional(),
 });
 
 // ── 4. Entity ───────────────────────────────────────────────────────
 
 const entityIdSchema = z.string().min(1, 'id는 비어 있지 않은 문자열이어야 합니다');
+
+/**
+ * 컨베이어 벨트 표면 구동 (DATA_MODEL §4.2).
+ *
+ * direction의 **수평 성분이 0이면 거부**한다: 벨트 방향은 XZ 평면에서 정규화되므로
+ * 순수 수직 방향([0,1,0])은 정규화 자체가 불가능해 조용히 "속도 0인 벨트"가 된다.
+ * 데이터가 표현할 수 없는 것을 조용히 무시하는 대신 여기서 사람이 읽을 이유를 준다.
+ */
+export const conveyorSpecSchema = z
+  .object({
+    direction: vec3Schema,
+    speedMps: z
+      .number()
+      .finite('conveyor.speedMps는 유한한 수여야 합니다')
+      .positive('conveyor.speedMps는 0보다 커야 합니다'),
+    recycle: z.boolean().optional(),
+  })
+  .superRefine((conveyor, ctx) => {
+    // 구조분해 이름에 주의: 이 모듈의 `z`는 zod다 — 좌표를 z로 받으면 zod를 가린다
+    const [dirX, , dirZ] = conveyor.direction;
+    if (Math.hypot(dirX, dirZ) === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['direction'],
+        message:
+          'conveyor.direction의 수평(XZ) 성분이 0입니다 — 벨트 방향은 수평면에서 정규화되므로 ' +
+          '[0, 1, 0] 같은 수직 방향은 표현할 수 없습니다',
+      });
+    }
+  });
 
 /** robot/object/static 공통 필드 (type/visual은 변형별로 재정의) */
 const entityBaseShape = {
@@ -210,6 +248,7 @@ const entityBaseShape = {
   visual: visualSpecSchema,
   physics: physicsSpecSchema.optional(),
   tags: z.array(z.string()).optional(),
+  conveyor: conveyorSpecSchema.optional(),
 };
 
 const objectEntitySchema = z.object({ ...entityBaseShape, type: z.literal('object') });
@@ -282,6 +321,67 @@ export const sceneSpecSchema = z
         });
       } else {
         firstIndexById.set(entity.id, index);
+      }
+    });
+
+    // 교차 규칙: conveyor는 **정적 고정 박스 표면**에만 붙는다 (DATA_MODEL §4.2)
+    //
+    // 셋 다 조용한 오작동을 막기 위한 것이다:
+    // - type/bodyType이 정적·fixed가 아니면 벨트 자신이 물리에 밀려 씬을 떠난다.
+    // - collider가 box가 아니면 벨트의 **길이·폭**을 알 수 없다 — 재순환(recycle)이
+    //   되돌릴 지점을 계산할 근거가 사라진다.
+    // - sensor 표면은 접촉이 성립하지 않아 실어 나를 대상이 영원히 0개다.
+    scene.entities.forEach((entity, index) => {
+      if (entity.conveyor === undefined) return;
+      const at = (field: string): (string | number)[] => ['entities', index, field];
+
+      if (entity.type !== 'static') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: at('conveyor'),
+          message: `conveyor는 type 'static' 엔티티에만 붙습니다 (현재 '${entity.type}') — 벨트는 움직이지 않고 표면만 흐릅니다`,
+        });
+      }
+      const physics = entity.physics;
+      if (physics === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: at('conveyor'),
+          message: 'conveyor 엔티티에는 physics(고정 박스 collider)가 필요합니다 — 실어 나를 접촉면이 없습니다',
+        });
+        return;
+      }
+      if (physics.bodyType !== 'fixed') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: at('physics'),
+          message: `conveyor 엔티티의 bodyType은 'fixed'여야 합니다 (현재 '${physics.bodyType}') — 벨트가 물리에 밀려 떠내려갑니다`,
+        });
+      }
+      const belt = physics.colliders[0];
+      if (belt === undefined) {
+        // physicsSpecSchema는 colliders 배열의 최소 길이를 요구하지 않는다 — 빈 배열이면
+        // 여기서 조용히 통과한 뒤 scene-loader가 로드 시점에 던진다(검증의 의미 상실).
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['entities', index, 'physics', 'colliders'],
+          message: 'conveyor 엔티티에는 벨트 표면 collider(box)가 최소 1개 필요합니다',
+        });
+        return;
+      }
+      if (belt.shape.kind !== 'box') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['entities', index, 'physics', 'colliders', 0, 'shape'],
+          message: `conveyor 벨트 표면은 box collider여야 합니다 (현재 '${belt.shape.kind}') — 벨트 길이/폭을 알 수 없으면 재순환 지점을 계산할 수 없습니다`,
+        });
+      }
+      if (belt.isSensor === true) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['entities', index, 'physics', 'colliders', 0, 'isSensor'],
+          message: 'conveyor 벨트 표면은 sensor일 수 없습니다 — 접촉이 성립하지 않아 실어 나를 대상이 0개가 됩니다',
+        });
       }
     });
   });
@@ -530,6 +630,7 @@ type _ColliderShapeOut = MustAssign<z.infer<typeof colliderShapeSchema>, Collide
 type _BodyTypeOut = MustAssign<z.infer<typeof bodyTypeSchema>, BodyType>;
 type _ColliderGroupOut = MustAssign<z.infer<typeof colliderGroupSchema>, ColliderGroup>;
 type _ColliderSpecOut = MustAssign<z.infer<typeof colliderSpecSchema>, ColliderSpec>;
+type _ConveyorSpecOut = MustAssign<z.infer<typeof conveyorSpecSchema>, ConveyorSpec>;
 type _PhysicsSpecOut = MustAssign<z.infer<typeof physicsSpecSchema>, PhysicsSpec>;
 type _VisualSpecOut = MustAssign<z.infer<typeof visualSpecSchema>, VisualSpec>;
 type _EntitySpecOut = MustAssign<z.infer<typeof entitySpecSchema>, EntitySpec>;

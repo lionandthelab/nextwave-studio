@@ -1,0 +1,666 @@
+{
+  "name": "l-line-cell",
+  "version": 1,
+  "gravity": [
+    0,
+    -9.81,
+    0
+  ],
+  "timestepHz": 240,
+  "environment": {
+    "ground": true,
+    "skyColor": "#151a24"
+  },
+  "camera": {
+    "position": [
+      1.15,
+      0.95,
+      1.25
+    ],
+    "target": [
+      0.18,
+      0.06,
+      0.22
+    ]
+  },
+  "entities": [
+    {
+      "id": "belt_in",
+      "type": "static",
+      "transform": {
+        "position": [
+          -0.05,
+          0.015,
+          0.0
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.65,
+            0.015,
+            0.06
+          ]
+        },
+        "color": "#4a5568"
+      },
+      "physics": {
+        "bodyType": "fixed",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.65,
+                0.015,
+                0.06
+              ]
+            },
+            "friction": 0.8,
+            "group": "ENV",
+            "collidesWith": [
+              "ROBOT",
+              "OBJECT"
+            ],
+            "emitEvents": true
+          }
+        ]
+      },
+      "conveyor": {
+        "direction": [
+          1,
+          0,
+          0
+        ],
+        "speedMps": 0.1,
+        "recycle": false
+      }
+    },
+    {
+      "id": "belt_out",
+      "type": "static",
+      "transform": {
+        "position": [
+          0.63,
+          0.015,
+          0.27
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.09,
+            0.015,
+            0.33
+          ]
+        },
+        "color": "#4a5568"
+      },
+      "physics": {
+        "bodyType": "fixed",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.09,
+                0.015,
+                0.33
+              ]
+            },
+            "friction": 0.8,
+            "group": "ENV",
+            "collidesWith": [
+              "ROBOT",
+              "OBJECT"
+            ],
+            "emitEvents": true
+          }
+        ]
+      },
+      "conveyor": {
+        "direction": [
+          0,
+          0,
+          1
+        ],
+        "speedMps": 0.12,
+        "recycle": false
+      }
+    },
+    {
+      "id": "rail_outer",
+      "type": "static",
+      "transform": {
+        "position": [
+          0.735,
+          0.055,
+          0.27
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.015,
+            0.04,
+            0.33
+          ]
+        },
+        "color": "#c98a2e"
+      },
+      "physics": {
+        "bodyType": "fixed",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.015,
+                0.04,
+                0.33
+              ]
+            },
+            "friction": 0.15,
+            "group": "ENV",
+            "collidesWith": [
+              "ROBOT",
+              "OBJECT"
+            ],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "rail_inner",
+      "type": "static",
+      "transform": {
+        "position": [
+          0.525,
+          0.05,
+          0.21
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.015,
+            0.02,
+            0.15
+          ]
+        },
+        "color": "#c98a2e"
+      },
+      "physics": {
+        "bodyType": "fixed",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.015,
+                0.02,
+                0.15
+              ]
+            },
+            "friction": 0.15,
+            "group": "ENV",
+            "collidesWith": [
+              "ROBOT",
+              "OBJECT"
+            ],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "gate_press",
+      "type": "static",
+      "tags": [
+        "detection-zone"
+      ],
+      "transform": {
+        "position": [
+          -0.05,
+          0.05,
+          0.0
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.02,
+            0.05,
+            0.06
+          ]
+        },
+        "color": "#e0a33e",
+        "opacity": 0.22,
+        "edges": true
+      },
+      "physics": {
+        "bodyType": "fixed",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.02,
+                0.05,
+                0.06
+              ]
+            },
+            "isSensor": true,
+            "group": "SENSOR_ZONE",
+            "collidesWith": [
+              "OBJECT"
+            ],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "gate_pick",
+      "type": "static",
+      "tags": [
+        "detection-zone"
+      ],
+      "transform": {
+        "position": [
+          0.63,
+          0.05,
+          0.47
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.09,
+            0.05,
+            0.02
+          ]
+        },
+        "color": "#e0a33e",
+        "opacity": 0.22,
+        "edges": true
+      },
+      "physics": {
+        "bodyType": "fixed",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.09,
+                0.05,
+                0.02
+              ]
+            },
+            "isSensor": true,
+            "group": "SENSOR_ZONE",
+            "collidesWith": [
+              "OBJECT"
+            ],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "zone_handoff",
+      "type": "static",
+      "tags": [
+        "detection-zone"
+      ],
+      "transform": {
+        "position": [
+          0.4501,
+          0.006,
+          0.4823
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.045,
+            0.006,
+            0.045
+          ]
+        },
+        "color": "#2fbf8f",
+        "opacity": 0.22,
+        "edges": true
+      },
+      "physics": {
+        "bodyType": "fixed",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.045,
+                0.006,
+                0.045
+              ]
+            },
+            "isSensor": true,
+            "group": "SENSOR_ZONE",
+            "collidesWith": [
+              "OBJECT"
+            ],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "zone_pallet",
+      "type": "static",
+      "tags": [
+        "detection-zone"
+      ],
+      "transform": {
+        "position": [
+          0.4508,
+          0.006,
+          0.5835
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.045,
+            0.006,
+            0.045
+          ]
+        },
+        "color": "#3d7fd6",
+        "opacity": 0.22,
+        "edges": true
+      },
+      "physics": {
+        "bodyType": "fixed",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.045,
+                0.006,
+                0.045
+              ]
+            },
+            "isSensor": true,
+            "group": "SENSOR_ZONE",
+            "collidesWith": [
+              "OBJECT"
+            ],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "press",
+      "type": "robot",
+      "transform": {
+        "position": [
+          -0.05,
+          0,
+          -0.26
+        ]
+      },
+      "visual": {
+        "kind": "urdf",
+        "ref": "assets/robots/scara4/scara4.urdf"
+      },
+      "urdf": "assets/robots/scara4/scara4.urdf",
+      "controller": "sequence",
+      "linkColliders": "fromVisual",
+      "selfCollision": false,
+      "home": {
+        "joint1": 0.0,
+        "joint2": -1.0,
+        "joint3": 0.0,
+        "joint4": 0.0
+      },
+      "gripper": {
+        "joints": [
+          "suction_joint"
+        ],
+        "open": 0.0,
+        "close": 0.012
+      }
+    },
+    {
+      "id": "picker",
+      "type": "robot",
+      "transform": {
+        "position": [
+          0.29,
+          0,
+          0.5
+        ]
+      },
+      "visual": {
+        "kind": "urdf",
+        "ref": "assets/robots/arm6/arm6.urdf"
+      },
+      "urdf": "assets/robots/arm6/arm6.urdf",
+      "controller": "sequence",
+      "linkColliders": "fromVisual",
+      "selfCollision": false,
+      "home": {
+        "joint1": 0.0,
+        "joint2": -0.6,
+        "joint3": 1.2,
+        "joint5": -0.6,
+        "joint6": 0
+      },
+      "gripper": {
+        "joints": [
+          "finger_left_joint",
+          "finger_right_joint"
+        ],
+        "open": 0.03,
+        "close": 0.0
+      }
+    },
+    {
+      "id": "palletizer",
+      "type": "robot",
+      "transform": {
+        "position": [
+          0.49,
+          0,
+          0.8
+        ]
+      },
+      "visual": {
+        "kind": "urdf",
+        "ref": "assets/robots/cobot7/cobot7.urdf"
+      },
+      "urdf": "assets/robots/cobot7/cobot7.urdf",
+      "controller": "sequence",
+      "linkColliders": "fromVisual",
+      "selfCollision": false,
+      "home": {
+        "joint1": 0.0,
+        "joint2": 0.7,
+        "joint3": 0.0,
+        "joint4": 1.1,
+        "joint5": 0.0,
+        "joint6": 1.34,
+        "joint7": 0.0
+      },
+      "gripper": {
+        "joints": [
+          "finger_a_joint",
+          "finger_b_joint",
+          "finger_c_joint"
+        ],
+        "open": -0.65,
+        "close": 0.05
+      }
+    },
+    {
+      "id": "item_a",
+      "type": "object",
+      "transform": {
+        "position": [
+          -0.09,
+          0.055,
+          0.0
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.025,
+            0.025,
+            0.025
+          ]
+        },
+        "color": "#c0392b"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.025,
+                0.025,
+                0.025
+              ]
+            },
+            "friction": 1.6,
+            "group": "OBJECT",
+            "collidesWith": [
+              "ENV",
+              "ROBOT",
+              "OBJECT",
+              "SENSOR_ZONE"
+            ],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "item_b",
+      "type": "object",
+      "transform": {
+        "position": [
+          -0.37,
+          0.055,
+          0.0
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.025,
+            0.025,
+            0.025
+          ]
+        },
+        "color": "#8e44ad"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.025,
+                0.025,
+                0.025
+              ]
+            },
+            "friction": 1.6,
+            "group": "OBJECT",
+            "collidesWith": [
+              "ENV",
+              "ROBOT",
+              "OBJECT",
+              "SENSOR_ZONE"
+            ],
+            "emitEvents": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "item_c",
+      "type": "object",
+      "transform": {
+        "position": [
+          -0.65,
+          0.055,
+          0.0
+        ]
+      },
+      "visual": {
+        "kind": "primitive",
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.025,
+            0.025,
+            0.025
+          ]
+        },
+        "color": "#2980b9"
+      },
+      "physics": {
+        "bodyType": "dynamic",
+        "colliders": [
+          {
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.025,
+                0.025,
+                0.025
+              ]
+            },
+            "friction": 1.6,
+            "group": "OBJECT",
+            "collidesWith": [
+              "ENV",
+              "ROBOT",
+              "OBJECT",
+              "SENSOR_ZONE"
+            ],
+            "emitEvents": true
+          }
+        ]
+      }
+    }
+  ]
+}

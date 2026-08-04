@@ -79,6 +79,8 @@ interface VisualSpec {
   primitive?: ColliderShape;   // kind==='primitive'일 때 형상
   color?: string;              // primitive/mesh 색 (예: '#c0392b')
   packages?: Record<string, string>; // URDF: ROS 패키지명 → 경로 매핑
+  opacity?: number;            // 0..1 (기본 1). 감지 존을 통과 가능해 보이게 — §4.1-b
+  edges?: boolean;             // 모서리 선을 덧그린다 (반투명 부피의 경계) — §4.1-b
 }
 ```
 
@@ -93,9 +95,23 @@ interface EntitySpec {
   transform: Transform;        // 초기 배치
   visual: VisualSpec;
   physics?: PhysicsSpec;       // static 장식은 생략 가능
-  tags?: string[];             // 그룹핑/쿼리용 자유 태그
+  tags?: string[];             // 그룹핑/쿼리용 자유 태그 (예약: 'detection-zone')
 }
 ```
+
+**예약 태그 `'detection-zone'`** (`schema/types.ts`의 `DETECTION_ZONE_TAG`) — "이 정적
+엔티티는 **통과 가능한 것이 의도**"라는 명시적 선언이다.
+
+`isSensor`나 그룹만으로는 의도와 실수를 구분할 수 없다. 단단해야 할 장애물을 sensor로
+만들면 화면엔 상자가 보이는데 로봇도 사물도 그냥 지나가고, `collidesWith`에 `ROBOT`이
+없으면 **접촉 이벤트조차 나지 않아** 충돌 로그에도 흔적이 남지 않는다 — pick-and-place의
+`drop_zone`이 정확히 그 상태였다(하나의 상자가 "도착 감지"와 "선반" 두 역할을 겸했다).
+지금은 둘로 나뉘어 있다: 감지는 `drop_zone`(sensor + 태그), 실체는 `drop_shelf`(ENV 고체).
+
+규칙(`core/sample-scenes.test.ts`가 모든 샘플 씬에 강제):
+- 태그가 붙은 엔티티의 collider는 **반드시** `isSensor: true` + `SENSOR_ZONE` 그룹이다.
+- 태그가 없는 `fixed` 엔티티의 collider는 sensor이면 **안 되고**, 로봇이 있는 씬이라면
+  `collidesWith`에 `ROBOT`이 있고 `emitEvents: true`여야 한다.
 
 ### 4.1 Robot (Entity 확장)
 
@@ -121,6 +137,77 @@ interface RobotSpec extends EntitySpec {
   };
 }
 ```
+
+### 4.1-b 감지 존의 표현 규약 (VisualSpec.opacity / edges)
+
+`isSensor` collider는 **통과 가능**하다(§5). 그것을 불투명한 상자로 그리면 화면이
+"단단한 벽"이라고 말하고, 사용자는 관통을 결함으로 읽는다(실제 보고). 그래서 감지 존은
+**반투명(`opacity`) + 모서리 선(`edges`)** 으로 그린다 — 트리거 볼륨을 표현하는 3D
+도구들의 공통 관례다.
+
+```jsonc
+"visual": {
+  "kind": "primitive",
+  "primitive": { "kind": "box", "halfExtents": [0.09, 0.006, 0.07] },
+  "color": "#2fbf8f",
+  "opacity": 0.22,   // 통과 가능함을 형태로 말한다
+  "edges": true      // 반투명 면만으로는 묻히는 경계를 세운다
+}
+```
+
+두 필드는 **순수 표현**이며 물리에 영향하지 않는다. 렌더 구현은 반투명일 때
+`depthWrite`를 끄고(뒷면이 앞면을 지워 속 빈 껍데기가 되는 것 방지), 양면을 그리며,
+그림자를 드리우지 않는다(그림자가 있으면 다시 단단해 보인다).
+
+**역할이 다르면 형태와 색도 달라야 한다.** 샘플 씬의 규약: 통과 감지(포토아이)는
+호박색 세로 빔 + 장식 기둥, 도착 감지는 청록색 바닥 패드. 장식 기둥은 `physics`를
+갖지 않는다 — 물리를 주면 로봇 작업 반경에 새 장애물이 생긴다.
+
+### 4.2 Conveyor (Entity 옵션 블록)
+
+```ts
+interface ConveyorSpec {
+  direction: Vec3;    // 벨트 진행 방향 — **엔티티 로컬**, 수평(XZ) 성분만 사용(정규화)
+  speedMps: number;   // 벨트 표면 속도 (m/s, > 0)
+  recycle?: boolean;  // 끝에 도달한 사물을 시작점으로 되돌린다 (기본 false)
+}
+```
+
+정적(fixed) 벨트 **표면**이 위에 닿은 동적 사물을 실어 나른다. 벨트 자신은 움직이지 않는다 —
+실제 컨베이어처럼 프레임은 고정이고 표면만 흐른다.
+
+**왜 표면 속도인가.** Rapier에는 surface velocity 개념이 없다. 대안 둘은 모두 탈락한다:
+벨트 바디를 `kinematicVelocity`로 굴리면 벨트가 씬 밖으로 날아가고, 무한궤도를 여러 조각의
+바디로 만들면 접촉 수가 폭발하고 조각 경계마다 사물이 걸린다. 그래서 매 물리 스텝 **직전**에
+접촉 중인 동적 바디를 직접 구동한다 (`core/conveyor.ts`).
+
+**진행축만 지정한다.** 수평 속도를 통째로 덮어쓰면 벨트가 로봇을 이긴다 — 측면 성분이 매
+스텝 0으로 지워져, 팔이 사물을 벨트 밖으로 밀어도 240 Hz로 되돌려진다(실측: 2초를 밀어도
+z가 5 mm). 진행축은 벨트가 지정하고 **측면·수직은 보존**한다. 실제 컨베이어도 그렇다.
+
+**재순환은 스폰이 아니다.** "물건이 계속 온다"를 런타임 엔티티 생성으로 구현하면 SceneSpec이
+진실이라는 불변식(§2.5)이 깨진다 — 스펙에 없는 엔티티가 씬에 생기고, 충돌 로그·Undo·저장·
+인스펙터가 그것을 설명할 수 없다. 대신 씬에 선언된 N개가 벨트 끝에서 시작점으로 돌아간다.
+되돌리기 판정은 세 조건을 **모두** 만족할 때만이다: 진행축으로 끝을 확실히 지났고, 측면으로
+벨트 폭 근처이며, 벨트 상면보다 크게 높지 않다. 세 번째가 없으면 **로봇이 집어 든 사물이
+손에서 사라진다**.
+
+교차 규칙 (`validateScene`이 강제 — 전부 조용한 오작동을 막기 위한 것):
+
+| 규칙 | 어기면 |
+|-----|-------|
+| `type: 'static'` | 벨트 자신이 물리에 밀려 씬을 떠난다 |
+| `physics.bodyType: 'fixed'` | 같음 |
+| `colliders[0].shape.kind === 'box'` | 벨트 길이/폭을 몰라 재순환 지점을 계산할 수 없다 |
+| `colliders[0].isSensor !== true` | 접촉이 성립하지 않아 실어 나를 대상이 영원히 0개 |
+| `direction`의 수평 성분 ≠ 0 | 정규화 불가 — 조용히 "속도 0인 벨트"가 된다 |
+
+**기하는 빌드 시점에 고정된다** (진행축·반길이·상면 높이). 성능을 위한 선택이므로, 배치가
+바뀌는 편집 경로는 바인딩을 다시 만들어야 한다 — `SceneEditor.updateTransform`이
+`refreshConveyor`를, `updateDimensions/updatePhysics/renameEntity`는 재빌드가 처리한다.
+이 계약이 깨지면 화면의 벨트는 옮겨졌는데 사물은 옛 자리의 진행축으로 실려 간다.
+
+예시는 `src/assets/scenes/conveyor-pick-place.scene.json`.
 
 ---
 

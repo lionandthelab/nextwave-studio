@@ -593,11 +593,22 @@ export function mountWorkspace(host: HTMLElement): WorkspaceHandle {
     minHeight: '0',
     position: 'relative',
     overflow: 'hidden',
+    // 프로그래매틱 포커스(아래 pointerdown)에는 링을 그리지 않는다 — 클릭할 때마다
+    // 3D 화면 전체가 테두리로 둘러싸이면 시각 소음이다. 키보드 진입은 스킵 링크와
+    // 패널 위젯이 담당하므로 이 슬롯이 탭 순서에 들어갈 필요는 없다(tabIndex -1).
+    outline: 'none',
   });
   viewportSlot.setAttribute('role', 'region');
   viewportSlot.setAttribute('aria-label', '3D 뷰포트');
   viewportSlot.dataset.testid = 'workspace-viewport';
   viewportSlot.setAttribute(SCOPE_ATTR, 'viewport');
+  // 스코프 선언만으로는 부족하다: 단축키 라우터는 **활성 요소**에서 스코프를 거슬러
+  // 찾으므로, 3D 화면을 클릭해도 포커스가 body에 남으면 뷰포트 바인딩(W/E/R·방향키)이
+  // 영영 선택되지 않는다. 클릭 = "여기서 작업한다"는 선언으로 보고 포커스를 준다.
+  viewportSlot.tabIndex = -1;
+  viewportSlot.addEventListener('pointerdown', () => {
+    if (!viewportSlot.contains(document.activeElement)) viewportSlot.focus();
+  });
 
   const flowGraphPane = styled(document.createElement('section'), {
     gridRow: '3',

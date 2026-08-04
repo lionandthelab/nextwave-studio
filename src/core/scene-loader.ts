@@ -36,6 +36,7 @@ import type {
   PhysicsWorld,
   Pose,
 } from './types';
+import { ConveyorBinding, ConveyorRegistry, rotateVec3 } from './conveyor';
 import type { RobotFkView } from './robot-types';
 import { RobotBinding, RobotRegistry } from './robots';
 import type { RenderSync } from './sync';
@@ -64,7 +65,7 @@ export type VisualNode = Parameters<RenderSync['bind']>[1];
  * prev 스냅샷을 갱신하는 데 쓴다 — 갱신하지 않으면 paused 프레임의 apply(alpha<1)가
  * 편집 전 pose를 계속 보간해 그린다 (SceneHandle.reset()과 동일 계약, CLAUDE.md §2.1).
  */
-export type RenderSyncLike = Pick<RenderSync, 'bind' | 'unbind' | 'commit'>;
+export type RenderSyncLike = Pick<RenderSync, 'bind' | 'unbind' | 'commit' | 'apply'>;
 
 // ── 로봇 핸들 (core 쪽 구조적 계약) ─────────────────────────────────
 // render/urdf.ts의 RobotHandle과 구조적으로 동일하지만, core → render import를 만들지
@@ -89,8 +90,16 @@ export interface RobotLoadRequest {
 // no-op 구현으로 대체 가능하다 — scene-loader는 three 없이도 완결적으로 동작한다.
 
 export interface RenderSceneApi {
-  /** 프리미티브 형상 시각 메시를 생성해 씬 루트의 직접 자식으로 추가한다 (sync 바인딩 계약). */
-  addPrimitive(shape: ColliderShape, color: string | undefined): VisualNode;
+  /**
+   * 프리미티브 형상 시각 메시를 생성해 씬 루트의 직접 자식으로 추가한다 (sync 바인딩 계약).
+   * `style`은 순수 표현 옵션(불투명도·모서리 선)이며 물리에 영향하지 않는다 — 감지 존을
+   * "통과 가능해 보이게" 그리는 용도다 (VisualSpec.opacity/edges 주석).
+   */
+  addPrimitive(
+    shape: ColliderShape,
+    color: string | undefined,
+    style?: { opacity?: number; edges?: boolean },
+  ): VisualNode;
   /** 바닥 시각 메시를 생성해 씬 루트에 추가한다. 메시 스스로 상면 y=0에 배치된다. */
   addGround(): VisualNode;
   /** 물리 바디가 없는 순수 시각 노드의 1회 배치 (불변식 §2.1의 "순수 시각 요소" 예외). */
@@ -161,6 +170,8 @@ export interface EntityBuildDeps {
   readonly sync: RenderSyncLike;
   /** 씬의 로봇 바인딩 보관소 — robot 엔티티 빌드가 등록/해제한다 */
   readonly robots: RobotRegistry;
+  /** 씬의 컨베이어 보관소 — conveyor 블록이 있는 엔티티 빌드가 등록/해제한다 */
+  readonly conveyors: ConveyorRegistry;
 }
 
 /** robot 엔티티 전용 레코드 (reset/편집이 사용) */
@@ -225,7 +236,7 @@ export function buildObjectEntity(entity: EntitySpec, deps: EntityBuildDeps): Bu
       `scene-loader: buildObjectEntity는 robot 엔티티('${entity.id}')를 처리하지 않습니다 — buildEntity를 사용하세요`,
     );
   }
-  const { world, renderApi, sync } = deps;
+  const { world, renderApi, sync, conveyors } = deps;
   const node = buildVisual(entity, renderApi);
   const physics = entity.physics;
 
@@ -261,8 +272,16 @@ export function buildObjectEntity(entity: EntitySpec, deps: EntityBuildDeps): Bu
     }
     // 물리 → 시각 단방향 동기화 등록 (트랜스폼의 진실은 물리 — 불변식 §2.1)
     sync.bind(bodyId, node);
+    // 컨베이어 표면 구동 등록 (DATA_MODEL §4.2). 벨트 기하는 빌드 시점 pose/collider에서
+    // 고정되므로, 편집으로 벨트가 움직이면 재빌드가 새 바인딩을 만든다.
+    registerConveyor(entity, deps);
   } catch (err) {
-    // 바디는 만들었으나 collider/바인딩에 실패 — 이 엔티티 몫만 되돌리고 재던짐
+    // 바디는 만들었으나 collider/바인딩/컨베이어 등록에 실패 — 이 엔티티 몫만 되돌린다.
+    // ★ unbind가 반드시 먼저다: sync.bind가 성공한 뒤 registerConveyor가 던지면
+    //   제거된 바디를 가리키는 바인딩이 남고, 다음 sync.commit()이 죽은 핸들로
+    //   world.getPose를 불러 씬 전체가 멈춘다. (bind가 마지막 문장이던 시절에는
+    //   생길 수 없던 경로다 — 뒤에 던질 수 있는 문장을 추가하면서 생겼다.)
+    sync.unbind(bodyId);
     world.removeEntity(entity.id);
     renderApi.remove(node);
     throw err;
@@ -279,10 +298,56 @@ export function buildObjectEntity(entity: EntitySpec, deps: EntityBuildDeps): Bu
     bound: true,
     dispose: (): void => {
       sync.unbind(bodyId);
+      conveyors.remove(entity.id);
       world.removeEntity(entity.id);
       renderApi.remove(node);
     },
   };
+}
+
+/**
+ * conveyor 블록이 있으면 벨트 바인딩을 등록한다 (없으면 no-op).
+ *
+ * SceneEditor도 이 함수를 쓴다: 벨트 기하(진행축·반길이·상면 높이)는 **빌드 시점의
+ * pose/collider에 고정**되므로, 배치가 바뀌면(updateTransform) 바인딩을 새 pose로 다시
+ * 만들어야 한다. 그렇지 않으면 화면의 벨트는 옮겨졌는데 사물은 옛 자리의 기하로 실려 간다.
+ *
+ * 벨트 표면은 colliders[0]의 box여야 한다 — validateScene이 이미 강제하지만
+ * (§4.2 교차 규칙), 파사드/편집 경로로 들어온 스펙에도 같은 전제가 필요하므로
+ * 여기서 한 번 더 확인하고 사람이 읽을 오류를 던진다.
+ */
+export function registerConveyor(entity: EntitySpec, deps: EntityBuildDeps): void {
+  const spec = entity.conveyor;
+  if (spec === undefined) return;
+  const shape = entity.physics?.colliders[0]?.shape;
+  if (shape === undefined || shape.kind !== 'box') {
+    throw new Error(
+      `scene-loader: 컨베이어 '${entity.id}'의 첫 collider는 box여야 합니다 ` +
+        `(현재 '${shape?.kind ?? '없음'}') — 벨트 길이/폭을 알 수 없으면 재순환 지점을 계산할 수 없습니다`,
+    );
+  }
+  // collider offset은 바디 로컬이다 — 벨트 판이 엔티티 원점에서 떨어져 있으면 기하
+  // (상면 높이·끝점)가 그만큼 어긋난다. 회전을 적용해 월드 중심으로 환산한다.
+  const rotation = cloneQuat(entity.transform.rotation ?? IDENTITY_QUAT);
+  const offset = entity.physics?.colliders[0]?.offset?.position;
+  const origin = entity.transform.position;
+  const center: Vec3 =
+    offset === undefined
+      ? cloneVec3(origin)
+      : (() => {
+          const world = rotateVec3(rotation, offset);
+          return [origin[0] + world[0], origin[1] + world[1], origin[2] + world[2]];
+        })();
+
+  deps.conveyors.add(
+    new ConveyorBinding({
+      world: deps.world,
+      entityId: entity.id,
+      spec,
+      halfExtents: cloneVec3(shape.halfExtents),
+      pose: { position: center, rotation },
+    }),
+  );
 }
 
 function buildVisual(entity: EntitySpec, renderApi: RenderSceneApi): VisualNode {
@@ -294,7 +359,10 @@ function buildVisual(entity: EntitySpec, renderApi: RenderSceneApi): VisualNode 
           `scene-loader: 엔티티 '${entity.id}'의 visual.kind가 'primitive'인데 visual.primitive 형상이 없습니다`,
         );
       }
-      return renderApi.addPrimitive(visual.primitive, visual.color);
+      return renderApi.addPrimitive(visual.primitive, visual.color, {
+        opacity: visual.opacity,
+        edges: visual.edges,
+      });
     }
     case 'urdf':
       throw new Error(
@@ -504,6 +572,12 @@ export interface SceneHandle {
   /** 씬의 로봇 바인딩 보관소 — Engine preStep 훅이 robots.tickAll()을 호출한다. */
   readonly robots: RobotRegistry;
   /**
+   * 씬의 컨베이어 보관소 — Engine preStep 훅이 conveyors.tickAll()을 호출한다.
+   * 로봇 FK push **뒤**에 돌아야 한다: 같은 tick에서 로봇이 사물을 밀고 벨트가 실어
+   * 나르면, 나중에 지정한 속도가 이긴다. 벨트 위에서는 벨트가 이기는 것이 자연스럽다.
+   */
+  readonly conveyors: ConveyorRegistry;
+  /**
    * 엔티티 id → 시각 노드 (프리미티브/바닥 등 비로봇 엔티티만 — 충돌 하이라이트용,
    * UX_DESIGN §3.3). 로봇의 시각은 RobotHandle이 소유하므로 여기 포함되지 않는다 —
    * 로봇 노드 매핑은 글루(main.ts)가 loadRobot 시점에 수집한다. 읽기 전용(순수 시각
@@ -549,11 +623,13 @@ export class SceneLoader {
    */
   async build(spec: SceneSpec): Promise<SceneHandle> {
     const robots = new RobotRegistry();
+    const conveyors = new ConveyorRegistry();
     const deps: EntityBuildDeps = {
       world: this.world,
       renderApi: this.renderApi,
       sync: this.sync,
       robots,
+      conveyors,
     };
     const built = new Map<EntityId, BuiltEntityHandle>();
     try {
@@ -585,6 +661,7 @@ export class SceneLoader {
     return {
       entityIds,
       robots,
+      conveyors,
       visualNodes,
       builtEntities: built,
       reset: (): void => {
@@ -610,6 +687,16 @@ export class SceneLoader {
             this.world.teleport(b.bodyId, b.initialPose);
           }
         }
+        // 컨베이어: 이송 이력을 버리고 다음 tick 구동을 한 번 건너뛴다. 접촉 그래프는
+        // 마지막 step()의 결과라 teleport 직후에는 **리셋 전 배치**를 가리킨다 —
+        // 그대로 구동하면 공중의 사물에 벨트 속도가 주입돼 되감기 재생이 최초 재생과
+        // 달라진다 (ConveyorBinding.skipDriveOnce 주석).
+        conveyors.resetAll();
+        // ★ 접촉 매니폴드를 버린다. teleport는 좌표만 되돌리고 솔버의 워밍스타트 임펄스는
+        // 남기므로, 그것 없이는 "같은 좌표에서 다시 시작"해도 직전 이력에 따라 결과가
+        // 갈린다 — 되감기가 결정론적 재생을 준비한다는 계약이 성립하지 않는다
+        // (실측 A/B: 새 월드 3/3 동일 vs 되감기 3회 중 2회 다름). PhysicsWorld 계약 주석 참조.
+        this.world.clearContactState();
         // prev 스냅샷을 텔레포트된 pose로 갱신 — 갱신하지 않으면 다음 물리 tick의
         // commit() 전까지 sync.apply(alpha<1)가 리셋 전 pose를 계속 그린다
         // ("three.js는 물리의 거울" 불변식 위반, CLAUDE.md §2.1).

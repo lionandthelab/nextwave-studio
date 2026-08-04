@@ -147,6 +147,8 @@ export class Engine {
   private readonly stepper: FixedStepper;
   private readonly deps: EngineDeps;
   private readonly tickListeners = new Set<EngineTickListener>();
+  /** 물리 tick당 통지 — onTick(rAF당 1회)과 별개다. onPhysicsTick 주석 참조. */
+  private readonly physicsTickListeners = new Set<EngineTickListener>();
 
   private _state: EngineState = 'idle';
   private _simTimeSec = 0;
@@ -255,6 +257,24 @@ export class Engine {
     };
   }
 
+  /**
+   * **물리 tick당** 1회 호출되는 콜백 등록 (onTick과 다르다). 반환값은 해제 함수.
+   *
+   * `onTick`은 rAF당 1회다 — 240Hz 물리에 60Hz 표본이므로 두 통지 사이에 4 tick이
+   * 지나가고, 프레임이 느리면 `MAX_FRAME_DT_SEC` 클램프 때문에 최대 24 tick을 건너뛴다.
+   * UI 리드아웃에는 충분하지만 **"특정 step의 첫 tick에서 무엇이 어디 있었나"** 같은
+   * 계측에는 쓸 수 없다 — 그 표본은 프레임 타이밍에 따라 매번 다른 순간을 잡는다
+   * (실측: 같은 씬·같은 초기 상태에서 놓기 거리가 0.019 / 0.021 / 0.044로 갈렸다).
+   *
+   * 통지 시점은 tick의 **끝**이다 — 리스너는 그 tick의 물리 결과(step 후 pose)를 본다.
+   */
+  onPhysicsTick(listener: EngineTickListener): () => void {
+    this.physicsTickListeners.add(listener);
+    return () => {
+      this.physicsTickListeners.delete(listener);
+    };
+  }
+
   // ── 내부 루프 ─────────────────────────────────────────────────────
 
   private readonly frame = (nowMs: number): void => {
@@ -286,6 +306,15 @@ export class Engine {
     const contacts = this.deps.world.step();
     this.deps.hooks?.onContacts?.(contacts, this._simTimeSec);
     this._simTimeSec += dtSec;
+    this.emitPhysicsTick();
+  }
+
+  private emitPhysicsTick(): void {
+    if (this.physicsTickListeners.size === 0) return;
+    const info: EngineTickInfo = { state: this._state, simTimeSec: this._simTimeSec };
+    for (const listener of this.physicsTickListeners) {
+      listener(info);
+    }
   }
 
   private emitTick(): void {

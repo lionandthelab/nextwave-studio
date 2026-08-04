@@ -62,9 +62,56 @@ export interface VisualSpec {
   primitive?: ColliderShape;          // kind==='primitive'일 때 형상
   color?: string;                     // primitive/mesh 색 (예: '#c0392b')
   packages?: Record<string, string>;  // URDF: ROS 패키지명 → 경로 매핑
+  /**
+   * 불투명도 0..1 (기본 1 = 불투명).
+   *
+   * **감지 존을 눈으로 구분하기 위해 존재한다.** sensor collider는 물리적으로 통과
+   * 가능한데(§5) 불투명한 상자로 그리면 화면은 "단단한 벽"이라고 말한다 — 사용자가
+   * 관통을 결함으로 읽는다(실제 사용자 보고). 통과 가능한 것은 통과 가능해 보여야 한다.
+   */
+  opacity?: number;
+  /**
+   * 형상의 모서리를 선으로 덧그린다 (기본 false).
+   *
+   * 반투명만으로는 얇은 부피가 배경에 묻힌다. 모서리 선이 있으면 "여기까지가 이 영역"의
+   * 경계가 읽히고, 반투명 면과 합쳐져 **부피(volume)** 로 보인다 — 트리거 볼륨을 그리는
+   * 3D 도구들의 공통 관례(Unity trigger gizmo, Isaac Sim trigger volume).
+   */
+  edges?: boolean;
 }
 
 // ── 4. Entity ───────────────────────────────────────────────────────
+
+/**
+ * 컨베이어 벨트 (DATA_MODEL §4.2).
+ *
+ * 정적(fixed) 벨트 **표면**이 위에 닿아 있는 동적 사물을 일정 속도로 실어 나른다.
+ * 벨트 자체는 움직이지 않는다 — 실제 컨베이어와 같이 "표면 속도"만 갖는다. 물리적으로는
+ * 매 스텝 접촉 중인 동적 바디의 **수평 속도**를 벨트 속도로 지정하는 액추에이터다
+ * (수직 성분은 보존 — 중력/낙하가 그대로 살아 있다).
+ *
+ * 왜 바디를 움직이지 않는가: 벨트를 kinematicVelocity로 굴리면 벨트가 씬 밖으로 날아간다.
+ * 무한궤도를 흉내 내려면 표면만 흐르게 해야 하고, Rapier에는 표면 속도 개념이 없으므로
+ * 접촉 바디를 직접 구동한다 (core/conveyor.ts).
+ */
+export interface ConveyorSpec {
+  /**
+   * 벨트 진행 방향 — **엔티티 로컬** 기준. 엔티티 회전이 적용되므로 벨트를 돌리면
+   * 흐름도 함께 돈다. 수평(XZ) 성분만 쓰며 내부에서 정규화한다.
+   */
+  direction: Vec3;
+  /** 벨트 표면 속도 (m/s, > 0) */
+  speedMps: number;
+  /**
+   * 끝에 도달한 사물을 시작점으로 되돌린다 (기본 false).
+   *
+   * 켜면 씬에 선언된 N개의 사물이 무한히 순환한다 — **런타임에 엔티티를 생성하지 않고**
+   * "물건이 계속 오는 라인"을 표현한다. 런타임 스폰은 SceneSpec이 진실이라는 §2.5와
+   * 정면으로 부딪히고(스펙에 없는 엔티티가 씬에 생긴다), 충돌 로그·Undo·저장이 모두
+   * 그 엔티티를 설명할 수 없게 된다.
+   */
+  recycle?: boolean;
+}
 
 export interface EntitySpec {
   id: string;                    // 씬 내 유일. 충돌 로그/제어 참조 키
@@ -72,8 +119,21 @@ export interface EntitySpec {
   transform: Transform;          // 초기 배치
   visual: VisualSpec;
   physics?: PhysicsSpec;         // static 장식은 생략 가능
-  tags?: string[];               // 그룹핑/쿼리용 자유 태그
+  tags?: string[];               // 그룹핑/쿼리용 자유 태그 (예약 태그: DETECTION_ZONE_TAG)
+  conveyor?: ConveyorSpec;       // 벨트 표면 구동 (static + fixed + box collider 전용)
 }
+
+/**
+ * 예약 태그 — "이 정적 엔티티는 **통과 가능한 것이 의도**다"라는 명시적 선언.
+ *
+ * 그룹(SENSOR_ZONE)이나 isSensor 플래그만으로는 의도와 실수를 구분할 수 없다. 단단해야
+ * 할 장애물을 sensor로 만들면 화면엔 상자가 보이는데 로봇도 사물도 그냥 지나가고,
+ * collidesWith에 ROBOT이 없으면 **이벤트조차 나지 않아** 충돌 로그에도 흔적이 없다
+ * (pick-and-place drop_zone의 실제 결함). 태그는 사람이 "그렇게 하려던 것"이라고 적는
+ * 유일한 지점이고, 태그 없는 sensor 정적 엔티티는 결함으로 간주한다
+ * (core/sample-scenes.test.ts가 강제).
+ */
+export const DETECTION_ZONE_TAG = 'detection-zone';
 
 export interface RobotSpec extends EntitySpec {
   type: 'robot';

@@ -1,29 +1,63 @@
 {
   "name": "collision-testbed",
   "version": 1,
-  "gravity": [0, -9.81, 0],
+  "gravity": [
+    0,
+    -9.81,
+    0
+  ],
   "timestepHz": 240,
-  "environment": { "ground": true, "skyColor": "#241a20" },
-  "camera": { "position": [2.3, 1.7, 2.4], "target": [-0.3, 0.25, 0] },
+  "environment": {
+    "ground": true,
+    "skyColor": "#241a20"
+  },
+  "camera": {
+    "position": [
+      2.3,
+      1.7,
+      2.4
+    ],
+    "target": [
+      -0.3,
+      0.25,
+      0
+    ]
+  },
   "entities": [
     {
       "id": "bouncer",
       "type": "object",
-      "transform": { "position": [0.6, 1.0, 0.55] },
+      "transform": {
+        "position": [
+          0.6,
+          1.0,
+          0.55
+        ]
+      },
       "visual": {
         "kind": "primitive",
-        "primitive": { "kind": "sphere", "radius": 0.05 },
+        "primitive": {
+          "kind": "sphere",
+          "radius": 0.05
+        },
         "color": "#27ae60"
       },
       "physics": {
         "bodyType": "dynamic",
         "colliders": [
           {
-            "shape": { "kind": "sphere", "radius": 0.05 },
+            "shape": {
+              "kind": "sphere",
+              "radius": 0.05
+            },
             "friction": 0.4,
             "restitution": 0.8,
             "group": "OBJECT",
-            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "collidesWith": [
+              "ENV",
+              "ROBOT",
+              "OBJECT"
+            ],
             "emitEvents": true
           }
         ]
@@ -33,22 +67,48 @@
       "id": "slide_ramp",
       "type": "static",
       "transform": {
-        "position": [-0.35, 0.2, -0.5],
-        "rotation": [0, 0, -0.149438132473599, 0.988771077936042]
+        "position": [
+          -0.35,
+          0.2,
+          -0.5
+        ],
+        "rotation": [
+          0,
+          0,
+          -0.149438132473599,
+          0.988771077936042
+        ]
       },
       "visual": {
         "kind": "primitive",
-        "primitive": { "kind": "box", "halfExtents": [0.3, 0.02, 0.12] },
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.3,
+            0.02,
+            0.12
+          ]
+        },
         "color": "#7f8c8d"
       },
       "physics": {
         "bodyType": "fixed",
         "colliders": [
           {
-            "shape": { "kind": "box", "halfExtents": [0.3, 0.02, 0.12] },
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.3,
+                0.02,
+                0.12
+              ]
+            },
             "friction": 0.05,
             "group": "ENV",
-            "collidesWith": ["ROBOT", "OBJECT"]
+            "collidesWith": [
+              "ROBOT",
+              "OBJECT"
+            ]
           }
         ]
       }
@@ -57,22 +117,50 @@
       "id": "slider",
       "type": "object",
       "transform": {
-        "position": [-0.545, 0.315, -0.5],
-        "rotation": [0, 0, -0.149438132473599, 0.988771077936042]
+        "position": [
+          -0.545,
+          0.315,
+          -0.5
+        ],
+        "rotation": [
+          0,
+          0,
+          -0.149438132473599,
+          0.988771077936042
+        ]
       },
       "visual": {
         "kind": "primitive",
-        "primitive": { "kind": "box", "halfExtents": [0.03, 0.03, 0.03] },
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.03,
+            0.03,
+            0.03
+          ]
+        },
         "color": "#2980b9"
       },
       "physics": {
         "bodyType": "dynamic",
         "colliders": [
           {
-            "shape": { "kind": "box", "halfExtents": [0.03, 0.03, 0.03] },
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.03,
+                0.03,
+                0.03
+              ]
+            },
             "friction": 0.05,
             "group": "OBJECT",
-            "collidesWith": ["ENV", "ROBOT", "OBJECT", "SENSOR_ZONE"],
+            "collidesWith": [
+              "ENV",
+              "ROBOT",
+              "OBJECT",
+              "SENSOR_ZONE"
+            ],
             "emitEvents": true
           }
         ]
@@ -81,20 +169,47 @@
     {
       "id": "slide_gate",
       "type": "static",
-      "transform": { "position": [0.12, 0.08, -0.5] },
+      "tags": [
+        "detection-zone"
+      ],
+      "transform": {
+        "position": [
+          0.12,
+          0.08,
+          -0.5
+        ]
+      },
       "visual": {
         "kind": "primitive",
-        "primitive": { "kind": "box", "halfExtents": [0.1, 0.08, 0.12] },
-        "color": "#1e4d40"
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.1,
+            0.08,
+            0.12
+          ]
+        },
+        "color": "#e0a33e",
+        "opacity": 0.22,
+        "edges": true
       },
       "physics": {
         "bodyType": "fixed",
         "colliders": [
           {
-            "shape": { "kind": "box", "halfExtents": [0.1, 0.08, 0.12] },
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.1,
+                0.08,
+                0.12
+              ]
+            },
             "isSensor": true,
             "group": "SENSOR_ZONE",
-            "collidesWith": ["OBJECT"],
+            "collidesWith": [
+              "OBJECT"
+            ],
             "emitEvents": true
           }
         ]
@@ -104,22 +219,48 @@
       "id": "roll_ramp",
       "type": "static",
       "transform": {
-        "position": [-1.05, 0.15, 0.3],
-        "rotation": [0, 0, -0.149438132473599, 0.988771077936042]
+        "position": [
+          -1.05,
+          0.15,
+          0.3
+        ],
+        "rotation": [
+          0,
+          0,
+          -0.149438132473599,
+          0.988771077936042
+        ]
       },
       "visual": {
         "kind": "primitive",
-        "primitive": { "kind": "box", "halfExtents": [0.25, 0.02, 0.1] },
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.25,
+            0.02,
+            0.1
+          ]
+        },
         "color": "#7f8c8d"
       },
       "physics": {
         "bodyType": "fixed",
         "colliders": [
           {
-            "shape": { "kind": "box", "halfExtents": [0.25, 0.02, 0.1] },
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.25,
+                0.02,
+                0.1
+              ]
+            },
             "friction": 0.8,
             "group": "ENV",
-            "collidesWith": ["ROBOT", "OBJECT"]
+            "collidesWith": [
+              "ROBOT",
+              "OBJECT"
+            ]
           }
         ]
       }
@@ -127,20 +268,36 @@
     {
       "id": "wrecker",
       "type": "object",
-      "transform": { "position": [-1.22, 0.277, 0.3] },
+      "transform": {
+        "position": [
+          -1.22,
+          0.277,
+          0.3
+        ]
+      },
       "visual": {
         "kind": "primitive",
-        "primitive": { "kind": "sphere", "radius": 0.05 },
+        "primitive": {
+          "kind": "sphere",
+          "radius": 0.05
+        },
         "color": "#d4930f"
       },
       "physics": {
         "bodyType": "dynamic",
         "colliders": [
           {
-            "shape": { "kind": "sphere", "radius": 0.05 },
+            "shape": {
+              "kind": "sphere",
+              "radius": 0.05
+            },
             "friction": 0.8,
             "group": "OBJECT",
-            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "collidesWith": [
+              "ENV",
+              "ROBOT",
+              "OBJECT"
+            ],
             "emitEvents": true
           }
         ]
@@ -149,20 +306,44 @@
     {
       "id": "stack_bottom",
       "type": "object",
-      "transform": { "position": [-0.68, 0.04, 0.3] },
+      "transform": {
+        "position": [
+          -0.68,
+          0.04,
+          0.3
+        ]
+      },
       "visual": {
         "kind": "primitive",
-        "primitive": { "kind": "box", "halfExtents": [0.03, 0.04, 0.03] },
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.03,
+            0.04,
+            0.03
+          ]
+        },
         "color": "#c0392b"
       },
       "physics": {
         "bodyType": "dynamic",
         "colliders": [
           {
-            "shape": { "kind": "box", "halfExtents": [0.03, 0.04, 0.03] },
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.03,
+                0.04,
+                0.03
+              ]
+            },
             "friction": 0.6,
             "group": "OBJECT",
-            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "collidesWith": [
+              "ENV",
+              "ROBOT",
+              "OBJECT"
+            ],
             "emitEvents": true
           }
         ]
@@ -171,20 +352,44 @@
     {
       "id": "stack_middle",
       "type": "object",
-      "transform": { "position": [-0.68, 0.12, 0.3] },
+      "transform": {
+        "position": [
+          -0.68,
+          0.12,
+          0.3
+        ]
+      },
       "visual": {
         "kind": "primitive",
-        "primitive": { "kind": "box", "halfExtents": [0.03, 0.04, 0.03] },
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.03,
+            0.04,
+            0.03
+          ]
+        },
         "color": "#8e44ad"
       },
       "physics": {
         "bodyType": "dynamic",
         "colliders": [
           {
-            "shape": { "kind": "box", "halfExtents": [0.03, 0.04, 0.03] },
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.03,
+                0.04,
+                0.03
+              ]
+            },
             "friction": 0.6,
             "group": "OBJECT",
-            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "collidesWith": [
+              "ENV",
+              "ROBOT",
+              "OBJECT"
+            ],
             "emitEvents": true
           }
         ]
@@ -193,20 +398,44 @@
     {
       "id": "stack_top",
       "type": "object",
-      "transform": { "position": [-0.68, 0.2, 0.3] },
+      "transform": {
+        "position": [
+          -0.68,
+          0.2,
+          0.3
+        ]
+      },
       "visual": {
         "kind": "primitive",
-        "primitive": { "kind": "box", "halfExtents": [0.03, 0.04, 0.03] },
+        "primitive": {
+          "kind": "box",
+          "halfExtents": [
+            0.03,
+            0.04,
+            0.03
+          ]
+        },
         "color": "#2980b9"
       },
       "physics": {
         "bodyType": "dynamic",
         "colliders": [
           {
-            "shape": { "kind": "box", "halfExtents": [0.03, 0.04, 0.03] },
+            "shape": {
+              "kind": "box",
+              "halfExtents": [
+                0.03,
+                0.04,
+                0.03
+              ]
+            },
             "friction": 0.6,
             "group": "OBJECT",
-            "collidesWith": ["ENV", "ROBOT", "OBJECT"],
+            "collidesWith": [
+              "ENV",
+              "ROBOT",
+              "OBJECT"
+            ],
             "emitEvents": true
           }
         ]

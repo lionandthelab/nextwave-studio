@@ -58,6 +58,26 @@ export interface PhysicsWorld {
   createCollider(bodyId: BodyId, spec: ColliderSpec, entityId: EntityId): ColliderId;
   removeEntity(entityId: EntityId): void;
 
+  /**
+   * 접촉 상태(워밍스타트 임펄스·접촉 매니폴드)를 버린다 — **되감기 전용**.
+   *
+   * 바디를 teleport해도 솔버의 접촉 매니폴드는 남는다. 거기 누적된 임펄스가 다음 스텝의
+   * 워밍스타트 초기값이 되므로, "같은 좌표에서 다시 시작"해도 **직전에 무슨 일이
+   * 있었는지에 따라 결과가 달라진다**. 실측(A/B, 각 3회): 새 월드에서 재생하면 최종 좌표가
+   * 소수점 5자리까지 3회 동일한데, 15초 돌린 뒤 되감아 재생하면 3회 중 2회가 달랐다
+   * (한 번은 완주 54.4초, 정상 24.9초).
+   *
+   * 구현은 collider를 제거·재생성해 좁은 단계(narrow phase)를 비우는 것이다.
+   *
+   * **이것이 보장하는 것과 아닌 것**: 되감기 후 재생이 **매번 같은 결과**를 낸다
+   * (수정 후 실측 3/3 동일, 수정 전 3회 중 2회 상이). 그러나 그 결과가 **새로 연 페이지의
+   * 재생과 같다는 보장은 아니다** — collider 재생성이 Rapier 내부 핸들·순회 순서를 바꾸므로
+   * 되감기 재생은 자기들끼리만 재현된다(실측: 컨베이어 씬에서 되감기 재생이 54.4s,
+   * 새 월드가 24.8s — item_c의 배리어 두 개에서 갈린다). 완전 동등성은 월드 재빌드가 필요하고,
+   * 그건 별도 작업이다. 자동화·게이트가 **새 월드와 같은 결과**를 원하면 페이지를 새로 열어야 한다.
+   */
+  clearContactState(): void;
+
   /** kinematicPosition 바디 구동 — 다음 스텝에서 도달할 pose 지정 */
   setKinematicPose(bodyId: BodyId, pose: Pose): void;
 
@@ -87,6 +107,30 @@ export interface PhysicsWorld {
 
   /** 엔티티 id → 바디 핸들 목록 (로봇은 링크당 1개) */
   bodiesOfEntity(entityId: EntityId): readonly BodyId[];
+
+  /**
+   * 이 엔티티의 collider와 **현재 접촉 중인** 다른 엔티티의 동적 바디 목록.
+   *
+   * 컨베이어처럼 "표면에 닿은 것을 구동하는" 액추에이터를 위한 조회다. 접촉 판정은
+   * 물리 엔진의 narrow-phase가 유일한 진실이며, 메시/AABB 겹침 추정이 아니다
+   * (CLAUDE.md §2.4의 정신 — 다만 이것은 이벤트가 아니라 상태 조회다).
+   *
+   * 같은 엔티티에 속한 바디(로봇 링크 등)는 제외한다 — 자기 자신을 구동하지 않는다.
+   * 반환 순서는 결정론적이어야 한다(엔진 내부 순회 순서 고정).
+   */
+  dynamicBodiesTouching(entityId: EntityId): readonly BodyId[];
+
+  /** 씬의 모든 **동적** 바디 (재순환 후보 훑기 등 — 순서 결정론적) */
+  dynamicBodies(): readonly BodyId[];
+
+  /** 선형 속도 조회 (m/s) */
+  getLinearVelocity(bodyId: BodyId): Vec3;
+
+  /**
+   * 선형 속도 지정 (m/s) — 표면 구동 액추에이터 전용.
+   * kinematic/fixed 바디에는 의미가 없으므로 구현은 동적 바디에만 적용한다.
+   */
+  setLinearVelocity(bodyId: BodyId, velocity: Vec3): void;
 
   /** 모든 바디/collider 제거 (씬 재로드·리셋) */
   clear(): void;

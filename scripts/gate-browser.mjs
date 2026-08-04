@@ -61,6 +61,11 @@ const SCENE_BY_EXPECT = {
   planner: 'arm-and-boxes', // Phase 9 NL Planner — 규칙 기반(오프라인) 백엔드로 결정론 검증
   orchestration: 'arm-and-boxes', // Phase 10 실행 오케스트레이션 — arm-touch-box 시퀀스 위에서 트라이페인 동기 검증
   'two-arms': 'two-arms-collision', // 로봇↔로봇 충돌 회귀 — 두 팔이 중앙에서 접촉
+  'viewport-edit': 'arm-and-boxes', // 뷰포트 편집 UX — 바닥 하한·방향키 이동·선택 HUD
+  'conveyor-pick-place': 'conveyor-pick-place', // 컨베이어 라인 — 이송·재순환·포토아이 픽
+  'mesh-import': 'arm-and-boxes', // 3D 파일 임포트 — 바닥+로봇이 있는 씬 위에서 검증
+  'l-line-cell': 'l-line-cell', // ㄱ자 라인 — 코너 이송 + 로봇 3종 스테이션
+  'robot-library': 'arm-and-boxes', // 라이브러리 로봇 3종 — 로드·관절 구동·그리퍼
 };
 
 // --expect=arm 어서션 상수
@@ -86,9 +91,39 @@ const SEQ_GRIPPER_CLOSED_TOL_M = 2e-3;    // "닫힘(≈0) 관측" 판정 (close
 // ── Phase 6 샘플 씬 게이트 상수 ─────────────────────────────────────
 // --expect=pick-and-place (pick-and-place.sequence.json 기준, step 9개)
 //   명목 길이 ≈ 0.4+2.0+0.8+0+배리어+0.5+2.0+0.4+2.0 ≈ 8.1s(이벤트 해제) / ≈14.1s(timeout 경로)
-const PNP_STEP_COUNT = 9;
-const PNP_SIM_TIME_BUDGET_SEC = 16;
-const PNP_EVENT_DONE_MAX_SIM_SEC = 10;
+const PNP_STEP_COUNT = 11;
+const PNP_SIM_TIME_BUDGET_SEC = 22;
+// 명목 길이 ≈ 0.4+2.0+0.8+0+배리어+0.5+0.7+3.0+0.6+0.4+2.0 ≈ 10.4s(이벤트 해제) /
+// ≈16.4s(배리어 timeout 6s 경로). 실측 10.55~10.63s — 13s면 두 경로를 확실히 가른다.
+const PNP_EVENT_DONE_MAX_SIM_SEC = 13;
+/**
+ * cargo가 "들렸다"고 볼 최소 상승량 (m). 바닥 정착 y=0.0237 기준 +2 cm.
+ * 밀기(끌기)만 하면 y는 정착 높이에서 거의 변하지 않으므로 이 값이 둘을 가른다.
+ * 실측 최고점 0.0658 (= +4.2 cm)로 2배 이상 여유가 있다.
+ */
+const PNP_MIN_LIFT_M = 0.02;
+/**
+ * 놓기(gripper open) step의 인덱스 — 시퀀스 JSON 순서와 일치해야 한다.
+ * [0]open [1]approach [2]lower [3]setJoints [4]barrier [5]grip [6]lift [7]transport
+ * [8]lower [9]★release [10]home
+ */
+const PNP_RELEASE_STEP_INDEX = 9;
+/**
+ * 놓는 순간 상자와 그리퍼 사이의 최대 수평 거리 (m).
+ *
+ * ★ 사용자 보고 회귀: "로봇팔이 내려놓는 곳이 아니라 중간에 미끄러져서 내려오고 거기가
+ * 드랍존으로 되어 있어서 이상해." 상자가 이송 중 손에서 빠져 굴러가도, 감지 존이 그
+ * 자리에 있으면 sensor·상승 어서션은 **모두 통과한다**. "로봇이 놓았다"와 "떨어진 자리에
+ * 존이 있다"를 가르는 유일한 신호가 이 거리다. 실측 0.041 m (손가락 폭 수준).
+ */
+const PNP_MAX_RELEASE_GAP_M = 0.08;
+/**
+ * 선반 접촉 프로브 관절값 — 시퀀스가 하지 않는 **과잉 스윙**으로 팔을 drop_shelf
+ * (z ≈ -0.25)까지 밀어 넣는다. 시퀀스의 정상 목표(joint1 0.3)보다 크게 돌린다.
+ */
+const PNP_SHELF_PROBE_JOINTS = { joint1: 0.62, joint2: 0.638, joint3: 1.63, joint5: 0.873 };
+const PNP_SHELF_PROBE_WAIT_MS = 1500;
+const PNP_SHELF_PROBE_SETTLE_MS = 300;       // stop→play 후 물리가 다시 돌기 시작할 여유
 // --expect=obstacle-avoidance (obstacle-avoidance.sequence.json 기준, step 8개)
 //   명목 길이 ≈ 0.3+2.0+1.5+2.0+1.5+0+배리어+2.0 ≈ 9.3s(이벤트 해제) / ≈15.3s(timeout 경로)
 const OA_STEP_COUNT = 8;
@@ -131,11 +166,215 @@ const PLANNER_BOXA_STEP_COUNT = 7;
 const PLANNER_SIM_BUDGET_SEC = 12;                 // Play→done sim 예산
 const PLANNER_EVENT_DONE_MAX_SIM_SEC = 9;          // 이벤트 해제 경로(≈6.7s) vs timeout(≈12s) 구분
 
+// ── conveyor-pick-place 게이트 상수 (컨베이어 라인) ─────────────────
+// 시퀀스 9 step: gripper·moveJoints·waitForCollision(포토아이)·moveJoints·
+// waitForCollision(픽)·gripper·moveJoints(스윕)·gripper·moveJoints(home).
+const CPP_STEP_COUNT = 33;             // phase6-scenes.test.ts CPP_SEQUENCE_STEP_COUNT와 일치
+const CPP_CYCLE_ITEMS = ['item_a', 'item_b', 'item_c']; // 사이클 순서 = 라인 선입선출 순서
+const CPP_SIM_TIME_BUDGET_SEC = 60;    // 3사이클 실측 ~25s + 포토아이 대기(최대 한 바퀴 4.4s)×3
+/**
+ * 놓는 순간 그리퍼–상자 수평 거리 상한 (m).
+ *
+ * ★ 사용자 보고: "컨베이 픽앤플레이스는 여전히 가다가 떨어뜨린다." 최종 위치만 보면
+ * 이송 중 떨어뜨린 상자와 제대로 놓은 상자를 구분할 수 없다 — **둘 다 바닥에서 끝난다**.
+ * 놓기 step의 첫 tick에 상자가 아직 손 안에 있는지를 사이클마다 재야 회귀가 잡힌다.
+ * 실측: 3사이클 0.044 / 0.091 / 0.053 m. 상한은 여유를 두되 "이송 호 절반"보다 작게.
+ */
+const CPP_MAX_RELEASE_GAP_M = 0.12;
+/** 놓기(gripper open) step 인덱스 — 사이클당 1개 (시퀀스 구조와 함께 갱신) */
+const CPP_RELEASE_STEP_INDEXES = [9, 19, 29];
+const CPP_BELT_OBSERVE_SEC = 3;        // Play 전 벨트만 도는 것을 관측하는 시간
+const CPP_MIN_BELT_TRAVEL_M = 0.15;    // 위 시간 동안 최소 이송 거리 (0.1 m/s × 3s = 0.3m)
+const CPP_BELT_START_X = 0.12;         // 벨트 진행축 시작 x (center 0.34 − half 0.22)
+const CPP_BELT_END_X = 0.56;           // 벨트 진행축 끝 x
+const CPP_RECYCLE_OBSERVE_SEC = 12;    // 재순환을 확인하기 위해 관측하는 시간
+const CPP_EDITED_SPEED_MPS = 0.25;     // 편집 검증용 증속 (기본 0.1보다 확실히 크게)
+const CPP_EDIT_OBSERVE_SEC = 1;        // 편집 후 속도가 벨트 값으로 수렴할 여유
+const CPP_SPEED_TOLERANCE_MPS = 0.05;  // 벨트 지정 속도 대비 허용 오차
+const CPP_MIN_EVENT_SIM_SEC = 0.5;     // 이 시각 이전 이벤트는 "스폰 겹침"으로 보고 무시
+/** 벨트 한가운데 착좌 지점 (belt center [0.34, 0.015, 0.143], 상면 0.03 + item half 0.025) */
+const CPP_BELT_SEAT_POSITION = [0.34, 0.055, 0.143];
+/** 벨트 밖 대기 자리 — 재사용한 상자를 치워 다음 측정과 부딪히지 않게 한다 */
+const CPP_BELT_PARK_POSITION = [0.34, 0.03, -0.35];
+/**
+ * 역방향 측정용 좌석 — 진행 방향 **반대쪽 끝**에 앉힌다.
+ *
+ * 런웨이는 0.44 m뿐이고 증속 벨트는 1s에 0.25 m를 간다. 가운데에 앉히면 관측 창 안에
+ * 반대쪽 끝을 넘어가 버려(0.34 → 0.09 < 벨트 시작 0.12) 벨트를 벗어난 상태로 측정된다
+ * — 실측 onBelt=false. 좌석은 측정하려는 방향에 맞춰 잡아야 한다.
+ */
+const CPP_BELT_REVERSE_SEAT_POSITION = [0.50, 0.055, 0.143];
+
+// ── viewport-edit 게이트 상수 (바닥 하한 · 방향키 이동 · 선택 HUD) ──
+const VE_TARGET_ID = 'box_a';                // arm-and-boxes의 동적 박스
+const VE_NUDGE_MIN_DELTA_M = 0.02;           // 기본 nudge 0.05m — 여유를 둔 하한
+const VE_NUDGE_FINE_M = 0.01;                // NUDGE_FINE_STEP_M (render/interaction.ts)
+const VE_NUDGE_TOLERANCE_M = 0.002;          // 스냅/부동소수 여유
+const VE_SINK_PRESS_COUNT = 12;              // PageDown 반복 (클램프 없으면 -0.6m)
+const VE_LIFT_PRESS_COUNT = 6;               // End 검증용으로 띄우는 횟수
+const VE_GROUNDED_TOLERANCE_M = 0.005;       // 치수 변경 후 접지 판정 여유
+const VE_STEP_DEADLINE_MS = 5000;            // Step 1회의 상태 전이 폴링 실시간 상한
+
+// ── mesh-import 게이트 상수 (3D 파일 임포트 — UX_DESIGN §4.4) ──────
+//
+// 계측 픽스처는 **세 변이 모두 다르고 원점에서 어긋난** 직육면체다(scripts/make-import-fixtures.mjs).
+// 정육면체를 쓰면 스케일은 재도 Up-axis 회전(y↔z 교환)을 재지 못해, 임포트가 upAxis를
+// 통째로 무시해도 게이트가 초록이 된다. 원점 중심이면 피벗 재정렬의 x/z 성분이 항등이라
+// 검증되지 않는다. 다운로드 에셋(avocado 등)은 치수를 우리가 통제하지 않으므로 수치
+// 어서션에 쓰지 않고 **카탈로그 스모크**로만 돌린다.
+const IMP_MODEL_DIR = '/assets/models/';
+const IMP_FIXTURES = [
+  { format: 'glb', file: 'gate-box.glb', label: 'glTF (.glb)' },
+  { format: 'stl', file: 'gate-box.stl', label: 'STL (.stl)' },
+  { format: 'obj', file: 'gate-box.obj', label: 'OBJ (.obj)' },
+];
+/** 배포용 다운로드 모델 — 파싱만 확인한다(치수는 외부 소유) */
+const IMP_CATALOG = ['avocado.glb', 'water-bottle.glb', 'teacup.stl', 'boombox.stl', 'barramundi-fish.obj'];
+const IMP_FIXTURE_SIZE_LABEL = '0.300 × 0.200 × 0.100 m'; // formatBboxSizeM(scale=1)
+const IMP_FIXTURE_HALF_SIZE_LABEL = '0.150 × 0.100 × 0.050 m'; // scale=0.5
+const IMP_FIXTURE_TRIANGLES = 12;            // 박스 = 12 삼각형 (3종 동일해야 한다)
+const IMP_FIXTURE_HALF_EXTENTS = [0.15, 0.1, 0.05]; // scale=1, y-up일 때 AABB half
+const IMP_SCALE_HALF = 0.5;
+const IMP_HALF_TOLERANCE_M = 1e-3;
+const IMP_RATIO_TOLERANCE = 1e-3;
+const IMP_SETTLE_TOLERANCE_M = 0.01;         // 정착 원점 y ≈ 0 (피벗 = bbox 바닥 중심)
+const IMP_MAX_SINK_M = 0.01;                 // 이보다 깊으면 접촉 침투가 아니라 지하
+const IMP_VISUAL_TOLERANCE_M = 0.02;         // anchorProbe visualCenter 판정
+const IMP_DROP_HEIGHT_M = 0.4;               // 낙하 관측 시작 높이
+const IMP_MIN_FALL_M = 0.2;                  // "실제로 떨어졌다" 판정
+const IMP_TRIMESH_SUPPORT_MIN_Y_M = 0.15;    // trimesh(윗면 0.20) 위에 얹힌 판정
+const IMP_PARSE_DEADLINE_MS = 15000;
+const IMP_CONFIRM_DEADLINE_MS = 8000;
+const IMP_SETTLE_DEADLINE_MS = 20000;
+/** 임포트 엔티티 id — placeEntity는 uniquify하지 않으므로 케이스마다 달라야 한다 */
+const IMP_ID = {
+  hullY: 'imp-hull-y',
+  hullZ: 'imp-hull-z',
+  aabb: 'imp-aabb',
+  aabbHalf: 'imp-aabb-half',
+  aabbZ: 'imp-aabb-z',
+  trimesh: 'imp-trimesh',
+};
+/**
+ * 임포트 엔티티 주차 자리 (x, z).
+ *
+ * 임포트는 전부 "뷰포트 중앙"에 떨어지므로 그대로 두면 여러 개가 한 자리에 쌓여
+ * 서로 부딪힌다 — 그러면 각 어서션이 자기 대상이 아니라 **더미**를 재게 된다
+ * (실측: 서로 다른 두 대상의 정착 y가 소수점 4자리까지 같았다). 로봇 작업 반경
+ * (약 0.5m) 밖에, 서로 0.6m 이상 떨어뜨린다.
+ */
+const IMP_PARK_Z = -1.2;
+const IMP_PARK_X0 = 1.0;
+const IMP_PARK_DX = 0.6;
+
+const IMP_BAD_FILE = { name: 'not-a-model.txt', body: 'hello workcell' };
+const IMP_CORRUPT_FILE = { name: 'corrupt.glb', body: 'not a glb at all' };
+
+// ── robot-library 게이트 상수 (라이브러리 로봇 3종) ────────────────
+//
+// arm6(6축 관절팔·평행 2지) 하나뿐이던 것을 손 모양이 서로 다른 3종으로 넓혔다.
+// 이 게이트가 묻는 것: 각 로봇이 **실제로 서고**(링크 바디 생성), **관절이 말단을 움직이고**,
+// **그리퍼가 손을 실제로 여닫는가**. URDF가 파싱만 되고 구동되지 않는 회귀를 잡는다.
+const RL_ROBOTS = [
+  {
+    key: 'arm-6',
+    idBase: 'arm',
+    minLinks: 8,                         // 6 revolute + 2 prismatic finger
+    driveJoint: 'joint2',
+    driveDelta: 0.6,
+    gripperJoints: ['finger_left_joint', 'finger_right_joint'],
+    gripperOpen: 0.03,
+    gripperClose: 0.0,
+    handKind: '평행 2지',
+  },
+  {
+    key: 'scara-4',
+    idBase: 'scara',
+    minLinks: 6,                         // base + 4 + suction pad
+    driveJoint: 'joint2',
+    driveDelta: 0.7,
+    gripperJoints: ['suction_joint'],
+    gripperOpen: 0.0,
+    gripperClose: 0.012,
+    handKind: '흡착 패드',
+  },
+  {
+    key: 'cobot-7',
+    idBase: 'cobot',
+    minLinks: 11,                        // base + 7 + finger ×3
+    driveJoint: 'joint2',
+    driveDelta: 0.5,
+    gripperJoints: ['finger_a_joint', 'finger_b_joint', 'finger_c_joint'],
+    gripperOpen: -0.65,
+    gripperClose: 0.05,
+    handKind: '3지 클로',
+  },
+];
+/** 로봇을 놓는 자리 — 서로/기존 로봇과 겹치지 않게 (arm-and-boxes 로봇은 원점) */
+const RL_SPOT_Z = -1.4;
+const RL_SPOT_X0 = 0.8;
+const RL_SPOT_DX = 0.9;
+/** 관절을 움직였을 때 말단이 이만큼은 움직여야 "구동된다"고 본다 (m) */
+const RL_MIN_END_MOVE_M = 0.02;
+/**
+ * 그리퍼 여닫을 때 손 링크가 이만큼은 움직여야 한다.
+ *
+ * 위치와 **자세를 모두** 본다: 평행 2지(arm6)·흡착 패드(scara)는 prismatic이라 링크
+ * 원점이 이동하지만, 3지 클로(cobot7)는 revolute라 링크 원점이 **회전축 위에 있어
+ * 위치가 전혀 변하지 않는다** — 자세만 바뀐다. 위치만 재면 정상 동작하는 클로를
+ * "손이 안 움직인다"고 오판한다(실측으로 겪었다).
+ */
+const RL_MIN_HAND_DELTA_M = 0.005;
+const RL_MIN_HAND_ROT_RAD = 0.1;
+/** home 포즈에서 링크가 바닥 아래로 내려가도 되는 허용치 (m) — 로봇 링크는 kinematic이라 자가 교정이 없다 */
+const RL_MAX_UNDERGROUND_M = 0.005;
+const RL_PLACE_DEADLINE_MS = 20000;
+
+// ── l-line-cell 게이트 상수 (ㄱ자 라인 + 로봇 3종) ─────────────────
+//
+// 이 씬이 묻는 것: **세 로봇이 각자 실제로 일했는가**. "시퀀스가 done으로 끝났다"만으로는
+// 로봇이 허공에서 춤춰도 통과한다 — 각 스테이션마다 그 로봇이 그 상자를 만졌다는
+// 접촉 이벤트와, 상자가 실제로 옮겨졌다는 좌표를 함께 본다.
+const LL_STEP_COUNT = 38;
+const LL_SIM_BUDGET_SEC = 120;      // 실측 완주 32.2s + 여유 (벨트 실효속도가 선언값의 69~78%)
+/** 스테이션별 (로봇, 대상 상자) — 이 쌍의 접촉이 없으면 그 로봇은 일하지 않은 것이다 */
+const LL_STATIONS = [
+  { robot: 'press', item: 'item_b', role: '검사 프레스' },
+  { robot: 'picker', item: 'item_a', role: '라인 피킹' },
+  { robot: 'palletizer', item: 'item_a', role: '팔레타이징' },
+];
+const LL_ROBOTS = ['press', 'picker', 'palletizer'];
+/** 로봇이 절대 닿으면 안 되는 정적물 — 닿으면 셀 배치가 틀린 것이다 */
+const LL_STATICS = ['belt_in', 'belt_out', 'rail_outer', 'rail_inner'];
+/**
+ * 판정은 **중심 좌표 포함**으로 한다 — 센서 이벤트로는 안 된다.
+ * 인계 패드와 팔레트는 10cm 거리라 5cm 상자가 두 존을 동시에 발화시킬 수 있고,
+ * 실제로 처음 배치(간극 0)에서 그랬다: picker가 인계하는 순간 zone_pallet도 함께 start해
+ * "팔레트 감지"가 적재의 증거가 되지 못했다(검토에서 잡힌 결함).
+ */
+const LL_FINAL_ITEM = 'item_a';
+const LL_PLACE_STEP_INDEXES = [21, 34];  // picker 인계 / palletizer 적재
+const LL_MAX_RELEASE_GAP_M = 0.08;       // 실측 0.021 / 0.033
+
 // ── Phase 10: orchestration 게이트 상수 (arm-and-boxes + arm-touch-box, 7 step) ──
 const ORCH_NODE_COUNT = 7;                         // arm-touch-box.sequence.json step 수
 const ORCH_SIM_BUDGET_SEC = 12;                    // Play→done sim 예산 (배리어 이벤트 해제 경로)
 const ORCH_REALTIME_DEADLINE_MS = 45000;           // 폴링 실시간 상한 (fast-forward/행 방지)
 const ORCH_STEP_MAX_SIM_SEC = 4;                   // stepNode 1개 노드의 sim 상한 (전체 ~8s의 일부)
+
+/**
+ * 3D 뷰포트 슬롯에 포커스를 준다.
+ *
+ * 뷰포트 편집 단축키(W/E/R · 방향키 · End)는 `scope: 'viewport'` 바인딩이라, 라우터가
+ * **활성 요소**에서 스코프를 거슬러 찾을 때 뷰포트 안에 포커스가 있어야 선택된다
+ * (불변식 §2.10). 실제 사용자는 3D 화면을 클릭하며 자연히 포커스를 얻지만
+ * (workspace.ts의 pointerdown 훅), 파사드 select()에는 그 부수효과가 없다.
+ */
+async function focusViewportSlot(page) {
+  await page.evaluate(() => {
+    document.querySelector('[data-testid="workspace-viewport"]')?.focus();
+  });
+}
 
 /** 두 엔티티 쌍 일치(순서 무관) */
 function isPair(event, idA, idB) {
@@ -210,6 +449,151 @@ async function awaitSimAdvance(page, minAdvanceSec) {
     if (Date.now() > deadline) return { advanced: false, fromSec, toSec };
     await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
   }
+}
+
+// ── mesh-import 헬퍼 ────────────────────────────────────────────────
+
+/**
+ * 픽스처를 fetch해 File로 만들고 임포트 다이얼로그를 연다 — 라이브러리 ⬆ / 뷰포트 드롭과
+ * **동일 진입점**(__sim.meshImport.open). 파사드가 폼을 우회해 EntitySpec을 직접 조립하면
+ * "다이얼로그는 망가졌는데 게이트는 초록"이 되므로, 여는 것만 파사드로 하고 나머지는
+ * 사람과 같이 DOM을 조작한다.
+ */
+async function openImportFixture(page, fileName) {
+  await page.evaluate(
+    async ({ dir, name }) => {
+      const res = await fetch(dir + name);
+      if (!res.ok) throw new Error(`fixture fetch failed: ${dir}${name} → ${res.status}`);
+      window.__sim.meshImport.open(new File([await res.arrayBuffer()], name));
+    },
+    { dir: IMP_MODEL_DIR, name: fileName },
+  );
+  return awaitImportPhase(page);
+}
+
+/** 임의 텍스트를 파일로 만들어 다이얼로그를 연다 (실패 경로 검증용) */
+async function openImportText(page, name, body) {
+  await page.evaluate(({ n, b }) => {
+    window.__sim.meshImport.open(new File([b], n));
+  }, { n: name, b: body });
+  return awaitImportPhase(page);
+}
+
+/** '분석 중…'을 벗어날 때까지 폴링 → 리드아웃/폼 상태 스냅샷 */
+async function awaitImportPhase(page) {
+  await page.waitForFunction(
+    () => {
+      const dlg = document.querySelector('[data-testid="import-dialog"]');
+      if (!dlg || getComputedStyle(dlg).display === 'none') return false;
+      const fmt = document.querySelector('[data-testid="import-format"]')?.textContent ?? '';
+      return fmt !== '' && !fmt.includes('분석 중');
+    },
+    undefined,
+    { timeout: IMP_PARSE_DEADLINE_MS },
+  );
+  return page.evaluate(() => {
+    const visible = (el) => el !== null && getComputedStyle(el).display !== 'none';
+    const err = document.querySelector('[data-testid="import-error"]');
+    return {
+      format: document.querySelector('[data-testid="import-format"]')?.textContent ?? null,
+      triangles: document.querySelector('[data-testid="import-triangles"]')?.textContent ?? null,
+      size: document.querySelector('[data-testid="import-size"]')?.textContent ?? null,
+      errorVisible: visible(err),
+      errorText: err?.textContent ?? null,
+      confirmDisabled: document.querySelector('[data-testid="import-confirm"]')?.disabled ?? null,
+      objectKindDisabled: document.querySelector('[data-testid="import-kind-object"]')?.disabled ?? null,
+      trimeshNoteVisible: visible(document.querySelector('[data-testid="import-trimesh-note"]')),
+    };
+  });
+}
+
+/**
+ * 폼을 채운다. trimesh 전략은 유형을 Object로 되돌릴 수 없으므로(강제 Static — 버튼
+ * disabled) kind를 넘기지 않는다. disabled 버튼에 click하면 enabled를 기다리다 타임아웃한다.
+ */
+async function fillImportForm(page, { id, scale, upAxis, collider, kind }) {
+  await page.fill('[data-testid="import-id"]', id);
+  await page.fill('[data-testid="import-scale"]', String(scale));
+  await page.click(`[data-testid="import-upaxis-${upAxis}"]`);
+  await page.click(`[data-testid="import-collider-${collider}"]`);
+  if (kind !== undefined) await page.click(`[data-testid="import-kind-${kind}"]`);
+}
+
+/** [추가] 확정 — 다이얼로그가 닫히고 엔티티가 1개 늘 때까지 기다린다 */
+async function confirmImport(page) {
+  const before = await page.evaluate(() => window.__sim.editor.entityIds().length);
+  await page.click('[data-testid="import-confirm"]');
+  await page.waitForFunction(
+    (n) => {
+      const dlg = document.querySelector('[data-testid="import-dialog"]');
+      const closed = dlg === null || getComputedStyle(dlg).display === 'none';
+      return closed && window.__sim.editor.entityIds().length === n + 1;
+    },
+    before,
+    { timeout: IMP_CONFIRM_DEADLINE_MS },
+  );
+}
+
+async function closeImportDialog(page) {
+  await page.click('[data-testid="import-cancel"]');
+  await page.waitForFunction(() => {
+    const dlg = document.querySelector('[data-testid="import-dialog"]');
+    return dlg === null || getComputedStyle(dlg).display === 'none';
+  }, undefined, { timeout: IMP_CONFIRM_DEADLINE_MS });
+}
+
+/** 편집 스펙의 엔티티 1건 (없으면 null) */
+function importedSpec(page, id) {
+  return page.evaluate(
+    (i) => window.__sim.editor.serialize().entities.find((e) => e.id === i) ?? null,
+    id,
+  );
+}
+
+/** 임포트 엔티티를 제 자리로 옮긴다 (다른 임포트와 겹치지 않게 — IMP_PARK_* 주석 참조) */
+function parkImported(page, id, slot) {
+  return page.evaluate(
+    ({ i, x, z }) => window.__sim.editor.updateTransform(i, { position: [x, 0, z] }),
+    { i: id, x: IMP_PARK_X0 + slot * IMP_PARK_DX, z: IMP_PARK_Z },
+  );
+}
+
+/** 임포트 → 폼 → 확정 한 번에 (계측 픽스처 전용) */
+async function importFixture(page, file, form) {
+  const phase = await openImportFixture(page, file);
+  await fillImportForm(page, form);
+  await confirmImport(page);
+  return phase;
+}
+
+/** 엔티티를 들어올려 낙하시키고 정착 y를 잰다 (물리 바디가 실재하는지의 증거) */
+async function dropAndSettle(page, id, dropY) {
+  await page.evaluate(
+    ({ i, y }) => {
+      const p = window.__sim.editor.serialize().entities.find((e) => e.id === i).transform.position;
+      window.__sim.editor.updateTransform(i, { position: [p[0], y, p[2]] });
+      window.__sim.engine.play();
+    },
+    { i: id, y: dropY },
+  );
+  const readY = () =>
+    page.evaluate((i) => {
+      const b = window.__sim.world.bodiesOfEntity(i)[0];
+      return b === undefined ? null : window.__sim.world.getPose(b).position[1];
+    }, id);
+  const deadline = Date.now() + IMP_SETTLE_DEADLINE_MS;
+  let previous = await readY();
+  let stable = 0;
+  for (;;) {
+    await page.waitForTimeout(200);
+    const y = await readY();
+    if (y === null) return { settledY: null, fell: 0 };
+    if (Math.abs(y - previous) < 1e-4) stable += 1;
+    else stable = 0;
+    previous = y;
+    if (stable >= 3 || Date.now() > deadline) break;
+  }
+  return { settledY: previous, fell: dropY - previous };
 }
 
 function startPreview() {
@@ -494,6 +878,37 @@ async function main() {
       if (!initial) {
         fail('pick-and-place: interaction checks skipped', 'player facade missing');
       } else {
+        // 재생 내내 cargo의 y를 표본해 **실제로 떠올랐는지** 잰다. 최종 pose만 보면
+        // 끌고 간 것과 들고 간 것을 구분할 수 없다(둘 다 바닥에서 끝난다).
+        await page.evaluate((releaseStep) => {
+          window.__cargoMaxY = -Infinity;
+          window.__releaseGap = null;
+          window.__sim.engine.onTick(() => {
+            const w = window.__sim.world;
+            const body = w.bodiesOfEntity('cargo')[0];
+            if (body === undefined) return;
+            const cargo = w.getPose(body).position;
+            if (cargo[1] > window.__cargoMaxY) window.__cargoMaxY = cargo[1];
+            // 놓기 step의 **첫 tick**에 상자가 아직 그리퍼에 있는지 (베이스에서 가장 먼
+            // 링크를 그리퍼로 본다 — anchorProbe와 같은 관례)
+            if (window.__releaseGap !== null) return;
+            if (window.__sim.player?.currentStepIndex !== releaseStep) return;
+            let far = null;
+            let maxR = -1;
+            for (const bid of w.bodiesOfEntity('arm')) {
+              const q = w.getPose(bid).position;
+              const r = Math.hypot(q[0], q[2]);
+              if (r > maxR) { maxR = r; far = q; }
+            }
+            if (far === null) return;
+            window.__releaseGap = Math.hypot(cargo[0] - far[0], cargo[2] - far[2]);
+          });
+        }, PNP_RELEASE_STEP_INDEX);
+        const restingY = await page.evaluate(() => {
+          const w = window.__sim.world;
+          const body = w.bodiesOfEntity('cargo')[0];
+          return body === undefined ? null : w.getPose(body).position[1];
+        });
         const last = await playAndAwaitDone(page, PNP_SIM_TIME_BUDGET_SEC);
         const history = await page.evaluate(
           (limit) => window.__sim.collision.recent(limit),
@@ -531,6 +946,75 @@ async function main() {
         } else {
           fail(`pick-and-place: sequence done within ${PNP_EVENT_DONE_MAX_SIM_SEC}s (event-released barrier)`,
             `last=${JSON.stringify(last)}`);
+        }
+
+        // 3-b) ★ 사용자 요청 회귀: 상자를 **집어 올려서** 옮긴다 (끌고 가지 않는다).
+        //      바닥 정착 높이 대비 최고점이 유의미하게 높아야 한다.
+        const cargoMaxY = await page.evaluate(() => window.__cargoMaxY);
+        const lift = restingY === null || cargoMaxY === null ? null : cargoMaxY - restingY;
+        if (lift !== null && lift >= PNP_MIN_LIFT_M) {
+          pass('pick-and-place: 상자를 집어 올려서 옮긴다 ★ (끌기 아님)',
+            `상승 ${(lift * 100).toFixed(1)}cm (정착 y=${restingY?.toFixed(4)} → 최고 ${cargoMaxY?.toFixed(4)})`);
+        } else {
+          fail('pick-and-place: 상자를 집어 올려서 옮긴다 ★ (끌기 아님)',
+            `상승 ${lift === null ? 'n/a' : (lift * 100).toFixed(1) + 'cm'} < ${PNP_MIN_LIFT_M * 100}cm — 그리퍼가 놓쳤을 수 있다`);
+        }
+
+        // 3-c) ★ 사용자 보고 회귀: **로봇이 놓은 것**이지, 미끄러져 떨어진 자리에 존이
+        //      있는 것이 아니다. 놓는 순간 상자가 아직 그리퍼에 물려 있어야 한다.
+        const releaseGap = await page.evaluate(() => window.__releaseGap);
+        if (releaseGap !== null && releaseGap <= PNP_MAX_RELEASE_GAP_M) {
+          pass('pick-and-place: 놓는 순간 상자가 아직 그리퍼에 있다 ★ (미끄러져 떨어진 것 아님)',
+            `그리퍼-상자 거리 ${(releaseGap * 100).toFixed(1)}cm ≤ ${PNP_MAX_RELEASE_GAP_M * 100}cm`);
+        } else {
+          fail('pick-and-place: 놓는 순간 상자가 아직 그리퍼에 있다 ★ (미끄러져 떨어진 것 아님)',
+            releaseGap === null
+              ? '놓기 step을 관측하지 못했다 (PNP_RELEASE_STEP_INDEX가 시퀀스와 어긋났을 수 있다)'
+              : `거리 ${(releaseGap * 100).toFixed(1)}cm — 이송 중 손에서 빠졌다`);
+        }
+
+        // 4) 예제는 선반을 스치지 않는다 — 샘플이 매 실행 충돌을 보고하면 "정상"의
+        //    기준선이 무너져 진짜 사고가 소음에 묻힌다
+        const shelfHitsInSample = history.filter(
+          (e) => e.phase === 'start' && isPair(e, 'arm', 'drop_shelf'),
+        );
+        if (shelfHitsInSample.length === 0) {
+          pass('pick-and-place: 정상 시퀀스는 선반을 건드리지 않는다 (arm×drop_shelf 0건)');
+        } else {
+          fail('pick-and-place: 정상 시퀀스는 선반을 건드리지 않는다 (arm×drop_shelf 0건)',
+            `hits=${JSON.stringify(shelfHitsInSample.map((e) => e.timeSec.toFixed(3)))}`);
+        }
+
+        // 5) ★ 사용자 보고 회귀: 선반은 **실체가 있고 로봇과 쌍이 성립**해야 한다.
+        //    구 구현은 선반이 sensor + collidesWith [OBJECT]뿐이라, 팔이 선반을 지나가도
+        //    이벤트가 0건이었다(= "충돌 표시 안 뜨고 관통"). 일부러 선반으로 팔을 돌려
+        //    접촉이 실제로 보고되는지 확인한다.
+        //    시퀀스 완주 후 엔진은 일시정지 상태다 — 접촉은 world.step()에서만 생기므로
+        //    stop()으로 씬(과 충돌 이력)을 리셋한 뒤 **물리를 재개**하고 관절을 밀어 넣는다.
+        await page.evaluate(() => {
+          window.__sim.player?.stop();
+          window.__sim.engine.play();
+        });
+        await page.waitForTimeout(PNP_SHELF_PROBE_SETTLE_MS);
+        await page.evaluate((joints) => {
+          for (const [name, value] of Object.entries(joints)) {
+            window.__sim.robots.setJoint('arm', name, value);
+          }
+        }, PNP_SHELF_PROBE_JOINTS);
+        await page.waitForTimeout(PNP_SHELF_PROBE_WAIT_MS);
+        const afterProbe = await page.evaluate(
+          (limit) => window.__sim.collision.recent(limit),
+          HISTORY_FETCH_LIMIT,
+        );
+        const shelfHits = afterProbe.filter(
+          (e) => e.phase === 'start' && e.kind === 'contact' && isPair(e, 'arm', 'drop_shelf'),
+        );
+        if (shelfHits.length >= 1) {
+          pass('pick-and-place: 선반에 닿으면 충돌로 보고된다 ★ 회귀 (구: sensor라 이벤트 0건)',
+            `starts=${shelfHits.length}`);
+        } else {
+          fail('pick-and-place: 선반에 닿으면 충돌로 보고된다 ★ 회귀 (구: sensor라 이벤트 0건)',
+            `pairs=${JSON.stringify([...new Set(afterProbe.map((e) => `${e.a}×${e.b}`))])}`);
         }
       }
     }
@@ -1550,6 +2034,10 @@ async function main() {
           return s.world.getPose(s.world.bodiesOfEntity('witness_box')[0]).position;
         });
       await page.evaluate(() => window.__sim.editor.select('witness_box'));
+      // 방향키는 **뷰포트 스코프** 바인딩이다(불변식 §2.10 — 라우터가 소유권을 가른다).
+      // 실제 사용자는 3D 화면을 클릭하면서 포커스를 얻지만, 파사드 select()에는 그
+      // 부수효과가 없으므로 게이트가 같은 조건을 명시적으로 만든다.
+      await focusViewportSlot(page);
       const beforeNudge = await posOf();
       await page.keyboard.press('ArrowRight');
       await page.waitForTimeout(300);
@@ -1588,6 +2076,7 @@ async function main() {
       const robotSnapshot = () => robotSnapshotOf(ROBOT_ID);
 
       await page.evaluate((robotId) => window.__sim.editor.select(robotId), ROBOT_ID);
+      await focusViewportSlot(page); // 방향키는 뷰포트 스코프 (위 witness_box 주석 참조)
       const robotBefore = await robotSnapshot();
       await page.keyboard.press('ArrowRight');
       await page.waitForTimeout(300);
@@ -1798,6 +2287,1054 @@ async function main() {
           `posShift=${rotateResult.positionShift.toFixed(4)}m dRot=${rotateResult.rotationDelta.toFixed(4)} — 회전이 베이스를 옮겼다(앵커 공전 회귀)`);
       }
       await page.keyboard.press('w'); // 이동 모드로 복귀 (다음 검증에 영향 없게)
+    }
+
+    // ── conveyor-pick-place — 컨베이어 이송 · 재순환 · 포토아이 픽앤플레이스 ──
+    //
+    // 이 게이트가 지키는 것은 "컨베이어가 데이터로 선언되고 물리로 동작한다"이다.
+    // 벨트는 fixed 바디라 **자신은 움직이지 않으므로**, 동작 증거는 오직 그 위 사물의
+    // 이동뿐이다 — 그래서 재생 전에 벨트만 돌려 사물이 실제로 실려 가는지부터 본다.
+    if (expectArg === 'conveyor-pick-place') {
+      const itemX = async (id) =>
+        page.evaluate((entityId) => {
+          const w = window.__sim.world;
+          const b = w.bodiesOfEntity(entityId)[0];
+          return b === undefined ? null : w.getPose(b).position[0];
+        }, id);
+
+      // (a) ★ 벨트가 사물을 실어 나른다 — 시퀀스 재생 전, 벨트만으로
+      const beforeCarry = await itemX('item_a');
+      await page.waitForTimeout(CPP_BELT_OBSERVE_SEC * 1000);
+      const afterCarry = await itemX('item_a');
+      const carried = beforeCarry !== null && afterCarry !== null ? afterCarry - beforeCarry : null;
+      // 한 바퀴 돌았으면 x가 되감기므로 벨트 길이를 더해 진행량을 복원한다
+      const travelled =
+        carried === null ? null : carried >= 0 ? carried : carried + (CPP_BELT_END_X - CPP_BELT_START_X);
+      if (travelled !== null && travelled >= CPP_MIN_BELT_TRAVEL_M) {
+        pass('conveyor: 벨트가 사물을 진행 방향으로 실어 나른다 (재생 전, 벨트 단독)',
+          `${beforeCarry?.toFixed(3)} → ${afterCarry?.toFixed(3)} (이송 ${travelled.toFixed(3)}m / ${CPP_BELT_OBSERVE_SEC}s)`);
+      } else {
+        fail('conveyor: 벨트가 사물을 진행 방향으로 실어 나른다 (재생 전, 벨트 단독)',
+          `before=${beforeCarry} after=${afterCarry} travelled=${travelled}`);
+      }
+
+      // (b) ★ 재순환 — 끝에 도달한 사물이 시작점으로 돌아온다 ("물건이 계속 온다")
+      let recycles = 0;
+      let previousX = await itemX('item_a');
+      const recycleDeadline = Date.now() + CPP_RECYCLE_OBSERVE_SEC * 1000;
+      while (Date.now() < recycleDeadline) {
+        await page.waitForTimeout(SEQ_POLL_INTERVAL_MS * 2);
+        const x = await itemX('item_a');
+        if (x !== null && previousX !== null && x < previousX - CPP_MIN_BELT_TRAVEL_M) recycles += 1;
+        previousX = x;
+      }
+      if (recycles >= 1) {
+        pass('conveyor: 끝에 도달한 사물이 시작점으로 재순환한다 ★ (런타임 스폰 없이)',
+          `재순환 ${recycles}회 / ${CPP_RECYCLE_OBSERVE_SEC}s`);
+      } else {
+        fail('conveyor: 끝에 도달한 사물이 시작점으로 재순환한다 ★ (런타임 스폰 없이)',
+          `재순환 0회 — 마지막 x=${previousX}`);
+      }
+
+      // (c) 시퀀스는 Play 전까지 멈춰 있다 (human-in-the-loop §2.12)
+      const initial = await page.evaluate(() => {
+        const p = window.__sim?.player;
+        return p ? { status: p.status, stepCount: p.stepCount } : null;
+      });
+      if (initial?.status === 'idle' && initial.stepCount === CPP_STEP_COUNT) {
+        pass(`conveyor: sequence loaded, no autoplay (idle, ${CPP_STEP_COUNT} steps)`);
+      } else {
+        fail(`conveyor: sequence loaded, no autoplay (idle, ${CPP_STEP_COUNT} steps)`,
+          `initial=${JSON.stringify(initial)}`);
+      }
+
+      if (!initial) {
+        fail('conveyor: interaction checks skipped', 'player facade missing');
+      } else {
+        // 앞의 관측 단계(벨트 15s + 재순환)가 라인의 위상을 바꿔 놓았다 — 상자들이
+        // 재순환을 몇 바퀴 돌아 씬 선언과 다른 순서/위치에 있다. 시퀀스는 선입선출
+        // (item_a → b → c)을 전제하므로 그대로 재생하면 오지 않을 상자를 기다리다 죽는다
+        // (실측: step 12에서 45s 정지). 그래서 재생 전에 초기 상태로 돌아가야 한다.
+        //
+        // ★ ⏹(orchestrator.stop)로는 부족하다 — **결정론이 돌아오지 않는다.**
+        // stop()은 바디를 스펙 좌표로 텔레포트하지만 Rapier 솔버의 warm-start 임펄스와
+        // 접촉 매니폴드는 지우지 못한다. 관측 15초 동안 쌓인 그 내부 상태는 머신 부하에
+        // 따라 tick 수가 달라져 매번 다르고, 상자끼리 밀치는 사슬에서 증폭된다.
+        // A/B 실측(각 3회): 로드 직후 바로 재생 → 최종 좌표가 소수점 5자리까지 3회 동일.
+        // 15초 관측 → stop() → 재생 → 3회 중 2회가 다른 결과(한 번은 완주 54.4s, 정상 24.9s).
+        // 이것이 이 게이트가 유휴에서 6회 중 1회, 전체 스위트 13번째 위치에서 2/2 실패하던
+        // 원인이다. **페이지를 새로 열어 새 월드에서 재생한다** — 되감기가 아니라 재빌드다.
+        await page.goto(url, { waitUntil: 'load' });
+        await page.waitForFunction(() => window.__sim !== undefined, undefined, { timeout: 15000 });
+
+        // 사이클마다 **놓는 순간**의 그리퍼–상자 거리를 표본한다. 최종 위치만 보면
+        // 이송 중 떨어뜨린 것과 제대로 놓은 것이 구분되지 않는다(둘 다 바닥에서 끝난다).
+        //
+        // 표본은 반드시 **물리 tick** 위에서 뜬다. engine.onTick은 rAF당 1회라(240Hz 물리에
+        // 60Hz 표본) "놓기 step의 첫 tick"을 최대 24 tick 늦게 잡고, 그 지연이 프레임
+        // 타이밍에 좌우된다 — 같은 초기 상태에서 놓기 거리가 0.019 / 0.021 / 0.044로
+        // 갈리는 것을 실측했다. 그건 시뮬 차이가 아니라 측정 아티팩트다.
+        await page.evaluate(
+          ({ releaseSteps, items }) => {
+            window.__releaseGaps = {};
+            window.__sim.engine.onPhysicsTick(() => {
+              const player = window.__sim.player;
+              if (!player) return;
+              const cycle = releaseSteps.indexOf(player.currentStepIndex);
+              if (cycle < 0) return;
+              const item = items[cycle];
+              if (window.__releaseGaps[item] !== undefined) return;
+              const w = window.__sim.world;
+              const body = w.bodiesOfEntity(item)[0];
+              if (body === undefined) return;
+              const p = w.getPose(body).position;
+              // 베이스에서 가장 먼 링크를 그리퍼로 본다 (anchorProbe와 같은 관례)
+              let far = null;
+              let maxR = -1;
+              for (const bid of w.bodiesOfEntity('arm')) {
+                const q = w.getPose(bid).position;
+                const r = Math.hypot(q[0], q[2]);
+                if (r > maxR) { maxR = r; far = q; }
+              }
+              if (far === null) return;
+              window.__releaseGaps[item] = Math.hypot(p[0] - far[0], p[2] - far[2]);
+            });
+          },
+          { releaseSteps: CPP_RELEASE_STEP_INDEXES, items: CPP_CYCLE_ITEMS },
+        );
+
+        const last = await playAndAwaitDone(page, CPP_SIM_TIME_BUDGET_SEC);
+        const history = await page.evaluate(
+          (limit) => window.__sim.collision.recent(limit),
+          HISTORY_FETCH_LIMIT,
+        );
+
+        // (d) 포토아이 게이트가 **세 상자의 도착을 각각** 감지한다 (sensor start)
+        // timeSec > 0 조건이 핵심이다: 사물이 게이트와 **겹친 채로 스폰**되면 t=0에
+        // 센서 start가 한 건 생겨, 벨트가 전혀 돌지 않아도 이 어서션이 통과한다.
+        // (실제로 첫 배치가 그 상태였다 — 씬을 고치고 어서션도 함께 조인다.)
+        const gateMisses = CPP_CYCLE_ITEMS.filter(
+          (item) =>
+            !history.some(
+              (e) =>
+                e.phase === 'start' &&
+                e.kind === 'sensor' &&
+                isPair(e, item, 'pick_gate') &&
+                e.timeSec > CPP_MIN_EVENT_SIM_SEC,
+            ),
+        );
+        if (gateMisses.length === 0) {
+          pass('conveyor: 포토아이(pick_gate)가 세 상자의 도착을 각각 감지한다 (스폰 겹침 아님)');
+        } else {
+          fail('conveyor: 포토아이(pick_gate)가 세 상자의 도착을 각각 감지한다 (스폰 겹침 아님)',
+            `미감지=${JSON.stringify(gateMisses)} pairs=${JSON.stringify([...new Set(history.map((e) => `${e.a}×${e.b}`))])}`);
+        }
+
+        // (e) 로봇이 세 상자를 각각 잡는다 (arm×item_* 접촉 — 선언된 타겟)
+        const pickMisses = CPP_CYCLE_ITEMS.filter(
+          (item) =>
+            !history.some(
+              (e) => e.phase === 'start' && e.kind === 'contact' && isPair(e, 'arm', item),
+            ),
+        );
+        if (pickMisses.length === 0) {
+          pass('conveyor: 로봇이 세 상자에 각각 접촉한다 (선언된 타겟)');
+        } else {
+          fail('conveyor: 로봇이 세 상자에 각각 접촉한다 (선언된 타겟)',
+            `미접촉=${JSON.stringify(pickMisses)}`);
+        }
+
+        // (f) ★ 사용자 요청의 본체 — "상자 세 개를 연속으로 드랍존에 안착"시킨다.
+        //     이벤트(존 진입)와 최종 정지 위치를 **둘 다** 본다: 진입만 보면 존 위를
+        //     스쳐 지나간 상자도 통과하고, 위치만 보면 센서 쌍이 끊겨도 통과한다.
+        const zoneMisses = CPP_CYCLE_ITEMS.filter(
+          (item) =>
+            !history.some(
+              (e) => e.phase === 'start' && e.kind === 'sensor' && isPair(e, item, 'drop_zone'),
+            ),
+        );
+        const resting = await page.evaluate((items) => {
+          const w = window.__sim.world;
+          // 존 기하는 씬 데이터에서 읽는다 — 게이트에 좌표를 복사해 두면 씬을 옮길 때
+          // 게이트가 조용히 거짓말을 한다(존은 옮겼는데 어서션은 옛 자리를 본다).
+          const zone = window.__sim.editor.serialize().entities.find((e) => e.id === 'drop_zone');
+          const half = zone?.physics?.colliders?.[0]?.shape?.halfExtents ?? null;
+          const center = zone?.transform?.position ?? null;
+          if (!half || !center) return null;
+          const out = {};
+          for (const id of items) {
+            const body = w.bodiesOfEntity(id)[0];
+            if (body === undefined) { out[id] = null; continue; }
+            const p = w.getPose(body).position;
+            out[id] = {
+              p: [p[0], p[1], p[2]],
+              inside:
+                Math.abs(p[0] - center[0]) <= half[0] && Math.abs(p[2] - center[2]) <= half[2],
+            };
+          }
+          return out;
+        }, CPP_CYCLE_ITEMS);
+        const outside = resting
+          ? CPP_CYCLE_ITEMS.filter((id) => !resting[id]?.inside)
+          : CPP_CYCLE_ITEMS;
+        if (zoneMisses.length === 0 && outside.length === 0) {
+          pass('conveyor: 세 상자가 연속으로 감지 존에 안착한다 ★ (라인 픽앤플레이스 성립)',
+            CPP_CYCLE_ITEMS.map((id) => `${id}=[${resting[id].p.map((v) => v.toFixed(2)).join(',')}]`).join(' '));
+        } else {
+          fail('conveyor: 세 상자가 연속으로 감지 존에 안착한다 ★ (라인 픽앤플레이스 성립)',
+            `존 진입 없음=${JSON.stringify(zoneMisses)} / 존 밖 정지=${JSON.stringify(outside)} / ${JSON.stringify(resting)}`);
+        }
+
+        // (f-2) ★ "가다가 떨어뜨린다"의 직접 회귀 — 놓는 순간 상자가 아직 손에 있는가.
+        const gaps = await page.evaluate(() => window.__releaseGaps);
+        const dropped = CPP_CYCLE_ITEMS.filter(
+          (id) => !(gaps?.[id] <= CPP_MAX_RELEASE_GAP_M),
+        );
+        if (dropped.length === 0) {
+          pass('conveyor: 놓는 순간 세 상자가 모두 아직 그리퍼에 있다 (이송 중 낙하 없음)',
+            CPP_CYCLE_ITEMS.map((id) => `${id}=${(gaps[id] * 100).toFixed(1)}cm`).join(' '));
+        } else {
+          fail('conveyor: 놓는 순간 세 상자가 모두 아직 그리퍼에 있다 (이송 중 낙하 없음)',
+            `${JSON.stringify(gaps)} — 손에서 빠졌거나 CPP_RELEASE_STEP_INDEXES가 시퀀스와 어긋났다`);
+        }
+
+        // (g) 정상 실행은 벨트를 건드리지 않는다 — 샘플이 매번 충돌을 보고하면
+        //     "정상"의 기준선이 무너진다 (pick-and-place 선반 계약과 같은 이유).
+        //     팔이 라인 밖에서 대기하도록 포토아이로 트리거하는 설계의 근거이기도 하다.
+        const beltHits = history.filter((e) => e.phase === 'start' && isPair(e, 'arm', 'belt'));
+        if (beltHits.length === 0) {
+          pass('conveyor: 정상 시퀀스는 벨트를 건드리지 않는다 (arm×belt 0건)');
+        } else {
+          fail('conveyor: 정상 시퀀스는 벨트를 건드리지 않는다 (arm×belt 0건)',
+            `hits=${JSON.stringify(beltHits.map((e) => e.timeSec.toFixed(2)))}`);
+        }
+
+        // (h) 라인은 세 개를 다 처리한 뒤에도 계속 돈다 — 다음 물건이 오면 실어 간다.
+        //     세 상자가 모두 적재 레인으로 빠졌으므로 벨트 위에 관측 대상이 없다.
+        //     상자 하나를 라인에 **다시 올려** 실려 가는지로 판정한다(위상 무관).
+        //     시퀀스 완주 후 엔진은 일시정지 상태이고 벨트는 물리 스텝에서만 구동하므로,
+        //     관측 전에 물리를 재개한다 (멈춘 시뮬에서 벨트가 도는 것이 오히려 결함이다).
+        await page.evaluate((seat) => {
+          window.__sim.editor.updateTransform('item_a', { position: seat });
+          window.__sim.engine.play();
+        }, CPP_BELT_SEAT_POSITION);
+        const bBefore = await itemX('item_a');
+        await page.waitForTimeout(CPP_BELT_OBSERVE_SEC * 1000);
+        const bAfter = await itemX('item_a');
+        const bMoved = bBefore !== null && bAfter !== null && Math.abs(bAfter - bBefore) > 0.05;
+        if (bMoved) {
+          pass('conveyor: 세 개를 처리한 뒤에도 라인이 계속 돈다 (다음 물건이 오면 실어 간다)',
+            `item_a ${bBefore?.toFixed(3)} → ${bAfter?.toFixed(3)}`);
+        } else {
+          fail('conveyor: 세 개를 처리한 뒤에도 라인이 계속 돈다 (다음 물건이 오면 실어 간다)',
+            `item_a ${bBefore} → ${bAfter}`);
+        }
+
+        // (i) 시퀀스 완주
+        if (last.status === 'done') {
+          pass('conveyor: sequence done', `elapsed=${last.elapsedSimSec.toFixed(2)}s`);
+        } else {
+          fail('conveyor: sequence done', `last=${JSON.stringify(last)}`);
+        }
+
+        // (j) 인스펙터에 Conveyor 섹션이 나타난다 (벨트를 선택했을 때만)
+        const sections = await page.evaluate(() => {
+          const sel = window.__sim.editor;
+          sel.select('belt');
+          const beltHas = document.querySelector('[data-testid="ee-sec-conveyor"]') !== null;
+          sel.select('item_a');
+          const itemHas = document.querySelector('[data-testid="ee-sec-conveyor"]') !== null;
+          sel.select(null);
+          return { beltHas, itemHas };
+        });
+        if (sections.beltHas && !sections.itemHas) {
+          pass('conveyor: 인스펙터 Conveyor 섹션은 벨트에만 나타난다');
+        } else {
+          fail('conveyor: 인스펙터 Conveyor 섹션은 벨트에만 나타난다', JSON.stringify(sections));
+        }
+
+        // (k) ★ 벨트 편집이 실제 물리 거동을 바꾼다 — 방향을 뒤집으면 흐름이 뒤집힌다.
+        //     벨트 기하는 바인딩 생성 시점에 고정되므로, updateConveyor가 엔티티를
+        //     재빌드해 새 바인딩을 만들지 않으면 이 어서션이 실패한다.
+        // 측정을 벨트 위상에서 완전히 떼어낸다: 편집 후 item_b를 벨트 한가운데에
+        // **명시적으로** 올려놓고 잰다. 그러지 않으면 이 시점의 item_b가 이미 라인 끝
+        // 근처일 수 있어(앞 어서션들이 시간을 소비한다) 관측 창 안에 벨트를 벗어난다
+        // — 실측으로 재현된 레이스다(vx≈0, onBelt=false).
+        await page.evaluate(
+          ({ speed, seat, park }) => {
+            window.__sim.editor.updateConveyor('belt', {
+              direction: [-1, 0, 0],
+              speedMps: speed,
+              recycle: true,
+            });
+            // 앞 어서션이 item_a를 라인에 다시 올려 두었다 — 치우지 않으면 두 상자가
+            // 같은 자리를 두고 부딪혀 item_b가 벨트 밖으로 밀려난다(실측 onBelt=false).
+            window.__sim.editor.updateTransform('item_a', { position: park });
+            window.__sim.editor.updateTransform('item_b', { position: seat });
+            window.__sim.engine.play();
+          },
+          { speed: CPP_EDITED_SPEED_MPS, seat: CPP_BELT_REVERSE_SEAT_POSITION, park: CPP_BELT_PARK_POSITION },
+        );
+        // 판정은 **변위가 아니라 속도**로 한다. 벨트 런웨이는 0.44 m뿐이라, 관측
+        // 시작 시점의 위상에 따라 사물이 반대쪽 끝으로 떨어져 변위 임계값을 못 채울 수
+        // 있다(= 위상 레이스). 벨트가 지정하는 것은 속도이므로 속도를 보는 것이 정확하다.
+        await page.waitForTimeout(CPP_EDIT_OBSERVE_SEC * 1000);
+        const reversed = await page.evaluate((expected) => {
+          const w = window.__sim.world;
+          const b = w.bodiesOfEntity('item_b')[0];
+          if (b === undefined) return null;
+          const v = w.getLinearVelocity(b);
+          const p = w.getPose(b).position;
+          return { vx: v[0], expected, y: p[1], x: p[0], onBelt: p[1] > 0.03 };
+        }, CPP_EDITED_SPEED_MPS);
+        const reversedOk =
+          reversed !== null &&
+          reversed.onBelt &&
+          reversed.vx < 0 &&
+          Math.abs(Math.abs(reversed.vx) - CPP_EDITED_SPEED_MPS) < CPP_SPEED_TOLERANCE_MPS;
+        if (reversedOk) {
+          pass('conveyor: 인스펙터/파사드 편집이 벨트 거동을 바꾼다 ★ (방향 반전 + 증속)',
+            `item_b vx=${reversed.vx.toFixed(3)} m/s (기대 −${CPP_EDITED_SPEED_MPS})`);
+        } else {
+          fail('conveyor: 인스펙터/파사드 편집이 벨트 거동을 바꾼다 ★ (방향 반전 + 증속)',
+            `${JSON.stringify(reversed)} — 바인딩이 재생성되지 않았을 수 있다`);
+        }
+      }
+    }
+
+    // ── ㄱ자 라인 셀 — 코너 이송 + 로봇 3종 스테이션 ────────────────
+    //
+    // 직각으로 이어진 벨트 2개 위에서 손이 서로 다른 로봇 3대가 차례로 일한다.
+    // 동시 동작은 이 엔진이 표현할 수 없다(선형 1-step 모델) — 대신 컨베이어가 매 물리
+    // tick 계속 돌아 "라인은 흐르고 로봇은 순서대로 일한다"가 된다.
+    if (expectArg === 'l-line-cell') {
+      const initial = await page.evaluate(() => {
+        const p = window.__sim?.player;
+        return p ? { status: p.status, stepCount: p.stepCount } : null;
+      });
+      if (initial?.status === 'idle' && initial.stepCount === LL_STEP_COUNT) {
+        pass(`l-line: sequence loaded, no autoplay (idle, ${LL_STEP_COUNT} steps)`);
+      } else {
+        fail(`l-line: sequence loaded, no autoplay (idle, ${LL_STEP_COUNT} steps)`,
+          `initial=${JSON.stringify(initial)}`);
+      }
+
+      if (!initial) {
+        fail('l-line: interaction checks skipped', 'player facade missing');
+      } else {
+        // ★ 공통 검사(sim time advances)가 재생 전에 이미 물리를 흘려보냈다 — 그동안 벨트가
+        // 상자를 앞으로 실어 날라 라인 위상이 바뀐다. 그 상태로 재생하면 press 배리어가
+        // 이미 지나간 상자를 기다리다 죽는다(실측: step 14에서 45초 정지).
+        // 되감기(orchestrator.stop)로는 부족하다 — 좌표는 돌아와도 Rapier 솔버의 warm-start
+        // 상태가 남아 결정론이 복원되지 않는다(A/B 실측). **페이지를 새로 열어 새 월드에서** 한다.
+        await page.goto(url, { waitUntil: 'load' });
+        await page.waitForFunction(() => window.__sim !== undefined, undefined, { timeout: 15000 });
+
+        // 놓는 순간 상자가 아직 손에 있는지 — 물리 tick 위에서 표본한다(rAF는 최대 24 tick 늦다)
+        await page.evaluate(
+          ({ steps, item }) => {
+            window.__llGaps = {};
+            window.__sim.engine.onPhysicsTick(() => {
+              const p = window.__sim.player;
+              if (!p) return;
+              const k = steps.indexOf(p.currentStepIndex);
+              if (k < 0 || window.__llGaps[String(k)] !== undefined) return;
+              const w = window.__sim.world;
+              const body = w.bodiesOfEntity(item)[0];
+              if (body === undefined) return;
+              const q = w.getPose(body).position;
+              // 그 순간 움직이던 로봇의 손 = 상자에 가장 가까운 로봇 링크
+              let best = Infinity;
+              for (const r of ['picker', 'palletizer']) {
+                for (const bid of w.bodiesOfEntity(r)) {
+                  const a = w.getPose(bid).position;
+                  const d = Math.hypot(a[0] - q[0], a[1] - q[1], a[2] - q[2]);
+                  if (d < best) best = d;
+                }
+              }
+              window.__llGaps[String(k)] = best;
+            });
+          },
+          { steps: LL_PLACE_STEP_INDEXES, item: LL_FINAL_ITEM },
+        );
+
+        const last = await playAndAwaitDone(page, LL_SIM_BUDGET_SEC);
+        const history = await page.evaluate(
+          (limit) => window.__sim.collision.recent(limit),
+          HISTORY_FETCH_LIMIT,
+        );
+
+        // (a) 완주
+        if (last.status === 'done') {
+          pass('l-line: sequence done', `elapsed=${last.elapsedSimSec.toFixed(2)}s step=${last.index}`);
+        } else {
+          fail('l-line: sequence done', `last=${JSON.stringify(last)}`);
+        }
+
+        // (b) ★ 세 로봇이 각자 자기 상자를 실제로 만졌다 — 이게 "일했다"의 최소 증거다
+        const idle = LL_STATIONS.filter(
+          (st) => !history.some((e) => e.phase === 'start' && isPair(e, st.robot, st.item)),
+        );
+        if (idle.length === 0) {
+          pass('l-line: 로봇 3종이 각자 스테이션에서 자기 상자를 만진다 ★',
+            LL_STATIONS.map((st) => `${st.robot}(${st.role})×${st.item}`).join(' '));
+        } else {
+          fail('l-line: 로봇 3종이 각자 스테이션에서 자기 상자를 만진다 ★',
+            `무접촉=${JSON.stringify(idle.map((s2) => `${s2.robot}×${s2.item}`))} ` +
+            `pairs=${JSON.stringify([...new Set(history.map((e) => `${e.a}×${e.b}`))])}`);
+        }
+
+        // (c) ★ 상자가 인계 패드를 거쳐 팔레트에 **중심 좌표로** 안착한다.
+        //     센서 이벤트를 쓰지 않는 이유는 위 상수 주석 참조.
+        const placement = await page.evaluate((item) => {
+          const w = window.__sim.world;
+          const spec = window.__sim.editor.serialize();
+          const zoneOf = (id) => {
+            const e = spec.entities.find((x) => x.id === id);
+            const h = e?.physics?.colliders?.[0]?.shape?.halfExtents ?? null;
+            return h === null ? null : { p: e.transform.position, h };
+          };
+          const inside = (pos, z) =>
+            z !== null && Math.abs(pos[0] - z.p[0]) <= z.h[0] && Math.abs(pos[2] - z.p[2]) <= z.h[2];
+          const body = w.bodiesOfEntity(item)[0];
+          if (body === undefined) return null;
+          const pos = w.getPose(body).position;
+          return {
+            pos: [pos[0], pos[1], pos[2]],
+            inPallet: inside(pos, zoneOf('zone_pallet')),
+            inHandoff: inside(pos, zoneOf('zone_handoff')),
+          };
+        }, LL_FINAL_ITEM);
+        // 팔레트 안 + 인계 패드 **밖** 둘 다 요구한다 — 인계 자리에 그대로 있으면
+        // palletizer가 일하지 않은 것이고, 존이 겹쳐 있으면 둘 다 참이 된다.
+        if (placement?.inPallet === true && placement.inHandoff === false) {
+          pass('l-line: 상자가 인계 패드를 거쳐 팔레트에 안착한다 ★ (중심 좌표 판정)',
+            `${LL_FINAL_ITEM}=[${placement.pos.map((v) => v.toFixed(3)).join(', ')}]`);
+        } else {
+          fail('l-line: 상자가 인계 패드를 거쳐 팔레트에 안착한다 ★ (중심 좌표 판정)',
+            JSON.stringify(placement));
+        }
+
+        // (d) 놓는 순간 상자가 아직 손에 있었다 — 옮긴 것과 벨트가 밀어 놓은 것을 가른다
+        const gaps = await page.evaluate(() => window.__llGaps);
+        const dropped = LL_PLACE_STEP_INDEXES.map((_, k) => String(k)).filter(
+          (k) => !(gaps?.[k] <= LL_MAX_RELEASE_GAP_M),
+        );
+        if (dropped.length === 0) {
+          pass('l-line: 두 번의 놓기에서 상자가 아직 손 안에 있다 (이송 중 낙하 없음)',
+            LL_PLACE_STEP_INDEXES.map((_, k) => `${(gaps[String(k)] * 100).toFixed(1)}cm`).join(' / '));
+        } else {
+          fail('l-line: 두 번의 놓기에서 상자가 아직 손 안에 있다 (이송 중 낙하 없음)',
+            `${JSON.stringify(gaps)} — 손에서 빠졌거나 LL_PLACE_STEP_INDEXES가 시퀀스와 어긋났다`);
+        }
+
+        // (e) ★ 로봇이 라인 설비를 건드리지 않는다. 분류(target/unexpected)를 거치지 않고
+        //     **원시 쌍**으로 센다 — 배리어 선언이 화이트리스트를 만들어 숫자를 가릴 수 있다.
+        const hits = [];
+        for (const robot of LL_ROBOTS) {
+          for (const other of [...LL_STATICS, ...LL_ROBOTS.filter((r) => r !== robot)]) {
+            const n = history.filter((e) => e.phase === 'start' && isPair(e, robot, other)).length;
+            if (n > 0) hits.push(`${robot}×${other}:${n}`);
+          }
+        }
+        if (hits.length === 0) {
+          pass('l-line: 로봇이 벨트·가이드·다른 로봇을 건드리지 않는다 ★ (원시 쌍 집계)');
+        } else {
+          fail('l-line: 로봇이 벨트·가이드·다른 로봇을 건드리지 않는다 ★ (원시 쌍 집계)',
+            hits.join(' '));
+        }
+
+        // (f) 코너가 실제로 물건을 돌렸다 — 벨트 A에서 출발한 상자가 벨트 B 레인에 있다.
+        //     라인이 죽어 있으면 상자들이 출발 x 근처에 남는다.
+        const turned = await page.evaluate(() => {
+          const w = window.__sim.world;
+          return ['item_a', 'item_b', 'item_c'].filter((id) => {
+            const b = w.bodiesOfEntity(id)[0];
+            if (b === undefined) return false;
+            const p = w.getPose(b).position;
+            return p[2] > 0.2; // 벨트 A는 z≈0 — z가 커졌다면 코너를 돈 것이다
+          }).length;
+        });
+        if (turned === 3) {
+          pass('l-line: 상자 3개가 모두 직각 코너를 돌아 벨트 B 구간으로 넘어갔다 ★',
+            `z>0.2인 상자 ${turned}개`);
+        } else {
+          fail('l-line: 상자 3개가 모두 직각 코너를 돌아 벨트 B 구간으로 넘어갔다 ★',
+            `z>0.2인 상자 ${turned}개 (기대 3)`);
+        }
+      }
+    }
+
+    // ── 라이브러리 로봇 3종 (arm-6 / SCARA-4 / Cobot-7) ─────────────
+    //
+    // 손 모양이 서로 다르다: 평행 2지 · 흡착 패드 · 3지 클로. URDF가 파싱만 되고
+    // 실제로 구동되지 않는 회귀를 잡는다 — 파싱은 라이브러리 카드를 띄우기에 충분하지만
+    // 시퀀스는 관절이 움직여야 성립한다.
+    if (expectArg === 'robot-library') {
+      const rows = [];
+      for (let i = 0; i < RL_ROBOTS.length; i += 1) {
+        const r = RL_ROBOTS[i];
+        const x = RL_SPOT_X0 + i * RL_SPOT_DX;
+
+        // 라이브러리 카드 드롭과 동일 경로 (placeTemplate) — 로봇은 URDF 로드라 async
+        const id = await page.evaluate(
+          async ({ key, px, pz }) => window.__sim.editor.placeTemplate(key, [px, 0, pz]),
+          { key: r.key, px: x, pz: RL_SPOT_Z },
+        );
+        await page.waitForFunction(
+          (i2) => window.__sim.robots.ids().includes(i2),
+          id,
+          { timeout: RL_PLACE_DEADLINE_MS },
+        );
+
+        const before = await page.evaluate((i2) => ({
+          joints: window.__sim.robots.joints(i2).map((j) => j.name),
+          links: window.__sim.robots.linkPoses(i2).map((p) => [...p.position]),
+          values: window.__sim.robots.readJoints(i2),
+        }), id);
+
+        // 관절을 움직이면 말단(베이스에서 가장 먼 링크)이 실제로 이동하는가
+        await page.evaluate(
+          ({ i2, j, v }) => window.__sim.robots.setJoint(i2, j, v),
+          { i2: id, j: r.driveJoint, v: (before.values[r.driveJoint] ?? 0) + r.driveDelta },
+        );
+        await awaitSimAdvance(page, 0.1);
+        const afterLinks = await page.evaluate(
+          (i2) => window.__sim.robots.linkPoses(i2).map((p) => [...p.position]),
+          id,
+        );
+        const endMove = Math.max(
+          ...before.links.map((p, k) => {
+            const q = afterLinks[k];
+            return q === undefined ? 0 : Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+          }),
+        );
+
+        // 그리퍼가 손을 실제로 여닫는가 — **링크 변위**로 잰다(관절 구동 판정과 같은 방식).
+        // 손 끝을 "원점에서 먼 링크"로 고르면 로봇이 원점에서 떨어져 놓인 순간 엉뚱한
+        // 링크를 집는다(실측: 로봇을 x=2.6에 놓자 handDelta가 0으로 나왔다). 어느 링크가
+        // 손인지 게이트가 알 필요 없다 — 그리퍼 관절을 바꿨을 때 **가장 많이 움직인 링크**가
+        // 손이고, 그 변위가 0이면 손이 안 움직인 것이다.
+        const setGripper = async (value) => {
+          await page.evaluate(
+            ({ i2, joints, v }) => {
+              for (const j of joints) window.__sim.robots.setJoint(i2, j, v);
+            },
+            { i2: id, joints: r.gripperJoints, v: value },
+          );
+          await awaitSimAdvance(page, 0.1);
+          return page.evaluate(
+            (i2) =>
+              window.__sim.robots
+                .linkPoses(i2)
+                .map((p) => ({ position: [...p.position], rotation: [...p.rotation] })),
+            id,
+          );
+        };
+        const opened = await setGripper(r.gripperOpen);
+        const closed = await setGripper(r.gripperClose);
+        const handDelta = Math.max(
+          ...opened.map((p, k) => {
+            const q = closed[k];
+            return q === undefined
+              ? 0
+              : Math.hypot(p.position[0] - q.position[0], p.position[1] - q.position[1], p.position[2] - q.position[2]);
+          }),
+        );
+        // 쿼터니언 사이각 = 2·acos(|dot|) — revolute 손가락의 유일한 신호다
+        const handRot = Math.max(
+          ...opened.map((p, k) => {
+            const q = closed[k];
+            if (q === undefined) return 0;
+            const dot = Math.abs(
+              p.rotation[0] * q.rotation[0] + p.rotation[1] * q.rotation[1] +
+              p.rotation[2] * q.rotation[2] + p.rotation[3] * q.rotation[3],
+            );
+            return 2 * Math.acos(Math.min(1, dot));
+          }),
+        );
+
+        // home 포즈에서 바닥 아래로 내려간 링크가 없는가 (§2.11 — kinematic은 자가 교정이 없다)
+        await page.evaluate((i2) => window.__sim.robots.ids().includes(i2), id);
+        const minY = Math.min(...before.links.map((p) => p[1]));
+
+        rows.push({
+          key: r.key,
+          id,
+          hand: r.handKind,
+          links: before.links.length,
+          joints: before.joints.length,
+          endMove: +endMove.toFixed(4),
+          handDelta: +handDelta.toFixed(4),
+          handRot: +handRot.toFixed(4),
+          minY: +minY.toFixed(4),
+          ok:
+            before.links.length >= r.minLinks &&
+            before.joints.includes(r.driveJoint) &&
+            r.gripperJoints.every((j) => before.joints.includes(j)) &&
+            endMove >= RL_MIN_END_MOVE_M &&
+            (handDelta >= RL_MIN_HAND_DELTA_M || handRot >= RL_MIN_HAND_ROT_RAD) &&
+            minY >= -RL_MAX_UNDERGROUND_M,
+        });
+      }
+
+      const summary = rows.map((r) => `${r.key}(${r.hand}) 링크${r.links} 구동${r.endMove}m 손 ${r.handDelta}m/${r.handRot}rad`).join(' / ');
+      if (rows.every((r) => r.ok)) {
+        pass('robot-library: 로봇 3종이 서고 · 관절이 말단을 움직이고 · 손이 여닫힌다 ★', summary);
+      } else {
+        fail('robot-library: 로봇 3종이 서고 · 관절이 말단을 움직이고 · 손이 여닫힌다 ★',
+          JSON.stringify(rows.filter((r) => !r.ok)));
+      }
+
+      // 세 로봇이 한 씬에 공존한다 (id 충돌·URDF 캐시 오염 없음)
+      const coexist = await page.evaluate(() => window.__sim.robots.ids().length);
+      if (coexist >= RL_ROBOTS.length + 1) {
+        pass('robot-library: 세 로봇이 기존 로봇과 한 씬에 공존한다', `robots=${coexist}`);
+      } else {
+        fail('robot-library: 세 로봇이 기존 로봇과 한 씬에 공존한다', `robots=${coexist}`);
+      }
+
+      // 편집 스펙이 저장 가능한 상태로 남는가 (§2.11 — 문서로 보존된다)
+      const serialized = await page.evaluate(() => {
+        const spec = window.__sim.editor.serialize();
+        return spec.entities.filter((e) => e.type === 'robot').map((e) => ({ id: e.id, urdf: e.urdf }));
+      });
+      const urdfOk = serialized.length >= RL_ROBOTS.length + 1 && serialized.every((e) => typeof e.urdf === 'string' && e.urdf.length > 0);
+      if (urdfOk) {
+        pass('robot-library: 로봇이 urdf 경로를 가진 채 직렬화된다 (저장/재로드 가능)',
+          serialized.map((e) => e.urdf.split('/').pop()).join(' '));
+      } else {
+        fail('robot-library: 로봇이 urdf 경로를 가진 채 직렬화된다 (저장/재로드 가능)',
+          JSON.stringify(serialized));
+      }
+    }
+
+    // ── 3D 파일 임포트 (UX_DESIGN §4.4) ──────────────────────────────
+    //
+    // 이 경로는 브라우저에서 한 번도 검증된 적이 없었다. 계측은 손으로 만든 픽스처
+    // gate-box.{glb,stl,obj}로 한다 — 세 변이 모두 다르고 원점에서 어긋나 있어야
+    // 스케일·Up-axis·피벗 재정렬이 **각각** 관측된다(정육면체·원점중심이면 셋 다 무시해도 초록).
+    if (expectArg === 'mesh-import') {
+      // (a) 포맷 3종이 같은 솔리드로 파싱된다 — 로더별 회귀 가드
+      const parseRows = [];
+      for (const fx of IMP_FIXTURES) {
+        const phase = await openImportFixture(page, fx.file);
+        parseRows.push({ file: fx.file, ...phase });
+        await closeImportDialog(page);
+      }
+      const parseOk = parseRows.every(
+        (r, i) =>
+          r.format === IMP_FIXTURES[i].label &&
+          Number(String(r.triangles).replace(/,/g, '')) === IMP_FIXTURE_TRIANGLES &&
+          r.size === IMP_FIXTURE_SIZE_LABEL &&
+          r.errorVisible === false &&
+          r.confirmDisabled === false,
+      );
+      if (parseOk) {
+        pass('import: glb/stl/obj 3종이 같은 삼각형 수·치수로 파싱된다 ★',
+          `triangles=${IMP_FIXTURE_TRIANGLES} size=${IMP_FIXTURE_SIZE_LABEL}`);
+      } else {
+        fail('import: glb/stl/obj 3종이 같은 삼각형 수·치수로 파싱된다 ★', JSON.stringify(parseRows));
+      }
+
+      // (b) 스케일이 리드아웃과 collider **양쪽**에 반영된다.
+      //     둘은 독립 경로다(readout=formatBboxSizeM, collider=prepareForScene) —
+      //     한쪽만 보면 다른 쪽이 스케일을 무시해도 통과한다.
+      await importFixture(page, 'gate-box.glb',
+        { id: IMP_ID.aabb, scale: 1, upAxis: 'y', collider: 'aabb', kind: 'object' });
+      await parkImported(page, IMP_ID.aabb, 0);
+      const halfPhase = await openImportFixture(page, 'gate-box.glb');
+      await fillImportForm(page,
+        { id: IMP_ID.aabbHalf, scale: IMP_SCALE_HALF, upAxis: 'y', collider: 'aabb', kind: 'object' });
+      const halfSizeLabel = await page.evaluate(
+        () => document.querySelector('[data-testid="import-size"]')?.textContent ?? null,
+      );
+      await confirmImport(page);
+      await parkImported(page, IMP_ID.aabbHalf, 1);
+
+      const fullSpec = await importedSpec(page, IMP_ID.aabb);
+      const halfSpec = await importedSpec(page, IMP_ID.aabbHalf);
+      const halfOf = (spec) => spec?.physics?.colliders?.[0]?.shape?.halfExtents ?? null;
+      const fullHalf = halfOf(fullSpec);
+      const halfHalf = halfOf(halfSpec);
+      const absOk =
+        fullHalf !== null &&
+        IMP_FIXTURE_HALF_EXTENTS.every((v, i) => Math.abs(fullHalf[i] - v) < IMP_HALF_TOLERANCE_M);
+      const ratioOk =
+        fullHalf !== null && halfHalf !== null &&
+        fullHalf.every((v, i) => Math.abs(halfHalf[i] / v - IMP_SCALE_HALF) < IMP_RATIO_TOLERANCE);
+      if (absOk && ratioOk && halfSizeLabel === IMP_FIXTURE_HALF_SIZE_LABEL) {
+        pass('import: 스케일이 리드아웃과 collider 양쪽에 반영된다 (독립 경로 교차 검증)',
+          `half=${JSON.stringify(fullHalf)} 비율=${IMP_SCALE_HALF} readout=${halfSizeLabel}`);
+      } else {
+        fail('import: 스케일이 리드아웃과 collider 양쪽에 반영된다 (독립 경로 교차 검증)',
+          `full=${JSON.stringify(fullHalf)} half=${JSON.stringify(halfHalf)} readout=${halfSizeLabel} (기대 ${IMP_FIXTURE_HALF_SIZE_LABEL}) phase=${JSON.stringify(halfPhase)}`);
+      }
+
+      // (c) Z-up → Y-up 변환이 halfExtents y/z를 **교환**한다.
+      //     "그냥 작아지는" 회귀와 구분하려면 값이 바뀌는 게 아니라 자리가 바뀌어야 한다.
+      await importFixture(page, 'gate-box.glb',
+        { id: IMP_ID.aabbZ, scale: 1, upAxis: 'z', collider: 'aabb', kind: 'object' });
+      await parkImported(page, IMP_ID.aabbZ, 2);
+      const zHalf = halfOf(await importedSpec(page, IMP_ID.aabbZ));
+      const [ex, ey, ez] = IMP_FIXTURE_HALF_EXTENTS;
+      const swapOk =
+        zHalf !== null &&
+        Math.abs(zHalf[0] - ex) < IMP_HALF_TOLERANCE_M &&
+        Math.abs(zHalf[1] - ez) < IMP_HALF_TOLERANCE_M &&
+        Math.abs(zHalf[2] - ey) < IMP_HALF_TOLERANCE_M;
+      if (swapOk) {
+        pass('import: Z-up 선택이 축 변환을 실제로 적용한다 ★ (halfExtents y↔z 교환)',
+          `y-up=${JSON.stringify(IMP_FIXTURE_HALF_EXTENTS)} → z-up=${JSON.stringify(zHalf)}`);
+      } else {
+        fail('import: Z-up 선택이 축 변환을 실제로 적용한다 ★ (halfExtents y↔z 교환)',
+          `z-up half=${JSON.stringify(zHalf)} (기대 [${ex}, ${ez}, ${ey}])`);
+      }
+
+      // (d) 피벗이 bbox **바닥 중심**으로 재정렬된다 → y=0에서 지면 안착 (§2.11).
+      //     픽스처가 원점 밖이라 x/z 성분도 항등이 아니다 — 재정렬이 없으면 시각 중심이
+      //     bbox 중심 [0.25, 0.15, −0.25]만큼 어긋난다.
+      const probe = await page.evaluate((i) => {
+        window.__sim.editor.select(i);
+        return window.__sim.editor.anchorProbe();
+      }, IMP_ID.aabb);
+      // 판정은 **스펙**에서 한다 — 동적 바디는 임포트 직후부터 낙하·정착하므로 물리
+      // pose로 재면 관측 시점에 좌우된다(경주). collider offset.y = halfY 이면 바디
+      // 원점이 bbox **바닥**이라는 뜻이고, 피벗이 bbox 중심이면 이 값이 0이 된다.
+      const offsetY = fullSpec?.physics?.colliders?.[0]?.offset?.position?.[1] ?? null;
+      const pivotOk =
+        fullSpec !== null &&
+        Math.abs(fullSpec.transform.position[1]) < IMP_SETTLE_TOLERANCE_M &&
+        offsetY !== null &&
+        Math.abs(offsetY - IMP_FIXTURE_HALF_EXTENTS[1]) < IMP_HALF_TOLERANCE_M &&
+        probe !== null &&
+        Math.abs(probe.visualCenter[0] - probe.rootOrigin[0]) < IMP_VISUAL_TOLERANCE_M &&
+        Math.abs(probe.visualCenter[2] - probe.rootOrigin[2]) < IMP_VISUAL_TOLERANCE_M;
+      if (pivotOk) {
+        pass('import: 피벗이 bbox 바닥 중심으로 재정렬된다 ★ (배치 y=0 · collider offset=halfY)',
+          `배치y=${fullSpec.transform.position[1]} offsetY=${offsetY.toFixed(4)} (bbox 중심이면 0)`);
+      } else {
+        fail('import: 피벗이 bbox 바닥 중심으로 재정렬된다 ★ (배치 y=0 · collider offset=halfY)',
+          `spec.y=${fullSpec?.transform?.position?.[1]} offsetY=${offsetY} probe=${JSON.stringify(probe)}`);
+      }
+
+      // (e) 쌍 필터가 양방향으로 선언됐는가 (CLAUDE.md §5) — 안 그러면 로봇이 임포트
+      //     사물을 건드려도 충돌 로그가 0건이 되는 조용한 회귀가 된다.
+      const impCollider = fullSpec?.physics?.colliders?.[0] ?? null;
+      const pairOk =
+        impCollider !== null &&
+        impCollider.collidesWith?.includes('ROBOT') === true &&
+        impCollider.collidesWith?.includes('ENV') === true &&
+        impCollider.emitEvents === true;
+      if (pairOk) {
+        pass('import: 임포트 사물이 ROBOT·ENV와 쌍이 성립하고 이벤트를 낸다 (§5 양쪽 규칙)',
+          `collidesWith=${JSON.stringify(impCollider.collidesWith)}`);
+      } else {
+        fail('import: 임포트 사물이 ROBOT·ENV와 쌍이 성립하고 이벤트를 낸다 (§5 양쪽 규칙)',
+          JSON.stringify(impCollider));
+      }
+
+      // (f) ★ 유령이 아니다 — convexHull 엔티티를 들어올려 떨어뜨리면 실제로 낙하하고
+      //     바닥과 contact를 낸다. 정착 y ≈ 0 vs ≈ halfY(0.10)가 "피벗이 바닥 중심"과
+      //     "피벗이 bbox 중심"을 정확히 가른다.
+      await importFixture(page, 'gate-box.glb',
+        { id: IMP_ID.hullY, scale: 1, upAxis: 'y', collider: 'hull', kind: 'object' });
+      await parkImported(page, IMP_ID.hullY, 3);
+      const bodyCount = await page.evaluate(
+        (i) => window.__sim.world.bodiesOfEntity(i).length, IMP_ID.hullY);
+      const { settledY, fell } = await dropAndSettle(page, IMP_ID.hullY, IMP_DROP_HEIGHT_M);
+      const groundHits = await page.evaluate(
+        ({ i, limit }) =>
+          window.__sim.collision
+            .recent(limit)
+            .filter((e) => e.phase === 'start' && e.kind === 'contact' &&
+              ((e.a === i && e.b === '__ground') || (e.b === i && e.a === '__ground'))).length,
+        { i: IMP_ID.hullY, limit: HISTORY_FETCH_LIMIT },
+      );
+      // 정착 **높이**는 보지 않는다 — 0.4m에서 떨어뜨린 직육면체는 기울어 눕는 것이
+      // 정상이고, 그건 임포트 결함이 아니다. 피벗 판정은 (d)가 스펙에서 이미 했다.
+      // 여기서 묻는 것은 셋뿐이다: 물리 바디가 있는가 / 실제로 떨어졌는가 /
+      // 바닥과 접촉 이벤트를 냈는가. 그리고 바닥을 뚫고 지하로 가지 않았는가(§2.11).
+      const ghostOk =
+        bodyCount === 1 &&
+        fell >= IMP_MIN_FALL_M &&
+        settledY !== null &&
+        settledY > -IMP_MAX_SINK_M &&
+        groundHits >= 1;
+      if (ghostOk) {
+        pass('import: 임포트 사물이 실제로 낙하하고 바닥과 충돌한다 ★ (그림만 있는 유령 아님)',
+          `bodies=${bodyCount} 낙하=${fell.toFixed(3)}m 정착y=${settledY.toFixed(4)} ground접촉=${groundHits}건`);
+      } else {
+        fail('import: 임포트 사물이 실제로 낙하하고 바닥과 충돌한다 ★ (그림만 있는 유령 아님)',
+          `bodies=${bodyCount} 낙하=${fell} 정착y=${settledY} ground접촉=${groundHits}`);
+      }
+
+      // (g) trimesh 전략은 Static을 강제하고 실제로 단단하다 — 그 위의 상자가 지지된다.
+      const trimeshPhase = await openImportFixture(page, 'gate-box.glb');
+      await fillImportForm(page,
+        { id: IMP_ID.trimesh, scale: 1, upAxis: 'y', collider: 'trimesh' });
+      const trimeshForm = await page.evaluate(() => ({
+        objectKindDisabled: document.querySelector('[data-testid="import-kind-object"]')?.disabled ?? null,
+        noteVisible: (() => {
+          const n = document.querySelector('[data-testid="import-trimesh-note"]');
+          return n !== null && getComputedStyle(n).display !== 'none';
+        })(),
+      }));
+      await confirmImport(page);
+      await parkImported(page, IMP_ID.trimesh, 4);
+      const trimeshSpec = await importedSpec(page, IMP_ID.trimesh);
+      const boxId = await page.evaluate(
+        async ({ i, y }) => {
+          const t = window.__sim.editor.serialize().entities.find((e) => e.id === i).transform.position;
+          return window.__sim.editor.placeTemplate('box', [t[0], y, t[2]]);
+        },
+        { i: IMP_ID.trimesh, y: IMP_DROP_HEIGHT_M },
+      );
+      const supported = await dropAndSettle(page, boxId, IMP_DROP_HEIGHT_M);
+      const trimeshOk =
+        trimeshForm.objectKindDisabled === true &&
+        trimeshForm.noteVisible === true &&
+        trimeshSpec?.type === 'static' &&
+        trimeshSpec?.physics?.bodyType === 'fixed' &&
+        trimeshSpec?.physics?.colliders?.[0]?.shape?.kind === 'trimesh' &&
+        supported.settledY !== null &&
+        supported.settledY > IMP_TRIMESH_SUPPORT_MIN_Y_M;
+      if (trimeshOk) {
+        pass('import: trimesh는 Static 강제 + 실제로 단단하다 ★ (위의 상자가 지지된다)',
+          `상자 정착y=${supported.settledY.toFixed(3)} > ${IMP_TRIMESH_SUPPORT_MIN_Y_M}`);
+      } else {
+        fail('import: trimesh는 Static 강제 + 실제로 단단하다 ★ (위의 상자가 지지된다)',
+          `form=${JSON.stringify(trimeshForm)} spec=${JSON.stringify(trimeshSpec?.physics)} 상자=${JSON.stringify(supported)} phase=${JSON.stringify(trimeshPhase)}`);
+      }
+
+      // (h) 실패는 시끄럽게 — 미지원 확장자/손상 파일은 한국어 사유로 거부되고
+      //     씬에 아무것도 들어가지 않는다. 조용한 no-op은 사용자가 원인을 알 수 없다.
+      const beforeBad = await page.evaluate(() => window.__sim.editor.entityIds().length);
+      const badPhase = await openImportText(page, IMP_BAD_FILE.name, IMP_BAD_FILE.body);
+      await closeImportDialog(page);
+      const corruptPhase = await openImportText(page, IMP_CORRUPT_FILE.name, IMP_CORRUPT_FILE.body);
+      await closeImportDialog(page);
+      const afterBad = await page.evaluate(() => window.__sim.editor.entityIds().length);
+      const failLoudOk =
+        badPhase.errorVisible === true && badPhase.confirmDisabled === true &&
+        corruptPhase.errorVisible === true && corruptPhase.confirmDisabled === true &&
+        beforeBad === afterBad;
+      if (failLoudOk) {
+        pass('import: 미지원·손상 파일은 사유와 함께 거부되고 씬은 그대로다',
+          `"${String(badPhase.errorText).slice(0, 40)}" / "${String(corruptPhase.errorText).slice(0, 40)}"`);
+      } else {
+        fail('import: 미지원·손상 파일은 사유와 함께 거부되고 씬은 그대로다',
+          `bad=${JSON.stringify(badPhase)} corrupt=${JSON.stringify(corruptPhase)} 엔티티 ${beforeBad}→${afterBad}`);
+      }
+
+      // (i) 세션 한정 에셋이 씬 재빌드(undo/redo)를 넘어 살아남는다.
+      //     MeshAssetStore가 앱 수명인 이유가 정확히 이것이다 — 씬 수명으로 강등되면
+      //     재로드 시 "메시 에셋을 해석할 수 없습니다"로 씬 빌드가 통째로 실패한다.
+      const refsBefore = await page.evaluate(() => window.__sim.meshImport.assetRefs().length);
+      await page.evaluate(() => window.__sim.history.undo());
+      await page.evaluate(() => window.__sim.history.redo());
+      const survived = await page.evaluate(
+        (i) => window.__sim.editor.entityIds().includes(i), IMP_ID.hullY);
+      const bodiesAfter = await page.evaluate(
+        (i) => window.__sim.world.bodiesOfEntity(i).length, IMP_ID.hullY);
+      if (survived && bodiesAfter === 1 && refsBefore > 0) {
+        pass('import: 임포트 에셋이 undo/redo 씬 재빌드를 넘어 살아남는다',
+          `asset refs=${refsBefore} bodies=${bodiesAfter}`);
+      } else {
+        fail('import: 임포트 에셋이 undo/redo 씬 재빌드를 넘어 살아남는다',
+          `survived=${survived} bodies=${bodiesAfter} refs=${refsBefore}`);
+      }
+
+      // (j) 카탈로그 스모크 — 배포한 다운로드 모델이 전부 파싱된다.
+      //     수치는 재지 않는다(치수를 우리가 소유하지 않는다). 깨진 에셋 배포 방지용.
+      const catalogRows = [];
+      for (const name of IMP_CATALOG) {
+        const phase = await openImportFixture(page, name);
+        catalogRows.push({
+          name,
+          ok: phase.errorVisible === false && Number(String(phase.triangles).replace(/,/g, '')) > 0,
+          triangles: phase.triangles,
+          error: phase.errorText,
+        });
+        await closeImportDialog(page);
+      }
+      if (catalogRows.every((r) => r.ok)) {
+        pass(`import: 동봉한 다운로드 모델 ${IMP_CATALOG.length}종이 전부 파싱된다 (카탈로그 스모크)`,
+          catalogRows.map((r) => `${r.name}=${r.triangles}`).join(' '));
+      } else {
+        fail(`import: 동봉한 다운로드 모델 ${IMP_CATALOG.length}종이 전부 파싱된다 (카탈로그 스모크)`,
+          JSON.stringify(catalogRows.filter((r) => !r.ok)));
+      }
+    }
+
+    // ── 뷰포트 편집 UX — 바닥 하한 · 방향키 이동 · 선택 HUD · 키 소유권 ──
+    //
+    // 사용자 보고 3건이 여기 모인다:
+    //   (1) "물체를 넣을 때 바닥 아래 지하로 위치돼 사라진다" → 하한 클램프
+    //   (2) "방향키로 어떻게 움직이는지, 너비 조정을 어떻게 하는지 알기 어렵다" → 선택 HUD
+    //   (3) `→`가 재생 Step과 오브젝트 이동을 **동시에** 일으키던 이중 소유 (§2.10 위반)
+    if (expectArg === 'viewport-edit') {
+      const specPosition = (id) =>
+        page.evaluate(
+          (i) =>
+            window.__sim.editor.serialize().entities.find((e) => e.id === i)?.transform.position ??
+            null,
+          id,
+        );
+      const focusViewport = () => focusViewportSlot(page);
+
+      // 물리를 멈추고 잰다: nudge의 기준점은 **현재 살아있는 pose**여서(기즈모 드래그와
+      // 같은 커밋 경로) 재생 중이면 표본 사이에 바디가 굴러 이동량 측정이 흔들린다.
+      // 실제 UI도 편집 시작 시 자동 일시정지하므로(pauseForEditIfPlaying) 같은 조건이다.
+      await page.evaluate(() => window.__sim.engine.pause());
+      await page.evaluate((id) => window.__sim.editor.select(id), VE_TARGET_ID);
+      await focusViewport();
+
+      // (a) 선택 HUD가 나타나고 대상 id·치수 스테퍼를 보여준다
+      const hud = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="selection-hud"]');
+        if (!el) return null;
+        return {
+          visible: getComputedStyle(el).display !== 'none',
+          name: el.querySelector('[data-testid="selection-hud-name"]')?.textContent ?? null,
+          hasHeightStepper:
+            el.querySelector('[data-testid="selection-hud-height-inc"]') !== null,
+          hint: el.querySelector('[data-testid="selection-hud-hint"]')?.textContent ?? null,
+        };
+      });
+      if (hud?.visible === true && hud.name === VE_TARGET_ID && hud.hasHeightStepper) {
+        pass('viewport-edit: 선택 시 조작 HUD 표시 (대상 id + 치수 스테퍼 + 키 안내)',
+          `hint=${JSON.stringify(hud.hint)}`);
+      } else {
+        fail('viewport-edit: 선택 시 조작 HUD 표시 (대상 id + 치수 스테퍼 + 키 안내)',
+          JSON.stringify(hud));
+      }
+
+      // (b) 방향키 이동 — 뷰포트 스코프에서 선택 오브젝트가 실제로 움직인다
+      const beforeNudge = await specPosition(VE_TARGET_ID);
+      await page.keyboard.press('ArrowRight');
+      const afterNudge = await specPosition(VE_TARGET_ID);
+      const nudgeDelta = Math.hypot(
+        afterNudge[0] - beforeNudge[0],
+        afterNudge[2] - beforeNudge[2],
+      );
+      if (nudgeDelta > VE_NUDGE_MIN_DELTA_M) {
+        pass('viewport-edit: 방향키가 선택 오브젝트를 이동시킨다', `delta=${nudgeDelta.toFixed(4)}m`);
+      } else {
+        fail('viewport-edit: 방향키가 선택 오브젝트를 이동시킨다',
+          `before=${JSON.stringify(beforeNudge)} after=${JSON.stringify(afterNudge)}`);
+      }
+
+      // (c) Shift 미세 이동이 기본 이동보다 작다
+      const beforeFine = await specPosition(VE_TARGET_ID);
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.up('Shift');
+      const afterFine = await specPosition(VE_TARGET_ID);
+      const fineDelta = Math.hypot(afterFine[0] - beforeFine[0], afterFine[2] - beforeFine[2]);
+      if (Math.abs(fineDelta - VE_NUDGE_FINE_M) <= VE_NUDGE_TOLERANCE_M) {
+        pass('viewport-edit: Shift 병용이 미세 이동',
+          `fine=${fineDelta.toFixed(4)}m (기대 ${VE_NUDGE_FINE_M}m) < coarse=${nudgeDelta.toFixed(4)}m`);
+      } else {
+        fail('viewport-edit: Shift 병용이 미세 이동',
+          `fine=${fineDelta.toFixed(4)}m, 기대 ${VE_NUDGE_FINE_M}±${VE_NUDGE_TOLERANCE_M}m (coarse=${nudgeDelta.toFixed(4)}m)`);
+      }
+
+      // (d) ★ 이중 소유 회귀: 방향키가 재생 시퀀스 step까지 진행시키면 안 된다
+      const stepIndexAfterArrows = await page.evaluate(
+        () => window.__sim.player?.currentStepIndex ?? null,
+      );
+      if (stepIndexAfterArrows === 0 || stepIndexAfterArrows === null) {
+        pass('viewport-edit: 방향키가 재생 Step을 동시에 일으키지 않는다 ★ 회귀 (§2.10)',
+          `stepIndex=${stepIndexAfterArrows}`);
+      } else {
+        fail('viewport-edit: 방향키가 재생 Step을 동시에 일으키지 않는다 ★ 회귀 (§2.10)',
+          `stepIndex=${stepIndexAfterArrows} — 라우터 밖의 두 번째 키맵이 살아 있다`);
+      }
+
+      // (e) ★ 바닥 하한: PageDown을 아무리 눌러도 지하로 내려가지 않는다
+      for (let i = 0; i < VE_SINK_PRESS_COUNT; i += 1) await page.keyboard.press('PageDown');
+      const sunk = await specPosition(VE_TARGET_ID);
+      if (sunk[1] > 0) {
+        pass('viewport-edit: 방향키로 바닥 아래에 놓을 수 없다 ★ 회귀 (지하 = 작업물 손실)',
+          `y=${sunk[1].toFixed(4)}m (PageDown ×${VE_SINK_PRESS_COUNT})`);
+      } else {
+        fail('viewport-edit: 방향키로 바닥 아래에 놓을 수 없다 ★ 회귀 (지하 = 작업물 손실)',
+          `y=${sunk[1]}`);
+      }
+
+      // (f) End = 바닥에 붙이기 — 띄운 사물을 정확히 바닥에 앉힌다
+      for (let i = 0; i < VE_LIFT_PRESS_COUNT; i += 1) await page.keyboard.press('PageUp');
+      const lifted = await specPosition(VE_TARGET_ID);
+      await page.keyboard.press('End');
+      const snapped = await specPosition(VE_TARGET_ID);
+      if (lifted[1] > snapped[1] && snapped[1] > 0) {
+        pass('viewport-edit: End로 바닥에 붙이기', `${lifted[1].toFixed(3)}m → ${snapped[1].toFixed(3)}m`);
+      } else {
+        fail('viewport-edit: End로 바닥에 붙이기',
+          `lifted=${lifted[1]} snapped=${snapped[1]}`);
+      }
+
+      // (g) HUD 치수 + 버튼 → 실제로 커지고, 커진 뒤에도 바닥 위에 남는다
+      const dimText = () =>
+        page.evaluate(
+          () =>
+            document.querySelector('[data-testid="selection-hud-dim-height"]')?.textContent ?? null,
+        );
+      const dimBefore = Number(await dimText());
+      await page.click('[data-testid="selection-hud-height-inc"]');
+      await page.click('[data-testid="selection-hud-height-inc"]');
+      const dimAfter = Number(await dimText());
+      const posAfterResize = await specPosition(VE_TARGET_ID);
+      const grew = dimAfter > dimBefore;
+      const stillGrounded = posAfterResize[1] >= dimAfter / 2 - VE_GROUNDED_TOLERANCE_M;
+      if (grew && stillGrounded) {
+        pass('viewport-edit: HUD ± 버튼으로 치수 조정 — 커져도 바닥에 남는다',
+          `높이 ${dimBefore}→${dimAfter}m, y=${posAfterResize[1].toFixed(4)}m`);
+      } else {
+        fail('viewport-edit: HUD ± 버튼으로 치수 조정 — 커져도 바닥에 남는다',
+          `dim ${dimBefore}→${dimAfter}, y=${posAfterResize[1]}`);
+      }
+
+      // (h) 선택 해제 → HUD 숨김 (빈 상태 카드가 3D 화면을 상시 잠식하지 않는다)
+      await page.evaluate(() => window.__sim.editor.select(null));
+      const hudHidden = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="selection-hud"]');
+        return el === null || getComputedStyle(el).display === 'none';
+      });
+      if (hudHidden) pass('viewport-edit: 선택 해제 시 HUD 숨김');
+      else fail('viewport-edit: 선택 해제 시 HUD 숨김', 'HUD가 남아 있다');
+
+      // (i) 선택이 없으면 `→`는 규정대로 재생 Step이다 (스코프 분기 계약).
+      //     Step은 노드 1개를 sim 시간만큼 재생하고 경계에서 멈추므로, 즉시 관측되는
+      //     신호는 **arm 전이**(idle → running)다. 인덱스 전진은 그 뒤에 따라온다.
+      await focusViewport();
+      const stepBefore = await page.evaluate(() => ({
+        status: window.__sim.player?.status ?? null,
+        index: window.__sim.player?.currentStepIndex ?? null,
+      }));
+      await page.keyboard.press('ArrowRight');
+      const stepDeadline = Date.now() + VE_STEP_DEADLINE_MS;
+      let stepAfter = stepBefore;
+      for (;;) {
+        stepAfter = await page.evaluate(() => ({
+          status: window.__sim.player?.status ?? null,
+          index: window.__sim.player?.currentStepIndex ?? null,
+        }));
+        if (stepAfter.status !== stepBefore.status || stepAfter.index > stepBefore.index) break;
+        if (Date.now() > stepDeadline) break;
+        await page.waitForTimeout(SEQ_POLL_INTERVAL_MS);
+      }
+      const stepped =
+        stepBefore.status === 'idle' &&
+        (stepAfter.status !== 'idle' || stepAfter.index > stepBefore.index);
+      if (stepped) {
+        pass('viewport-edit: 선택이 없으면 →는 규정대로 Step (UX_DESIGN §9)',
+          `${JSON.stringify(stepBefore)} → ${JSON.stringify(stepAfter)}`);
+      } else {
+        fail('viewport-edit: 선택이 없으면 →는 규정대로 Step (UX_DESIGN §9)',
+          `before=${JSON.stringify(stepBefore)} after=${JSON.stringify(stepAfter)}`);
+      }
     }
 
     // 페이지 에러는 씬별 상호작용까지 끝난 뒤 마지막에 판정한다

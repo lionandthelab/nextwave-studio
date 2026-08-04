@@ -3,35 +3,103 @@
   "robot": "arm",
   "loop": false,
   "steps": [
-    { "kind": "gripper", "state": "open", "durationSec": 0.4 },
+    {
+      "kind": "gripper",
+      "state": "open",
+      "durationSec": 0.4
+    },
     {
       "kind": "moveJoints",
-      "targets": { "joint1": -0.405, "joint2": 0.459, "joint3": 1.519, "joint5": 1.163, "joint6": 1.5708 },
+      "note": "cargo 옆 접근 자세",
+      "targets": {
+        "joint1": -0.405,
+        "joint2": 0.459,
+        "joint3": 1.519,
+        "joint5": 1.163,
+        "joint6": 1.5708
+      },
       "durationSec": 2.0,
       "easing": "easeInOut"
     },
     {
       "kind": "moveJoints",
-      "targets": { "joint2": 0.638, "joint3": 1.63, "joint5": 0.873 },
+      "note": "집을 높이로 하강",
+      "targets": {
+        "joint2": 0.638,
+        "joint3": 1.63,
+        "joint5": 0.873
+      },
       "durationSec": 0.8,
       "easing": "easeInOut"
     },
     {
       "kind": "setJoints",
-      "targets": { "joint1": -0.375 }
+      "targets": {
+        "joint1": -0.375
+      }
     },
-    { "kind": "waitForCollision", "between": ["arm", "cargo"], "timeoutSec": 6 },
-    { "kind": "gripper", "state": 0.7, "durationSec": 0.5 },
+    {
+      "kind": "waitForCollision",
+      "note": "그리퍼가 cargo에 닿을 때까지",
+      "between": [
+        "arm",
+        "cargo"
+      ],
+      "timeoutSec": 6
+    },
+    {
+      "kind": "gripper",
+      "state": 0.6,
+      "note": "파지 — 손가락이 상자를 물 때까지 닫는다",
+      "durationSec": 0.5
+    },
     {
       "kind": "moveJoints",
-      "targets": { "joint1": 0.3 },
-      "durationSec": 2.0,
+      "note": "살짝 들어 올린다 (바닥을 끌지 않고 옮기기 위해)",
+      "targets": {
+        "joint2": 0.558,
+        "joint3": 1.58,
+        "joint5": 1.004
+      },
+      "durationSec": 0.7,
       "easing": "easeInOut"
     },
-    { "kind": "gripper", "state": "open", "durationSec": 0.4 },
     {
       "kind": "moveJoints",
-      "targets": { "joint1": 0, "joint2": -0.6, "joint3": 1.2, "joint5": -0.6, "joint6": 0 },
+      "note": "든 채로 감지 존 위까지 이송",
+      "targets": {
+        "joint1": 0.0
+      },
+      "durationSec": 3.0,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "moveJoints",
+      "note": "감지 존에 내려놓는다",
+      "targets": {
+        "joint2": 0.638,
+        "joint3": 1.63,
+        "joint5": 0.873
+      },
+      "durationSec": 0.6,
+      "easing": "easeInOut"
+    },
+    {
+      "kind": "gripper",
+      "state": "open",
+      "note": "놓기",
+      "durationSec": 0.4
+    },
+    {
+      "kind": "moveJoints",
+      "note": "home 복귀",
+      "targets": {
+        "joint1": 0,
+        "joint2": -0.6,
+        "joint3": 1.2,
+        "joint5": -0.6,
+        "joint6": 0
+      },
       "durationSec": 2.0,
       "easing": "easeInOut"
     }
