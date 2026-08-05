@@ -8,12 +8,12 @@ import type { LlmAdapter } from '../llm-adapter';
 
 export interface AnthropicAdapterOptions {
   apiKey: string;
-  /** 모델 id (기본 'claude-opus-4-8'). 사용자가 설정에서 바꿀 수 있다 */
+  /** 모델 id (기본 'claude-opus-5'). 사용자가 설정에서 바꿀 수 있다 */
   model?: string;
 }
 
 /** 기본 모델 — 사용자 설정 가능 문자열 */
-export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-4-8';
+export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
 
 /** ControlSequence 하나에는 충분한 출력 예산 */
 const MAX_TOKENS = 4096;

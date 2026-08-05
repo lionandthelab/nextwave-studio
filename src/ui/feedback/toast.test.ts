@@ -165,6 +165,6 @@ describe('normalizePlannerConfig', () => {
     expect(normalizePlannerConfig({ backend: 'rule-based', apiKey: '', model: '' }).backend).toBe(
       'rule-based',
     );
-    expect(DEFAULT_PLANNER_MODEL).toBe('claude-opus-4-8');
+    expect(DEFAULT_PLANNER_MODEL).toBe('claude-opus-5');
   });
 });

@@ -56,7 +56,7 @@ export interface PlannerSettingsHandle {
 // ── 상수 (매직넘버 금지 — CLAUDE.md §4) ─────────────────────────────
 
 /** 모델명 기본값 (Anthropic) */
-export const DEFAULT_PLANNER_MODEL = 'claude-opus-4-8';
+export const DEFAULT_PLANNER_MODEL = 'claude-opus-5';
 
 /** 키 저장/사용 범위 고지 (한국어) */
 const KEY_NOTICE_KO =
