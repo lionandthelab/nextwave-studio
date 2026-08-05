@@ -1,0 +1,65 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "TodoWrite",
+      "Bash(bash harness/verify.sh:*)",
+      "Bash(node harness/hx.mjs:*)",
+      "Bash(npm run typecheck)",
+      "Bash(npm run lint)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(tail:*)"
+    ],
+    "deny": [
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git reset:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git branch:*)",
+      "Bash(git clean:*)",
+      "Bash(git rebase:*)",
+      "Bash(git stash:*)",
+      "Bash(npm publish:*)",
+      "Bash(npx vercel:*)",
+      "Bash(rm -rf:*)",
+      "Edit(TASKS.jsonl)",
+      "Write(TASKS.jsonl)",
+      "Edit(JOURNAL.md)",
+      "Write(JOURNAL.md)",
+      "Edit(plan.md)",
+      "Write(plan.md)",
+      "Edit(CLAUDE.md)",
+      "Write(CLAUDE.md)",
+      "Edit(harness/**)",
+      "Write(harness/**)",
+      "Edit(.claude/**)",
+      "Write(.claude/**)",
+      "Edit(package.json)",
+      "Write(package.json)",
+      "WebSearch"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node harness/hooks/guard-bash.mjs"
+          }
+        ]
+      }
+    ]
+  }
+}

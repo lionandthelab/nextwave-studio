@@ -1,0 +1,7 @@
+{"id":"T-000","title":"README에 하네스·루프 운용 안내 링크 추가","status":"todo","why":"하네스 배선이 실제로 도는지 끝까지 확인하는 스모크 태스크. 편집→검증→커밋 경로를 전부 밟되 위험이 없다.","done_when":["README.md에 harness/README.md로 가는 링크가 한 줄 있다","bash harness/verify.sh 통과"],"model":"sonnet","effort":"low","gate":null,"attempts":0,"deps":[],"commit":"docs: README에 하네스·루프 운용 안내 링크"}
+{"id":"B-001","title":"IK 솔버 — moveToPose(카테시안) step","status":"backlog","why":"docs/ROADMAP.md 백로그. 관절 공간 → 작업 공간 제어.","done_when":[],"model":"opus","effort":"high","gate":null,"attempts":0,"deps":[]}
+{"id":"B-002","title":"MuJoCo 물리 계층 — MujocoWorld + SceneSpec→MJCF 변환기","status":"backlog","why":"접촉 파지 사실성. CLAUDE.md §7의 교체 경로. 파지 마찰 창이 좁고 비단조적이라는 실측이 근거(EXPERIMENTS.md).","done_when":[],"model":"opus","effort":"high","gate":null,"attempts":0,"deps":[]}
+{"id":"B-003","title":"폐루프(agentic) 실행 — 노드 피드백을 planner에 되먹임","status":"backlog","why":"docs/PLANNER.md §5.1.","done_when":[],"model":"opus","effort":"high","gate":null,"attempts":0,"deps":[]}
+{"id":"B-004","title":"센서 시뮬 — 오프스크린 카메라 depth/RGB","status":"backlog","why":"docs/ROADMAP.md 백로그.","done_when":[],"model":"sonnet","effort":"medium","gate":null,"attempts":0,"deps":[]}
+{"id":"B-005","title":"그래프 조건 분기 노드","status":"backlog","why":"docs/ROADMAP.md 백로그. goto/label을 넘어선 분기.","done_when":[],"model":"sonnet","effort":"medium","gate":null,"attempts":0,"deps":[]}
+{"id":"B-006","title":"성능 — collider LOD · instancing · 다수 사물 최적화","status":"backlog","why":"docs/ROADMAP.md 백로그.","done_when":[],"model":"sonnet","effort":"medium","gate":null,"attempts":0,"deps":[]}
