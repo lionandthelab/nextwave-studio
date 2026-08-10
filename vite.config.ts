@@ -30,6 +30,14 @@ export default defineConfig({
   server: {
     // 컨테이너 안에서만 폴링 — 호스트 개발 시에는 기본(네이티브 감시) 그대로다.
     ...(useContainerPolling ? { watch: { usePolling: true, interval: 300 } } : {}),
+    // Workcell 서버(server/, 기본 8787)로 API 프록시 — dev에서 CORS를 원천 제거한다
+    // (docs/BACKEND.md §2). 서버가 꺼져 있으면 클라이언트는 로컬 모드로 강등된다.
+    proxy: {
+      '/api': {
+        target: `http://localhost:${process.env.WORKCELL_PORT ?? '8787'}`,
+        changeOrigin: true,
+      },
+    },
     // 필요 시 COOP/COEP 헤더로 SharedArrayBuffer 활성화(멀티스레드 WASM 사용 시)
     // headers: {
     //   'Cross-Origin-Opener-Policy': 'same-origin',

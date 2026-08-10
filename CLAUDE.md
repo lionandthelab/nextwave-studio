@@ -16,6 +16,14 @@
 가상 환경을 구성하고, 로봇 제어 시퀀스를 재생하며, **로봇–사물 충돌을 감지**한다.
 백엔드 없이 정적 호스팅으로 배포 가능한 것을 1차 목표로 한다.
 
+**Phase 12+**: 선택적 백엔드(`server/` — Fastify + SQLite 단일 파일)가 추가되어
+다중 사용자(관리자/설치기사, PIN 로그인)·공정/작업/블록/장비/실행기록 공유가 켜진다.
+**서버는 선택적이다** — 서버가 없으면 앱은 IndexedDB 로컬 모드로 강등되어 그대로
+동작한다(정적 호스팅 불변식 유지). 규범 문서는 `docs/BACKEND.md`, 개체 스키마의
+단일 진실은 `src/schema/entities.ts`(클라이언트/서버 공유 zod). 1차 사용자는
+**로봇 설치기사**다: 단일 프로세스 배포·단일 파일 DB·공유 단말 PIN 로그인·큰 터치
+타깃 — IT 담당자 없이 현장에서 켜지는 것이 설계 기준이다.
+
 - **물리 엔진**: Rapier (`@dimforge/rapier3d-compat`, WASM)
 - **렌더링**: three.js
 - **로봇 모델 로딩**: `urdf-loader` (URDF → three.js)
@@ -157,10 +165,33 @@ robot-sim-web/
     └── assets/            ← urdf, mesh, 라이브러리 템플릿, 샘플 Scene/Sequence
 ```
 
-**계층 의존 방향 규칙**: `ui → {core, planner} → {render, schema}`. `core`/`planner`는
+**계층 의존 방향 규칙**: `ui → {core, planner, api} → {render, schema}`. `core`/`planner`는
 UI 프레임워크에 의존하지 않는다(React든 vanilla든 재사용 가능). `render`는 three.js를,
 `core/world`·`core/collision`은 Rapier를 아는 유일한 지점이다. `planner`는 물리/렌더에
 의존하지 않고 스키마만 안다.
+
+**Phase 12+ 추가 계층** (규범: `docs/BACKEND.md`):
+
+```
+├── server/                ← 백엔드 (Fastify + better-sqlite3, 선택적)
+│   ├── app.ts                 buildApp (테스트는 inject — listen 없음)
+│   ├── auth.ts                scrypt PIN 해시 · 세션 · 시도 제한
+│   ├── db.ts                  단일 파일 SQLite, 전진 전용 마이그레이션
+│   └── routes-*.ts            auth / entities(CRUD·잠금) / runs(append-only)
+└── src/
+    ├── api/               ← 클라이언트 API 계층 (schema만 안다 — planner와 동렬)
+    │                         ApiClient(연결 상태 머신) · 리소스 클라이언트 · 오프라인 outbox
+    ├── schema/entities.ts ← 개체 5종(Process/Task/Block/Device/Run) — 서버와 공유
+    ├── schema/blocks.ts   ← 블록 캡처/전개 순수 함수 (전개 후 재검증 — §2.8 정신)
+    └── ui/
+        ├── shell/         ← 2평면 셸: 해시 라우터 · 네비 레일 · 로그인(PIN 패드)
+        └── console/       ← 콘솔 평면 화면들 (작업/공정/블록/장비/기록/설정) + 프리미티브
+```
+
+`server`는 `src/schema`(zod 계약)만 import한다 — Rapier/three/ui를 절대 모른다.
+씬/시퀀스 내용은 서버가 해석하지 않는다(봉투 검증까지만 — 도메인 검증은 클라이언트 몫).
+**복사본 의미론**: Task.scene은 공정 씬의 전체 사본이다(참조 아님). 공정 갱신은 자동
+전파되지 않고 `sceneOrigin` 비교로 "알리고 사람이 적용"한다. 블록도 삽입 시 전개(사본)다.
 
 ---
 

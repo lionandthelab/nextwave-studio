@@ -18,6 +18,20 @@ services:
       - "${APP_PORT:-8080}:80"
     restart: unless-stopped
 
+  # 전체 배포(권장) — 정적 번들 + API를 한 프로세스로 서빙 (docs/BACKEND.md §2)
+  # SQLite 데이터는 호스트 ./server-data에 남는다 — 컨테이너를 지워도 문서는 보존.
+  server:
+    build:
+      context: .
+      target: server
+    image: robot-sim-web:server
+    container_name: robot-sim-web-server
+    ports:
+      - "${SERVER_PORT:-8787}:8787"
+    volumes:
+      - ./server-data:/app/server/data
+    restart: unless-stopped
+
   # 개발 — 소스를 bind mount, Vite HMR
   # node_modules는 익명 볼륨으로 덮어써 호스트(OS별 바이너리)와 섞이지 않게 한다.
   dev:

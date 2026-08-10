@@ -17,3 +17,7 @@ docker-verify.png
 # 하네스 런타임 산출물 (로그·락·비용 원장). 저장소에 남는 상태는
 # TASKS.jsonl · JOURNAL.md · 커밋 세 가지뿐이다.
 .harness/
+
+# 백엔드 SQLite 데이터 (로컬 실행 · docker compose 볼륨)
+server/data/
+server-data/

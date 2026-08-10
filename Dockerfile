@@ -46,6 +46,31 @@ ENV VITE_USE_POLLING=true
 EXPOSE 5173
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
 
+# ── 서버 스테이지 (전체 배포: 정적 번들 + API 단일 프로세스) ─────────
+# docs/BACKEND.md §2 — 프로세스 1개 · 포트 1개(8787) · SQLite 파일 1개.
+# deps 레이어(alpine/musl)를 재사용하지 않고 slim(glibc)에서 npm ci를 다시 하는 이유:
+# better-sqlite3 프리빌드 바이너리가 glibc 대상이라 musl에서는 소스 빌드가 필요해진다.
+FROM node:22-slim AS server
+WORKDIR /app
+
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+# 서버가 dist/를 같은 포트에서 서빙한다 — typecheck는 verify 스테이지 몫이므로 빌드만
+RUN npx vite build
+
+ENV NODE_ENV=production
+ENV WORKCELL_PORT=8787
+EXPOSE 8787
+
+# DB는 /app/server/data (compose가 호스트 볼륨을 마운트한다)
+CMD ["npx", "tsx", "server/index.ts"]
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://localhost:8787/api/v1/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 # ── 런타임 스테이지 (기본) ───────────────────────────────────────────
 FROM nginx:1.27-alpine AS runtime
 
