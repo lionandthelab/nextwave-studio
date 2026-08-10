@@ -629,6 +629,13 @@ async function main() {
     page.on('console', (msg) => consoleLines.push(msg.text()));
     page.on('pageerror', (err) => pageErrors.push(String(err)));
 
+    // 이 게이트는 **스튜디오(로컬 모드)** 를 검증한다 — 협업 서버는 대상이 아니다.
+    // vite preview는 vite.config.ts의 프록시를 그대로 쓰므로, 개발자가 백엔드를 띄워 둔
+    // 상태면 앱이 서버 모드로 부팅해 **로그인 화면이 캔버스를 덮어** 모든 클릭이 막힌다.
+    // 게이트 결과가 "주변에 서버가 떠 있었는가"에 좌우되면 안 되므로, 여기서 API를 명시적으로
+    // 끊어 로컬 모드를 강제한다(BACKEND §1의 서버 없는 경로 = 이 게이트의 검증 대상).
+    await page.route('**/api/**', (route) => route.abort());
+
     const sceneName = expectArg ? (SCENE_BY_EXPECT[expectArg] ?? expectArg) : null;
     const url = `http://localhost:${PORT}/${sceneName ? `?scene=${encodeURIComponent(sceneName)}` : ''}`;
     await page.goto(url, { waitUntil: 'load' });
@@ -1408,9 +1415,16 @@ async function main() {
           JSON.stringify({ inserted, domNodesAfterInsert }));
       }
 
-      // (f) '{} JSON' 뷰어에 삽입된 wait step 반영 (그래프 편집 ↔ JSON 실시간 동기)
+      // (f) '{} JSON' 패널에 삽입된 wait step 반영 (그래프 편집 → JSON 실시간 동기).
+      // 패널이 편집 가능해진 뒤로 진실은 textarea의 **value**다(구 읽기 전용 <pre>는
+      // 편집 모드에서 숨겨진다) — 편집 불가 폴백을 위해 <pre>도 함께 본다.
       await page.click('[data-testid="json-toggle"]');
-      const viewerText = await page.$eval('[data-testid="json-content"]', (el) => el.textContent ?? '');
+      await page.click('[data-testid="json-tab-json"]').catch(() => {}); // 탭은 사용자 상태로 유지된다
+      const viewerText = await page.evaluate(() => {
+        const editor = document.querySelector('[data-testid="json-editor"]');
+        if (editor instanceof HTMLTextAreaElement && editor.value !== '') return editor.value;
+        return document.querySelector('[data-testid="json-content"]')?.textContent ?? '';
+      });
       let viewerSeq = null;
       try { viewerSeq = JSON.parse(viewerText); } catch { viewerSeq = null; }
       const viewerStep = viewerSeq?.steps?.[FG_INSERT_AT];

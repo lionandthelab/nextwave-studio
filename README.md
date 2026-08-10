@@ -12,6 +12,13 @@
 **n8n형 노드 그래프 에디터(Phase 8)**·**자연어 플래너(Phase 9)**·**노드 단위 실행
 오케스트레이션(Phase 10)**·**제품화(Phase 11)** 까지 브라우저에서 완결된다.
 
+**Phase 12 — 협업 콘솔(백엔드 · 다중 사용자)**: 선택적 서버(`server/` — Fastify + SQLite
+단일 파일, 정적 번들 동시 서빙)와 **콘솔 평면**(공정 · 작업 · 재사용 블록 · 장비 · 실행
+기록 · 설정, `#/tasks` 해시 라우팅)이 추가됐다. 사용자 타일 + PIN 로그인(현장 공유 단말
+전제), 낙관적 버전 + 편집 잠금, soft-delete 휴지통(30일), append-only 실행 기록과
+"이 노드부터 재현", 오프라인 outbox 동기화까지 — **서버가 없으면 기존처럼 로컬 모드로
+동작한다**(정적 호스팅 불변식 유지). 규범 문서: [`docs/BACKEND.md`](docs/BACKEND.md).
+
 **Phase 11 — 제품화(Studio Hardening)**: 5인 디자인 팀 진단(`docs/UX_AUDIT.md`)을 실행해
 디자인 시스템(토큰 7축 · SVG 아이콘 · Pretendard 자체 호스팅)을 세우고, 뷰포트를 압살하던
 고정 레이아웃을 `clamp()` 정책으로, 흩어진 전역 키 리스너 5개를 단일 라우터로, 씬만 저장하던
@@ -86,7 +93,11 @@ docker compose --profile ci run --rm verify
 npm install
 npm run dev        # Vite 개발 서버 (기본 http://localhost:5173)
 npm run build      # tsc --noEmit + vite build → dist/
-npm run verify     # typecheck + lint + vitest (단위 테스트)
+npm run verify     # typecheck(앱+서버) + lint + vitest (단위 테스트)
+
+# 협업 서버 (Phase 12 — 선택. 없으면 앱은 로컬 모드로 동작)
+npm run server:dev     # 개발: tsx watch (기본 http://localhost:8787, dev 서버가 /api 프록시)
+npm run server:start   # 운영: dist/ 정적 서빙 + API + SQLite 단일 파일 (포트 1개, 프로세스 1개)
 
 # 브라우저 게이트 (Playwright chromium 필요: npx playwright install chromium)
 npm run gate               # 전체 13종 (build + 기능 6종 + 제공 예제 7종)
@@ -111,7 +122,8 @@ node scripts/gate-browser.mjs --expect=collision-testbed   # 등 표의 --expect
 - **커맨드바(상단)**: 자연어 입력(플래너) · 씬 프리셋 select · 📂 씬 JSON 업로드
   (SceneSpec 단독 또는 `{scene, sequence}` 봉투) · 💾 현재 SceneSpec 다운로드 ·
   ▶ Play / ⏸ / ⏹(리셋) / **⏭ Step(노드 1개)** · 재생 속도 · **충돌 시 자동 정지** 토글 ·
-  **플로우**(노드 그래프 페인 열기) · `{} JSON` 시퀀스 원본 뷰어 · ⚙ 플래너 설정.
+  **플로우**(노드 그래프 페인 열기) · `{} JSON` **시퀀스 JSON 편집기 + 버전 이력**
+  (직접 편집 → 검증 통과 시에만 적용 · 임의 버전으로 되돌리기) · ⚙ 플래너 설정.
 - **좌측 라이브러리**: 오브젝트/로봇 템플릿 카드 — 뷰포트로 드래그앤드롭 배치, 3D 파일
   임포트(⬆). **뷰포트**: 클릭 선택 · W/E/R 기즈모(이동/회전/스케일) · **방향키로 선택
   오브젝트 이동**(5cm, Shift=1cm, PageUp/Down=수직) · 좌하단 실행 오버레이
