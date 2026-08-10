@@ -441,6 +441,39 @@ export function reorderTargetIndex(
  * — 체인 중심이 오름차순이면 `raw > fromIndex` ⟺ `centers[fromIndex] < drop`이므로
  * 1행에서는 reorderTargetIndex와 결과가 동일하다.
  */
+/**
+ * **고스트 중심 → 최근접 슬롯** (드래그 재정렬의 실제 판정식).
+ *
+ * ── 왜 insertionIndexAt이 아니라 이것인가 ──────────────────────────
+ * `insertionIndexAt`은 "커서가 이웃의 **원래 중심**을 넘었는가"로 판정한다. 그런데
+ * 사용자가 조준하는 것은 커서가 아니라 **고스트(끌고 있는 노드 그림)** 이고, 고스트는
+ * 잡은 지점만큼 커서에서 떨어져 그려진다. 노드 라벨이 왼쪽에 있어 사람은 노드의 왼쪽
+ * 1/4쯤을 잡는데, 그러면 고스트를 이웃 위에 **픽셀 단위로 정확히 겹쳐도** 커서는 아직
+ * 이웃 중심에 못 미쳐 **아무 일도 일어나지 않았다**(무음 no-op). 한 칸 옮기려면 이웃을
+ * 140px 이상 지나쳐야 했고, 두 칸 이동은 항상 한 칸 앞에 떨어졌다.
+ *
+ * 그래서 판정을 "고스트 중심이 어느 슬롯에 가장 가까운가"로 바꾼다 — **보이는 것이
+ * 곧 결과**가 되어 조준과 커밋이 어긋날 수 없다. 데드존도 2피치에서 1피치로 준다
+ * (자기 자리 ±반 칸 = 제자리에 놓는 정직한 no-op만 남는다).
+ *
+ * effX/effY는 고스트 중심의 월드 좌표다(호출부가 커서에서 그랩 오프셋을 뺀다).
+ * 결과는 moveNode의 toIndex와 같은 의미(결과 배열에서의 최종 위치, 0..count-1)다.
+ */
+export function nearestSlotIndexAt(
+  count: number,
+  perRow: number,
+  effX: number,
+  effY: number,
+): number {
+  if (count <= 0) return 0;
+  const per = normalizePerRow(perRow);
+  const row = chainRowAt(effY, chainRowCount(count, perRow));
+  const col = Math.round((effX - CHAIN_MARGIN_X - NODE_W / 2) / NODE_PITCH_X);
+  const perRowCount = Number.isFinite(per) ? per : count;
+  const raw = row * perRowCount + col;
+  return Math.min(Math.max(raw, 0), count - 1);
+}
+
 export function reorderTargetIndexAt(
   count: number,
   perRow: number,
@@ -513,6 +546,13 @@ export interface FlowCanvasDeps {
   applyOp(op: (g: FlowGraph) => FlowCanvasOpResult): boolean;
   /** 선택 변경 통지 (인스펙터 연동) — 캔버스 내 클릭/삭제로 인한 변경만 통지한다 */
   onSelectNode(id: string | null): void;
+  /**
+   * 제자리 드롭(순서 변화 없음) — 통합자가 한국어 안내를 띄운다. 조용히 되돌리면
+   * 사용자는 "드래그가 먹히지 않았다"로 읽는다 (CLAUDE.md §6 무음 no-op 금지).
+   */
+  onReorderNoop?(): void;
+  /** 그래프 페인 **밖**에서 놓아 재정렬이 취소됨 — Esc와 같은 계약 */
+  onReorderCancelled?(): void;
   /** defaultNodeFor 컨텍스트 (팔레트 삽입용 — goto/waitForCollision 활성 판정 포함) */
   paletteContext(): { robot: string; entityIds: string[]; labels: string[] };
   /**
@@ -642,6 +682,12 @@ type DragState =
       moved: boolean;
       nodeId: string;
       nodeIndex: number;
+      /**
+       * 잡은 지점이 노드 중심에서 얼마나 떨어졌는가 (월드). 드롭 판정을 커서가 아니라
+       * **고스트 중심**으로 하기 위해 커서 좌표에서 이 값을 뺀다 — nearestSlotIndexAt 헤더.
+       */
+      grabDx: number;
+      grabDy: number;
     };
 
 export function mountFlowCanvas(host: HTMLElement, deps: FlowCanvasDeps): FlowCanvasHandle {
@@ -1439,12 +1485,36 @@ export function mountFlowCanvas(host: HTMLElement, deps: FlowCanvasDeps): FlowCa
     insertLineEl = null;
   };
 
+  /**
+   * 드롭 인덱스 — **프리뷰와 커밋이 반드시 같은 식을 쓴다** (한 함수로 묶은 이유).
+   * 커서에서 그랩 오프셋을 빼 고스트 중심을 만들고 최근접 슬롯을 고른다.
+   * fromIndex는 드롭 시점에 nodeId로 다시 찾는다 — 드래그 도중 외부 편집(JSON 적용·
+   * 버전 되돌리기)이 그래프를 바꿨다면 pointerdown 시점 인덱스는 이미 낡았다.
+   */
+  const dropIndexFor = (
+    d: Extract<DragState, { mode: 'node' }>,
+    clientX: number,
+    clientY: number,
+  ): { fromIndex: number; toIndex: number } | null => {
+    const nodes = deps.getGraph().nodes;
+    const fromIndex = nodes.findIndex((n) => n.id === d.nodeId);
+    if (fromIndex < 0) return null; // 드래그 중 노드가 사라졌다
+    const w = clientToWorld(clientX, clientY);
+    const toIndex = nearestSlotIndexAt(nodes.length, perRow, w.x - d.grabDx, w.y - d.grabDy);
+    return { fromIndex, toIndex };
+  };
+
   const updateNodeDragPreview = (
     d: Extract<DragState, { mode: 'node' }>,
     e: PointerEvent,
   ): void => {
     const start = clientToWorld(d.startX, d.startY);
     const now = clientToWorld(e.clientX, e.clientY);
+    // drawWorld()의 replaceChildren이 고스트/삽입선을 DOM에서 떼어내도 모듈 변수는
+    // non-null로 남는다 — 연결성까지 확인하지 않으면 그 뒤로는 **떨어져 나간 요소에
+    // 속성만 계속 쓰게 되어** 드래그가 취소된 것처럼 보인다(드롭은 그대로 커밋된다).
+    if (ghostEl !== null && !ghostEl.isConnected) ghostEl = null;
+    if (insertLineEl !== null && !insertLineEl.isConnected) insertLineEl = null;
     if (ghostEl === null) {
       const source = nodeGroupById.get(d.nodeId);
       if (source) {
@@ -1463,8 +1533,10 @@ export function mountFlowCanvas(host: HTMLElement, deps: FlowCanvasDeps): FlowCa
     ghostEl?.setAttribute('transform', `translate(${now.x - start.x} ${now.y - start.y})`);
 
     const count = deps.getGraph().nodes.length;
-    const finalIndex = reorderTargetIndexAt(count, perRow, d.nodeIndex, now.x, now.y);
-    if (count >= 2 && finalIndex !== d.nodeIndex) {
+    const resolved = dropIndexFor(d, e.clientX, e.clientY);
+    const fromIndex = resolved?.fromIndex ?? d.nodeIndex;
+    const finalIndex = resolved?.toIndex ?? d.nodeIndex;
+    if (count >= 2 && finalIndex !== fromIndex) {
       if (insertLineEl === null) {
         insertLineEl = svgEl('line', {
           stroke: SELECT.base,
@@ -1474,7 +1546,7 @@ export function mountFlowCanvas(host: HTMLElement, deps: FlowCanvasDeps): FlowCa
         insertLineEl.dataset.testid = 'flow-insert-line';
         worldG.appendChild(insertLineEl);
       }
-      const line = insertionLine(d.nodeIndex, finalIndex, count, perRow);
+      const line = insertionLine(fromIndex, finalIndex, count, perRow);
       insertLineEl.setAttribute('x1', String(line.x));
       insertLineEl.setAttribute('x2', String(line.x));
       insertLineEl.setAttribute('y1', String(line.rowTopY - INSERT_LINE_OVERHANG));
@@ -1564,6 +1636,7 @@ export function mountFlowCanvas(host: HTMLElement, deps: FlowCanvasDeps): FlowCa
       if (nodeId === undefined) return;
       const nodeIndex = deps.getGraph().nodes.findIndex((n) => n.id === nodeId);
       if (nodeIndex < 0) return;
+      const grabWorld = clientToWorld(e.clientX, e.clientY);
       drag = {
         mode: 'node',
         pointerId: e.pointerId,
@@ -1572,6 +1645,8 @@ export function mountFlowCanvas(host: HTMLElement, deps: FlowCanvasDeps): FlowCa
         moved: false,
         nodeId,
         nodeIndex,
+        grabDx: grabWorld.x - chainCenterX(nodeIndex, perRow),
+        grabDy: grabWorld.y - chainCenterY(nodeIndex, perRow),
       };
     } else {
       drag = {
@@ -1635,14 +1710,33 @@ export function mountFlowCanvas(host: HTMLElement, deps: FlowCanvasDeps): FlowCa
       return;
     }
     // 드롭 = 재정렬 (moveNode op — §2.8: 거부되면 통합자가 한국어 토스트)
-    const dropWorld = clientToWorld(e.clientX, e.clientY);
-    const count = deps.getGraph().nodes.length;
-    const finalIndex = reorderTargetIndexAt(count, perRow, d.nodeIndex, dropWorld.x, dropWorld.y);
-    if (finalIndex === d.nodeIndex) {
-      render(); // no-op 드롭 — 원위치 복원만
+    //
+    // 페인 밖에서 놓으면 **취소**다(Esc와 같은 계약). 이전에는 클램프된 좌표로 조용히
+    // 재정렬돼, 3D 뷰포트로 끌어 올렸다 놓기만 해도 의도치 않은 순서가 커밋됐다.
+    const rect = svg.getBoundingClientRect();
+    if (
+      e.clientX < rect.left ||
+      e.clientX > rect.right ||
+      e.clientY < rect.top ||
+      e.clientY > rect.bottom
+    ) {
+      render();
+      deps.onReorderCancelled?.();
+      return;
+    }
+    const resolved = dropIndexFor(d, e.clientX, e.clientY);
+    if (resolved === null) {
+      render();
+      return;
+    }
+    if (resolved.toIndex === resolved.fromIndex) {
+      // 제자리 드롭 — 조용히 되돌리면 "드래그가 먹히지 않았다"로 읽힌다 (§6 무음 no-op 금지)
+      render();
+      deps.onReorderNoop?.();
       return;
     }
     const nodeId = d.nodeId;
+    const finalIndex = resolved.toIndex;
     deps.applyOp((g) => moveNode(g, nodeId, finalIndex));
     render();
   };

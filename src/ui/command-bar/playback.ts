@@ -97,6 +97,13 @@ export interface PlaybackBarHandle {
    * — 키 바인딩이 모듈마다 흩어지면 Space를 3개가 나눠 갖는 상태로 수렴한다(C-6).
    */
   togglePlay(): void;
+  /**
+   * 속도 select 표시를 프로그램적으로 맞춘다 (설정 화면의 "재생 속도 기본값" 적용 —
+   * Phase 12 ⑨). 엔진 속도는 호출자가 orchestrator.setSpeed로 따로 적용한다 — 표시와
+   * 엔진이 각자 진실을 갖지 않도록 통합자가 두 호출을 항상 짝짓는다. 목록에 없는
+   * 배율은 무시한다(옵션은 ENGINE_SPEED_OPTIONS가 진실).
+   */
+  setSpeedDisplay(speedMult: number): void;
   dispose(): void;
 }
 
@@ -321,6 +328,11 @@ export function mountPlaybackBar(
     el: bar,
     update,
     togglePlay,
+    setSpeedDisplay: (speedMult: number): void => {
+      const value = String(speedMult);
+      const exists = Array.from(speedSelect.options).some((o) => o.value === value);
+      if (exists) speedSelect.value = value;
+    },
     dispose: (): void => {
       bar.remove();
     },

@@ -43,6 +43,7 @@ import {
   TYPE,
   applyType,
   ensureThemeStyles,
+  makeButton,
   makePanelHeader,
   styled,
   tr,
@@ -55,6 +56,17 @@ import type { EntitySpec } from '../../schema';
 export const TEMPLATE_MIME = 'application/x-robotsim-template';
 
 // ── 공개 타입 ───────────────────────────────────────────────────────
+
+/**
+ * 블록 섹션 카드 요약 (Phase 12+ 재사용 블록 — schema/entities.ts BlockDoc의 표시
+ * 부분집합). 목록 데이터의 진실은 통합자(blocks API)가 소유하고 이 패널은 표시만 한다.
+ */
+export interface LibraryBlockSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly stepCount: number;
+  readonly robotHint: string | null;
+}
 
 export interface LibraryDeps {
   /**
@@ -76,6 +88,17 @@ export interface LibraryDeps {
    * label은 끌고 있는 템플릿 이름(종료 시 null). 통합자가 뷰포트 드롭 힌트에 연결한다.
    */
   onDragState?(active: boolean, label: string | null): void;
+  /**
+   * 재사용 블록 목록 공급자 (Phase 12+ — 삽입 시 전개 모델). **미주입 시 블록 섹션은
+   * 렌더되지 않는다** — 기존 호출부는 수정 없이 그대로 동작한다.
+   */
+  blocksProvider?(): Promise<readonly LibraryBlockSummary[]>;
+  /**
+   * 블록 카드 클릭 = 삽입 요청. 파라미터 다이얼로그·expandBlock·그래프 삽입은 통합자
+   * 몫이다 (schema/blocks.ts — 이 패널은 블록을 해석하지 않는다). 블록은 씬 배치물이
+   * 아니라 시퀀스 조각이므로 템플릿 카드와 달리 뷰포트 드래그를 지원하지 않는다.
+   */
+  onInsertBlock?(id: string): void;
 }
 
 export interface LibraryHandle {
@@ -83,6 +106,8 @@ export interface LibraryHandle {
   readonly el: HTMLElement;
   /** 검색어 프로그램 설정 (빈 문자열 = 전체 표시) */
   setSearch(query: string): void;
+  /** 블록 목록 다시 읽기 (블록 저장/삭제 후 통합자가 호출) — blocksProvider 미주입 시 no-op */
+  reloadBlocks(): void;
   dispose(): void;
 }
 
@@ -168,6 +193,22 @@ function ensureLibraryStyles(): void {
   document.head.appendChild(style);
 }
 
+// ── 순수 헬퍼 ───────────────────────────────────────────────────────
+
+/** 검색어로 블록 요약 필터 (이름·robotHint 부분 일치, 대소문자 무시 — filterTemplates와 동형) */
+export function filterBlockSummaries(
+  items: readonly LibraryBlockSummary[],
+  query: string,
+): readonly LibraryBlockSummary[] {
+  const q = query.trim().toLowerCase();
+  if (q === '') return items;
+  return items.filter(
+    (block) =>
+      block.name.toLowerCase().includes(q) ||
+      (block.robotHint ?? '').toLowerCase().includes(q),
+  );
+}
+
 // ── 내부 DOM 헬퍼 ───────────────────────────────────────────────────
 
 /** muted 안내 줄 (빈 검색 결과 등) */
@@ -249,6 +290,31 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
   let query = '';
   const sectionCollapsed = new Map<TemplateSection, boolean>();
 
+  // ── 블록 섹션 상태 (blocksProvider 주입 시에만 사용 — 파일 헤더) ──
+  let blockItems: readonly LibraryBlockSummary[] = [];
+  let blocksState: 'loading' | 'ready' | 'error' = 'loading';
+  let disposed = false;
+
+  const loadBlocks = (): void => {
+    const provider = deps.blocksProvider;
+    if (provider === undefined) return;
+    blocksState = 'loading';
+    render();
+    provider().then(
+      (items) => {
+        if (disposed) return;
+        blockItems = items;
+        blocksState = 'ready';
+        render();
+      },
+      () => {
+        if (disposed) return;
+        blocksState = 'error';
+        render();
+      },
+    );
+  };
+
   // ── 카드 생성 ─────────────────────────────────────────────────────
   const makeCard = (template: LibraryTemplate): HTMLButtonElement => {
     const card = document.createElement('button');
@@ -289,6 +355,33 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
       deps.onDragState?.(false, null);
     });
 
+    return card;
+  };
+
+  // ── 블록 카드 (클릭 = 삽입 요청 — 드래그 없음, deps 주석 참조) ────
+  const makeBlockCard = (block: LibraryBlockSummary): HTMLButtonElement => {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'rsw-lib-card';
+    card.dataset.testid = `library-block-card-${block.id}`;
+    const hint = block.robotHint !== null && block.robotHint !== '' ? ` · ${block.robotHint}` : '';
+    card.title = `${block.name} — step ${block.stepCount}개${hint} (클릭해 시퀀스에 삽입)`;
+    card.setAttribute('aria-label', `${block.name} 블록 삽입 — step ${block.stepCount}개${hint}`);
+    styled(card, { cursor: 'pointer' }); // grab 커서는 드래그 카드 전용
+
+    const iconWrap = document.createElement('span');
+    iconWrap.className = 'rsw-lib-card__icon';
+    iconWrap.setAttribute('aria-hidden', 'true');
+    iconWrap.appendChild(icon('puzzle', ICON.xl));
+    const label = document.createElement('span');
+    label.className = 'rsw-lib-card__label';
+    label.textContent = block.name;
+    card.appendChild(iconWrap);
+    card.appendChild(label);
+
+    card.addEventListener('click', () => {
+      deps.onInsertBlock?.(block.id);
+    });
     return card;
   };
 
@@ -337,6 +430,45 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
       grid.dataset.testid = `library-grid-${section.id}`;
       for (const template of templates) grid.appendChild(makeCard(template));
       body.appendChild(grid);
+    }
+
+    // 블록 섹션 (Phase 12+ 재사용 블록 — 삽입 시 전개) — blocksProvider 주입 시에만 렌더.
+    // 섹션 라벨의 영/한 병기는 라이브러리 카드 한정 예외의 연장이다 (CLAUDE.md §4-b.4).
+    if (deps.blocksProvider !== undefined) {
+      const visibleBlocks = filterBlockSummaries(blockItems, query);
+      const blocksHeader = applyType(document.createElement('div'), TYPE.bodyStrong);
+      styled(blocksHeader, {
+        color: COLOR.label,
+        margin: `${SPACE.xl} 0 ${SPACE.sm} 0`,
+        padding: `${SPACE.xxs} ${SPACE.xs}`,
+      });
+      blocksHeader.textContent =
+        blocksState === 'ready' ? `Blocks · 블록 (${visibleBlocks.length})` : 'Blocks · 블록';
+      blocksHeader.dataset.testid = 'library-section-blocks';
+      body.appendChild(blocksHeader);
+
+      if (blocksState === 'loading') {
+        body.appendChild(mutedLine('블록 불러오는 중…'));
+      } else if (blocksState === 'error') {
+        // 막다른 길 금지 — 사유와 함께 재시도 경로를 준다
+        body.appendChild(mutedLine('블록을 불러오지 못했습니다'));
+        const retry = makeButton('다시 시도', '블록 목록 다시 불러오기', 'library-blocks-retry', 'ghost');
+        retry.addEventListener('click', () => {
+          loadBlocks();
+        });
+        body.appendChild(retry);
+      } else if (visibleBlocks.length === 0) {
+        body.appendChild(mutedLine(query.trim() === '' ? '저장된 블록 없음' : '검색 결과 없음'));
+      } else {
+        const blocksGrid = styled(document.createElement('div'), {
+          display: 'grid',
+          gridTemplateColumns: `repeat(auto-fill, minmax(${CARD_MIN_WIDTH_PX}px, 1fr))`,
+          gap: SPACE.md,
+        });
+        blocksGrid.dataset.testid = 'library-grid-blocks';
+        for (const block of visibleBlocks) blocksGrid.appendChild(makeBlockCard(block));
+        body.appendChild(blocksGrid);
+      }
     }
 
     // Import 섹션 (UX §3.2) — 통합자가 onImportRequest를 주입한 경우에만 렌더.
@@ -388,6 +520,7 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
 
   host.appendChild(panel);
   render();
+  loadBlocks(); // blocksProvider 미주입 시 no-op — 기존 호출부 무수정 호환
 
   return {
     el: panel,
@@ -396,7 +529,11 @@ export function mountLibrary(host: HTMLElement, deps: LibraryDeps): LibraryHandl
       search.value = q;
       render();
     },
+    reloadBlocks: (): void => {
+      loadBlocks();
+    },
     dispose: (): void => {
+      disposed = true;
       panel.remove();
     },
   };

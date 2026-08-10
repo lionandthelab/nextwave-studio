@@ -38,6 +38,7 @@ import {
   bestPerRow,
   fitViewport,
   insertionIndexAt,
+  nearestSlotIndexAt,
   insertionIndexFromPoint,
   insertionLine,
   insertionLineX,
@@ -573,6 +574,69 @@ describe('insertionLine (snake — 줄까지 돌려준다)', () => {
     for (const final of [0, 1, 2]) {
       expect(insertionLine(2, final, 3).x).toBe(insertionLineX(2, final, 3));
     }
+  });
+});
+
+// ── 드래그 재정렬 판정: 고스트 중심 → 최근접 슬롯 ────────────────────
+//
+// 회귀 가드. 구 구현(reorderTargetIndexAt + 커서 좌표)은 "커서가 이웃의 원래 중심을
+// 넘었는가"로 판정해, 노드 왼쪽(라벨 쪽)을 잡으면 고스트를 이웃 위에 픽셀 단위로
+// 정확히 겹쳐도 **아무 일도 일어나지 않았다**. 사용자는 순서를 바꿨다고 믿고 ▶를 눌러
+// 이전 순서를 실행했다 — 이 파일의 계약이 그 회귀를 막는다.
+describe('nearestSlotIndexAt (드래그 재정렬 판정)', () => {
+  it('고스트 중심을 슬롯에 정렬하면 그 슬롯이 결과다 (보이는 것 = 결과)', () => {
+    const count = 7;
+    for (let slot = 0; slot < count; slot += 1) {
+      expect(nearestSlotIndexAt(count, SINGLE_ROW, chainCenterX(slot), chainCenterY(slot))).toBe(
+        slot,
+      );
+    }
+  });
+
+  it('그랩 지점과 무관하게 결과가 같다 — 왼쪽을 잡아도 한 칸 이동이 성립한다', () => {
+    const count = 7;
+    const from = 1;
+    // 고스트를 슬롯 2에 정확히 겹친 상태에서, 커서는 그랩 오프셋만큼 떨어져 있다.
+    // 호출부가 커서에서 오프셋을 빼므로 effX는 언제나 고스트 중심이다.
+    for (const grabFrac of [0.05, 0.25, 0.5, 0.75, 0.95]) {
+      const grabDx = (grabFrac - 0.5) * NODE_W;
+      const cursorX = chainCenterX(2) + grabDx;
+      expect(nearestSlotIndexAt(count, SINGLE_ROW, cursorX - grabDx, chainCenterY(2))).toBe(2);
+    }
+    expect(from).toBe(1); // 그랩 위치가 결과를 바꾸지 않는다는 것이 요점
+  });
+
+  it('반 칸 안쪽까지는 그 슬롯으로 흡착한다 (데드존 1피치)', () => {
+    const count = 5;
+    const c2 = chainCenterX(2);
+    expect(nearestSlotIndexAt(count, SINGLE_ROW, c2 - NODE_PITCH_X / 2 + 1, chainCenterY(2))).toBe(2);
+    expect(nearestSlotIndexAt(count, SINGLE_ROW, c2 + NODE_PITCH_X / 2 - 1, chainCenterY(2))).toBe(2);
+    // 반 칸을 넘으면 이웃
+    expect(nearestSlotIndexAt(count, SINGLE_ROW, c2 - NODE_PITCH_X / 2 - 1, chainCenterY(2))).toBe(1);
+    expect(nearestSlotIndexAt(count, SINGLE_ROW, c2 + NODE_PITCH_X / 2 + 1, chainCenterY(2))).toBe(3);
+  });
+
+  it('여러 칸 이동도 어긋나지 않는다 (구 구현은 항상 한 칸 앞에 떨어졌다)', () => {
+    const count = 7;
+    expect(nearestSlotIndexAt(count, SINGLE_ROW, chainCenterX(4), chainCenterY(4))).toBe(4);
+    expect(nearestSlotIndexAt(count, SINGLE_ROW, chainCenterX(6), chainCenterY(6))).toBe(6);
+  });
+
+  it('snake: 줄이 다르면 행 오프셋이 반영된다', () => {
+    const per = 4;
+    const count = 7; // 4 / 3
+    for (let slot = 0; slot < count; slot += 1) {
+      expect(nearestSlotIndexAt(count, per, chainCenterX(slot, per), chainCenterY(slot, per))).toBe(
+        slot,
+      );
+    }
+  });
+
+  it('체인 밖으로 나가도 0..count-1로 클램프된다', () => {
+    const count = 4;
+    expect(nearestSlotIndexAt(count, SINGLE_ROW, -99999, CHAIN_Y)).toBe(0);
+    expect(nearestSlotIndexAt(count, SINGLE_ROW, 99999, CHAIN_Y)).toBe(count - 1);
+    expect(nearestSlotIndexAt(0, SINGLE_ROW, 0, 0)).toBe(0);
   });
 });
 

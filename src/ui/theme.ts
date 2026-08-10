@@ -211,6 +211,45 @@ export const CATEGORY = {
   flow: '#C084FC',
 } as const;
 
+// ── 상태(STATUS) — 콘솔 평면 배지 축 (docs/BACKEND.md, Phase 12+) ───
+//
+// **4번째 의미축이다.** 기존 액센트 3분할(면=주요 액션 / 보더=토글 상태 / SELECT=선택)과
+// 충돌하지 않는다 — STATUS는 "이 개체가 지금 어떤 상태인가"(idle/running/success/warn/
+// error)를 배지(fg/bg/border 3튜플)로 말하는 축이며, 액션·토글·선택 어디에도 쓰지 않는다.
+//
+// - running이 액센트 hue를 공유하는 것은 의도다: 이 앱에서 "실행 중"은 이미 액센트로
+//   읽힌다(.ui-dot--playing · 타임라인 active 마커 · 런 스트립). 단 주요 액션의 면(fill)과
+//   달리 배지는 soft 배경 + 밝은 텍스트라 역할 혼동이 없다.
+// - error는 COLLISION 램프의 별칭이다 — 새 빨강 hue를 만들지 않는다(UX_AUDIT C-7).
+// - 접근성 계약(파일 헤더 §): 모든 fg는 **가장 밝은 표면(SURFACE.modal #363E51) 위에서도**
+//   대비 ≥ 4.5:1. 검산값(기존 토큰 주석의 값 재사용):
+//     idle 4.68 · running 5.00 · success 7.01 · warn 7.41 · error 4.99
+//   값을 바꾸면 반드시 다시 계산할 것.
+
+export interface StatusToken {
+  /** 배지 텍스트/아이콘 색 — SURFACE.modal 위 대비 ≥ 4.5:1 */
+  readonly fg: string;
+  /** 배지 배경 틴트 */
+  readonly bg: string;
+  /** 배지 테두리 */
+  readonly border: string;
+}
+
+export const STATUS = {
+  /** 대기/미실행 — muted 계열 (.ui-badge--stop과 동일 보더) */
+  idle: { fg: COLOR.muted, bg: COLOR.mutedSoft, border: 'rgba(162, 172, 192, 0.3)' },
+  /** 실행 중 — 액센트 hue 공유 (.ui-badge--accent와 동일 보더, 위 헤더 근거) */
+  running: { fg: COLOR.accentText, bg: COLOR.accentSoft, border: 'rgba(124, 106, 246, 0.4)' },
+  /** 완료/성공 */
+  success: { fg: COLOR.successText, bg: COLOR.successSoft, border: COLOR.successBorder },
+  /** 주의 (충돌 아님 — 잠금 임박 · 오프라인 대기 등) */
+  warn: { fg: COLOR.warnText, bg: COLOR.warnSoft, border: 'rgba(251, 191, 36, 0.4)' },
+  /** 오류 — COLLISION 램프 별칭 (시각 정합, C-7 단일 램프) */
+  error: { fg: COLLISION.text, bg: COLLISION.soft, border: COLLISION.border },
+} as const satisfies Record<string, StatusToken>;
+
+export type StatusName = keyof typeof STATUS;
+
 // ── 타이포그래피 ────────────────────────────────────────────────────
 
 export const FONT = {

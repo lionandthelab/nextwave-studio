@@ -120,7 +120,9 @@ import {
 import { disposeMeshResources, groundMesh, primitiveMesh } from './render/meshes';
 import { Renderer } from './render/renderer';
 import { loadUrdfRobot } from './render/urdf';
-import { mountJsonViewer } from './ui/command-bar/json-viewer';
+import { jsonErrorKo, mountJsonViewer } from './ui/command-bar/json-viewer';
+import type { ApplyJsonResult } from './ui/command-bar/json-viewer';
+import { SequenceVersions } from './ui/sequence-versions';
 import { mountPlaybackBar } from './ui/command-bar/playback';
 import { mountFlowCanvas } from './ui/flow-graph/canvas';
 import type { FlowCanvasOpResult } from './ui/flow-graph/canvas';
@@ -170,6 +172,10 @@ import { mountWorkspace } from './ui/workspace';
 import { makeIconButton } from './ui/icons';
 import { SCOPE_ATTR, createShortcutRouter } from './ui/shortcuts';
 import { mountHelpSheet } from './ui/help-sheet';
+import { RunRecorder } from './ui/run-recorder';
+import { mountConsolePlane } from './ui/console/glue';
+import type { ConsolePlaneHandle } from './ui/console/glue';
+import type { ExecDefaults } from './ui/console/settings-screen';
 import {
   createAutosave,
   createDirtyTracker,
@@ -232,6 +238,7 @@ import type {
   FlowNode,
   PhysicsSpec,
   Quat,
+  RunResult,
   SceneSpec,
   Transform,
   Vec3,
@@ -1032,6 +1039,14 @@ async function boot(): Promise<void> {
   /** '플로우' 토글 — 버튼과 단축키가 같은 함수를 부른다(동작 분기 금지) */
   let flowPaneToggler: (() => void) | null = null;
   let activeDropHint: DropHintHandle | null = null;
+  /** 콘솔 평면 핸들 (Phase 12) — 부트 말미에 마운트. 씬 빌드가 실행 기록·저장 라우팅에 사용 */
+  let consoleRef: ConsolePlaneHandle | null = null;
+  /** 현재 씬의 결정론적 재실행 — 기록 화면 "이 노드부터 재현"이 사용 (씬 빌드가 대입) */
+  let orchestratorRunFromNode: ((nodeId: string) => void) | null = null;
+  /** 현재 씬의 실행 기본값 적용기 — 설정 화면의 변경을 즉시 반영 (씬 빌드가 대입) */
+  let applyExecDefaultsToScene: ((defaults: ExecDefaults) => void) | null = null;
+  /** 문서 표시명 override — 작업/공정 문서를 열면 탭 제목이 씬 이름 대신 이것을 쓴다 */
+  let docLabelOverride: string | null = null;
   /**
    * 현재 씬의 뷰포트 편집 명령 — 기즈모 모드 전환 · 선택 오브젝트 이동 · 바닥에 붙이기.
    * 키 소유는 라우터(§2.10)에 있고 render/interaction은 명령만 제공한다.
@@ -1106,7 +1121,7 @@ async function boot(): Promise<void> {
   };
 
   dirtyTracker.onChange((dirty) => {
-    setDocumentTitle(active?.spec.name ?? null, dirty);
+    setDocumentTitle(docLabelOverride ?? active?.spec.name ?? null, dirty);
   });
   installUnloadGuard(() => dirtyTracker.isDirty());
 
@@ -1180,7 +1195,11 @@ async function boot(): Promise<void> {
       allowInTextEntry: true,
       run: (e) => {
         e.preventDefault(); // 브라우저 '페이지 저장' 차단
-        saveDocumentToFile();
+        // 작업/공정 문서 컨텍스트가 있으면 서버 저장(충돌 처리 포함), 아니면 파일 다운로드
+        void (async (): Promise<void> => {
+          const handled = await consoleRef?.saveActive();
+          if (handled !== true) saveDocumentToFile();
+        })();
       },
     },
     // ── 뷰포트 편집 (scope: viewport — 3D 화면에 포커스가 있을 때만) ──
@@ -1317,11 +1336,56 @@ async function boot(): Promise<void> {
   });
   commandBar.right.appendChild(flowToggleButton);
 
-  const jsonViewer = mountJsonViewer(
-    commandBar.right,
-    document.body,
-    () => active?.validSequence ?? null,
+  // '블록 저장' — 현재 시퀀스를 재사용 블록으로 (Phase 12 ⑤, 다이얼로그는 콘솔 글루 소유)
+  const blockCaptureButton = makeIconButton(
+    'puzzle',
+    '블록 저장',
+    '현재 시퀀스를 재사용 블록으로 저장',
+    'block-capture',
   );
+  setCommandBarPriority(blockCaptureButton, COMMAND_BAR_PRIORITY.view);
+  blockCaptureButton.addEventListener('click', () => {
+    consoleRef?.openBlockCapture();
+  });
+  commandBar.right.appendChild(blockCaptureButton);
+
+  // ── {} JSON 패널 (보기 · **직접 편집** · 버전 이력) ────────────────
+  //
+  // 편집/되돌리기는 씬 수명 함수(applyJsonToSequence / restoreSequenceVersion)에 위임한다 —
+  // 패널은 앱 수명이고 시퀀스 진실은 씬마다 새로 서기 때문이다. 씬이 없으면 편집을 거부한다.
+  // 모든 적용은 그래프 편집과 **같은 §2.8 파이프라인**(검증 → 커밋)을 지난다.
+  /**
+   * 현재 씬의 JSON 적용기/되돌리기 — 씬 빌드가 대입하고 **teardown이 반드시 null로
+   * 되돌린다**. 이 정리가 없으면 빌드 실패(손상 파일 업로드)나 씬 전환 중(URDF 로딩
+   * 수백 ms) 사용자가 [적용]/[되돌리기]를 눌렀을 때 **해제된 씬의 클로저가 실행**되어,
+   * 아무 일도 안 일어났는데 성공 토스트가 뜨고 죽은 씬 스냅샷이 Undo 스택에 들어간다.
+   */
+  let applyJsonToSequence: ((text: string) => ApplyJsonResult) | null = null;
+  let restoreSequenceVersion: ((version: number) => ApplyJsonResult) | null = null;
+
+  /**
+   * 시퀀스 버전 스택 — **앱 수명**이다.
+   *
+   * 씬 수명으로 두면 Ctrl+Z(씬 Undo)가 전체 재빌드를 거치므로 이력이 통째로 날아갔다:
+   * JSON 편집으로 v2~v4를 쌓고 Ctrl+Z를 한 번 누르면 [버전] 탭에 v1만 남아, 방금
+   * 떠나온 상태로도 중간 상태로도 돌아갈 수 없었다. **이 기능의 존재 이유(안전망)를
+   * 다른 되돌리기 축이 지우는** 구조였다. 대신 loadScene이 "새 논리 씬"일 때만 clear()
+   * 한다 — history.reset()과 정확히 같은 조건(§ loadScene의 fromHistory 분기)이다.
+   */
+  const sequenceVersions = new SequenceVersions();
+
+  const NO_ACTIVE_SCENE_RESULT: ApplyJsonResult = {
+    ok: false,
+    errors: ['활성 씬이 없어 시퀀스를 적용할 수 없습니다'],
+  };
+
+  const jsonViewer = mountJsonViewer(commandBar.right, document.body, {
+    getSequence: () => active?.validSequence ?? null,
+    applyJson: (text) => applyJsonToSequence?.(text) ?? NO_ACTIVE_SCENE_RESULT,
+    listVersions: () => sequenceVersions.list(),
+    restoreVersion: (version) => restoreSequenceVersion?.(version) ?? NO_ACTIVE_SCENE_RESULT,
+    describeAge: (atIso) => describeAge(atIso, Date.now()),
+  });
 
   // ── 앱 토스트 (히스토리/저장 경고 등 — 오류 토스트는 scene-controls 소유) ──
 
@@ -1571,11 +1635,40 @@ async function boot(): Promise<void> {
       flowPaneHost?: HTMLDivElement;
     } = {};
 
+    // ── 실행 기록 (Phase 12 ⑦ — RunRecorder는 순수 축적, 제출은 콘솔 글루) ──
+    // 기록은 **작업 컨텍스트가 있을 때만** 남긴다: 데모/프리셋 재생을 기록하면 실행 기록
+    // 화면이 열 수 없는 작업 id로 오염된다. 헬퍼는 teardownBuilt보다 먼저 선언한다 —
+    // 조립 실패 catch가 teardownBuilt를 부를 때 TDZ로 원인 오류를 가리지 않기 위해서다.
+    // (finishRun은 isActive 가드로 조기 반환하므로 engine/flowGraph 미선언 시점에도 안전.)
+    const runRecorder = new RunRecorder();
+    let runWallStartMs = 0;
+    let runSawAutoPause = false;
+    /** simTime 게터 — engine은 try 블록에서 생성되므로 생성 후 대입된다 */
+    let runSimTimeSec: () => number = () => 0;
+
+    const finishRun = (result: RunResult): void => {
+      if (!runRecorder.isActive()) return;
+      const record = runRecorder.finish(result, {
+        endedAtIso: new Date().toISOString(),
+        simTimeSec: runSimTimeSec(),
+        wallTimeSec: (Date.now() - runWallStartMs) / 1000,
+      });
+      if (record !== null) consoleRef?.submitRun(record);
+    };
+
     // 이 씬 몫의 전부를 해제한다 — 다음 빌드에 어떤 상태도 새지 않는다(전체 클린 빌드).
     // 순서: 엔진 루프 완전 정지 → 구독 해제 → 상호작용(기즈모/하이라이트) 해제 →
     // UI 제거 → 씬 자원(물리 바디·시각 노드·로봇 핸들) 해제 → sync 바인딩 정리 →
     // 월드 free. 렌더러/캔버스·워크스페이스 셸은 유지된다.
     const teardownBuilt = (): void => {
+      // 앱 수명 패널({} JSON)이 잡고 있는 **이 씬의 클로저를 먼저 끊는다.** 남겨두면
+      // 빌드 실패 후나 전환 중(URDF 로딩)에 [적용]/[되돌리기]가 해제된 씬에 커밋되어,
+      // 아무 일도 안 일어났는데 성공 토스트가 뜨고 죽은 스냅샷이 Undo 스택에 들어간다.
+      applyJsonToSequence = null;
+      restoreSequenceVersion = null;
+      // 진행 중이던 실행 기록을 먼저 닫는다 (씬 전환/문서 열기로 재생이 끊긴 경우 —
+      // simTimeSec을 엔진 정지 전에 읽는다). 기록이 없으면 no-op.
+      finishRun(runSawAutoPause ? 'autoPaused' : 'stopped');
       built.engine?.halt();
       built.offTick?.();
       built.orchestrator?.dispose(); // player.onStepChange + monitor 구독 해제 (Phase 10)
@@ -1665,6 +1758,17 @@ async function boot(): Promise<void> {
       // 시 player.load 여부(human-in-the-loop) + preStep 진행 게이트를 겸한다.
       let currentSequence: ControlSequence | null = validSequence;
       let sequenceArmed = false;
+      /**
+       * 마지막 재생 이후 시퀀스가 편집됐는가 — ▶가 "이어서"가 아니라 **"처음부터"** 를
+       * 뜻해야 하는 상태다.
+       *
+       * 구 동작: 편집은 player만 unarm하고 씬 물리는 그대로 뒀다. 그래서 완주 후 노드를
+       * 재정렬하고 ▶를 누르면 로봇이 **이전 런의 끝 포즈에서** 시작했다 — moveJoints
+       * 목표가 이미 달성돼 있어 아무 움직임이 없거나, waitForCollision이 이전 런의 잔여
+       * 접촉으로 즉시 통과하거나 반대로 타임아웃까지 6초를 세웠다. 사용자에게는 정확히
+       * "순서를 바꿨는데 로봇이 예전처럼 군다"로 보인다.
+       */
+      let sequenceDirtySinceRun = false;
       /** toSequence 복원용 시퀀스 메타 (그래프에는 id/loop가 실리지 않는다 — F1 계약) */
       const flowSeqMeta: { id: string; loop: boolean | undefined } = {
         id: validSequence?.id ?? FLOW_GRAPH_SEQUENCE_ID,
@@ -1675,6 +1779,13 @@ async function boot(): Promise<void> {
         ? fromSequence(validSequence, { origin: 'manual' })
         : { nodes: [], edges: [], robot: sceneHandle.robots.ids()[0] ?? '' };
       let lastFlowValidation: 'ok' | string[] = 'ok';
+      // 로드 시점을 버전으로 남긴다 — "열었을 때로 되돌리기"가 항상 가능해야 한다.
+      // 스택이 비어 있으면 새 씬(loadScene이 clear했다), 아니면 Undo/Redo 복원이다.
+      if (validSequence !== null) {
+        sequenceVersions.record(validSequence, {
+          labelKo: sequenceVersions.size() === 0 ? '열었을 때' : '되돌리기(Ctrl+Z)로 복원',
+        });
+      }
       /** 캔버스 실행 상태 (nodeId → 상태) — Orchestrator onNodeStatus가 다시 그린다 (Phase 10) */
       let flowStatuses: Record<string, NodeRunStatus> = {};
       /** 이번 재생 런에서 active로 표시된 노드 (게이트의 스킵 검증용 — arm 시 리셋) */
@@ -2077,6 +2188,16 @@ async function boot(): Promise<void> {
         const contactClass = classifyCollision(e);
         const isRealCollision = isCollision(contactClass);
         collisionPanel.addEvent(e, contactClass);
+        // 실행 기록 (Phase 12 ⑦) — begin 전이면 레코더가 무시한다. 물리 phase 'stop'은
+        // 기록 스키마의 'end'로 매핑한다 (runCollisionSchema — entities.ts).
+        runRecorder.recordCollision({
+          atSimSec: e.timeSec,
+          entityA: e.a,
+          entityB: e.b,
+          phase: e.phase === 'start' ? 'start' : 'end',
+          nodeId: activeFlowNodeId,
+          classification: isRealCollision ? 'unexpected' : 'intended',
+        });
         // 비활성 탭에 쌓인 충돌을 탭 배지로 표면화한다 (UX_AUDIT C-7): 구 구현은
         // waitForCollision을 포함한 시퀀스가 완주해도 충돌이 있었다는 표시가 화면
         // 어디에도 없었다 — 이 제품의 존재 이유가 3번째 탭 뒤에 숨어 있었다.
@@ -2138,6 +2259,7 @@ async function boot(): Promise<void> {
         nodeActiveStartSimSec.length = 0;
         player.load(currentSequence);
         sequenceArmed = true;
+        sequenceDirtySinceRun = false; // 새 런이 편집본을 처음부터 싣는다
         return true;
       };
 
@@ -2200,34 +2322,75 @@ async function boot(): Promise<void> {
        */
       let seqCompletionHandled = false;
 
+      // 실행 기록 시작 — 작업 컨텍스트 + 시퀀스가 있을 때만 (finishRun과 한 쌍, 위 선언부)
+      runSimTimeSec = () => engine.simTimeSec;
+      const beginRunIfPossible = (): void => {
+        if (runRecorder.isActive()) return;
+        const ctx = consoleRef?.currentTaskInfo() ?? null;
+        if (ctx === null) return;
+        if (flowGraph.nodes.length === 0) return;
+        const operator = consoleRef?.operator() ?? { id: 'local-user', name: '로컬 사용자' };
+        runSawAutoPause = false;
+        runWallStartMs = Date.now();
+        runRecorder.begin({
+          taskId: ctx.taskId,
+          taskName: ctx.taskName,
+          taskVersion: ctx.taskVersion,
+          processId: ctx.processId,
+          operatorId: operator.id,
+          operatorName: operator.name,
+          stepsTotal: flowGraph.nodes.filter((n) => n.enabled).length,
+          startedAtIso: new Date().toISOString(),
+        });
+      };
+
       const playbackControls = {
         play: (): void => {
           // 완주 후 ▶는 "다시 실행"이다. armSequenceIfAvailable은 sequenceArmed가 true면
           // 조기 반환하므로, 완주 상태(player.status==='done')에서는 아무 일도 일어나지
           // 않았다 — 정지를 눌러야만 동작하던 원인. 처음부터 결정론적으로 되감는다.
-          if (sequenceArmed && player.status === 'done') {
+          // "새 런을 시작해야 하는가"의 단일 판정: 완주 후 ▶(다시 실행) **또는** 마지막
+          // 재생 이후 편집됨. 둘 다 ⏹ → ▶와 같은 경로(씬·충돌 이력·player 전부 되감기)를
+          // 타야 편집본이 깨끗한 초기 상태에서 돈다.
+          if (sequenceDirtySinceRun || (sequenceArmed && player.status === 'done')) {
             // ⏹ 정지 → ▶ 재생과 **같은 경로**다(게이트가 이미 증명하는 결정론적 리플레이).
             // resetScene()만 부르면 씬 바디는 되감기지만 simTimeSec이 이어져,
             // 같은 "처음부터"인데 정지 경로와 시간 표시가 달라진다.
             orchestrator.stop();
             seqCompletionHandled = false;
-            appLog('info', '시퀀스 다시 실행 — 처음부터');
+            appLog('info', '처음부터 실행 — 편집본을 초기 상태에서 재생합니다');
           } else {
             armSequenceIfAvailable();
           }
+          beginRunIfPossible(); // 작업 컨텍스트가 있으면 이 재생부터 실행 기록 (Phase 12 ⑦)
+          runRecorder.recordIntervention('play', activeFlowNodeId, engine.simTimeSec);
           orchestrator.play();
           refreshOverlay(); // engine.play() 직후 동기 갱신 — rAF 지연 없이 'Running · node k/n' 전이 (§5)
         },
         pause: (): void => {
+          runRecorder.recordIntervention('pause', activeFlowNodeId, engine.simTimeSec);
           orchestrator.pause();
           refreshOverlay(); // 'Paused' 전이를 즉시 반영 (정지에는 onActiveNode 방출이 없다)
         },
         stop: (): void => {
+          // 기록 마감은 orchestrator.stop() **전에** — 정지가 simTime을 되감는다
+          runRecorder.recordIntervention('stop', activeFlowNodeId, engine.simTimeSec);
+          finishRun(runSawAutoPause ? 'autoPaused' : 'stopped');
           orchestrator.stop();
           refreshOverlay(); // 'Idle' 전이를 즉시 반영
         },
         stepOnce: (): void => {
+          // ▶와 같은 판정 — 편집 후 첫 ⏭도 이전 런의 끝 상태에서 이어지면 안 된다
+          if (sequenceDirtySinceRun) {
+            orchestrator.stop();
+            seqCompletionHandled = false;
+          }
           armSequenceIfAvailable(); // 시퀀스 arm 없이는 노드 경계가 없어 무한 재생 → 먼저 arm
+          // 완주 상태에서 ⏭는 orchestrator.step()이 no-op이다 — 기록만 열면 stepsDone 0의
+          // 유령 런이 append-only 로그에 남아 통계(성공률·runCount)를 영구 오염시킨다.
+          if (sequenceArmed && player.status === 'done') return;
+          beginRunIfPossible();
+          runRecorder.recordIntervention('stepNode', activeFlowNodeId, engine.simTimeSec);
           orchestrator.step();
           refreshOverlay(); // 노드 스텝 재생 전이를 즉시 반영 (경계 정지는 onTick이 뒤따라 반영)
           // 노드 스텝은 엔진을 잠시 재생 후 경계에서 멈춘다 — 인스펙터는 onTick 상태 전이로 갱신됨
@@ -2450,6 +2613,8 @@ async function boot(): Promise<void> {
         // 씬 상태는 보존한다(⏹ 정지와 달리 리셋하지 않는다) — 결과를 그대로 관찰할 수 있다.
         if (seqDoneNow && !seqCompletionHandled) {
           seqCompletionHandled = true;
+          // 완주 시점에 실행 기록 마감 — 오류 노드가 있었으면 'error'로 남긴다 (Phase 12 ⑦)
+          finishRun(Object.values(flowStatuses).includes('error') ? 'error' : 'completed');
           if (info.state === 'playing') {
             orchestrator.pause();
             appLog('info', '시퀀스 완주 — 실행 종료 (▶ 다시 실행으로 처음부터)');
@@ -2865,9 +3030,12 @@ async function boot(): Promise<void> {
        * 시퀀스 편집 정책(파일 헤더): armed였다면 unarm + player 커서 0 — 엔진(씬 물리)
        * 은 계속 돈다. 다음 ▶ Play가 편집본을 처음부터 재생한다.
        */
-      const commitFlowSequence = (seq: ControlSequence): void => {
+      const commitFlowSequence = (seq: ControlSequence, versionLabelKo?: string): void => {
         // 시퀀스만 바뀌어도 문서는 미저장이다 — 구 저장은 이 축을 통째로 버렸다 (C-3)
         queueMicrotask(markDocumentChanged);
+        // 버전 이력에 append (라벨은 이전/이후 비교로 자동 도출 — 편집 호출부를 건드리지
+        // 않아도 새 경로에 자동으로 이름이 붙는다. JSON 직접 편집/되돌리기만 명시 지정).
+        sequenceVersions.record(seq, versionLabelKo === undefined ? {} : { labelKo: versionLabelKo });
         // 노드 편집(삭제·재정렬·복제·파라미터·교체 생성)을 Undo 대상으로 만든다 (C-4).
         // 구 구현에서는 15분간 손질한 시퀀스가 Del 한 번에 복구 불가로 사라졌다.
         history.flushPending(); // 직전 씬 편집 burst와 경계를 세운다
@@ -2875,14 +3043,20 @@ async function boot(): Promise<void> {
         history.flushPending();
         const wasArmed = sequenceArmed;
         currentSequence = seq;
+        // 씬이 이미 "쓰인" 상태(재생했거나 시간이 흐른 뒤)에서의 편집은 다음 ▶가
+        // 처음부터 되감아야 한다 — 안 그러면 편집본이 이전 런의 끝 상태 위에서 돌아
+        // "순서를 바꿨는데 로봇이 예전처럼 군다"가 된다 (sequenceDirtySinceRun 헤더).
+        if (wasArmed || engine.simTimeSec > 0) sequenceDirtySinceRun = true;
         if (wasArmed) {
           sequenceArmed = false; // preStep 게이트 — 로드된 이전 시퀀스는 더 진행하지 않음
           // 런 표현 초기화(엔진/씬 무영향): player 커서 되감기(resetting 가드로 통지 무시) +
-          // 상태 전부 pending. 엔진(씬 물리)은 계속 돈다 — 다음 ▶ Play가 편집본을 처음부터.
+          // 상태 전부 pending.
           orchestrator.resetForEdit();
-          // 문구 계약: '시퀀스를' 처음부터 — 씬 물리 pose는 리셋되지 않는다(편집 정책, resetForEdit
-          // 주석). 완전 결정론적 재생을 원하면 ⏹ Stop이 씬까지 되감는다. (toast honesty — §5)
-          showToast('시퀀스 수정됨 — 시퀀스를 처음부터 재생합니다 (씬은 유지 · 완전 되감기는 ⏹ Stop)', 'info');
+          // 재생 중이었다면 엔진도 세운다. 시퀀스만 unarm하면 **엔진은 playing인데 로봇은
+          // 얼어붙고 오버레이는 Idle**인 모순 상태가 남는다 — 사용자에겐 "편집이 재생을
+          // 깨뜨렸다"로 보인다.
+          if (engine.state === 'playing') orchestrator.pause();
+          showToast('시퀀스 수정됨 — ▶ 재생하면 처음부터 새 순서로 실행합니다', 'info');
         }
         flowEverActiveNodeIds.clear();
         timelinePanel.setSequence(seq.steps.map((step) => step.kind));
@@ -2918,10 +3092,99 @@ async function boot(): Promise<void> {
         }
         flowGraph = withEditBadges(flowGraph, structural.graph);
         lastFlowValidation = 'ok';
+        // 라벨은 넘기지 않는다 — describeSequenceChange가 이전/이후 비교로 도출한다
+        // (편집 호출부마다 라벨을 넘기게 하면 한 곳만 빠뜨려도 '알 수 없음'이 남는다).
         commitFlowSequence(serialized.sequence);
         flowCanvas.render();
         nodeEditor.refresh(); // 폼 편집 중(포커스)이면 내부 가드가 건너뛴다
         return null;
+      };
+
+      /**
+       * 검증된 시퀀스를 그래프 진실로 **통째로 교체**한다 (JSON 직접 편집 · 버전 되돌리기).
+       *
+       * 노드 단위 op가 아니라 전체 교체이므로 runFlowOp를 타지 않지만, **같은 게이트를
+       * 같은 순서로** 지난다: validateSequence(스키마 + 씬 참조) → fromSequence →
+       * serializeGraph(재직렬화로 왕복 무결성 확인) → commit. 마지막 재직렬화는
+       * 형식적으로 보이지만 §2.8의 "편집 결과는 항상 직렬화 가능"을 이 경로에서도
+       * 기계적으로 보증한다 — 사람이 쓴 JSON이 들어오는 유일한 경로라 더 필요하다.
+       */
+      const replaceSequenceFromValidated = (
+        candidate: unknown,
+        versionLabelKo: string,
+      ): { readonly ok: true; readonly recorded: boolean } | { readonly ok: false; readonly errors: readonly string[] } => {
+        const validated = validateSequence(candidate, editor.spec);
+        if (!validated.ok) return { ok: false, errors: validated.errors };
+        const nextGraph = fromSequence(validated.value, { origin: 'manual' });
+        const serialized = serializeGraph(nextGraph, editor.spec, {
+          id: validated.value.id,
+          ...(validated.value.loop !== undefined ? { loop: validated.value.loop } : {}),
+        });
+        if (!serialized.ok) {
+          lastFlowValidation = serialized.errors;
+          return { ok: false, errors: serialized.errors };
+        }
+        flowGraph = nextGraph;
+        // 메타는 제자리 갱신한다(다른 클로저들이 이 객체를 캡처하고 있다 — 재대입 금지).
+        // 사람이 쓴 JSON이 id/loop를 바꿀 수 있으므로 여기서 진실을 따라간다.
+        flowSeqMeta.id = validated.value.id;
+        flowSeqMeta.loop = validated.value.loop;
+        lastFlowValidation = 'ok';
+        const versionCountBefore = sequenceVersions.size();
+        commitFlowSequence(serialized.sequence, versionLabelKo);
+        flowCanvas.render();
+        nodeEditor.refresh();
+        // 시퀀스가 통째로 바뀌면 페인이 닫혀 있을 이유가 없다 — 결과를 보여준다
+        if (serialized.sequence.steps.length > 0 && !flowPaneVisible) setFlowPaneVisible(true);
+        // 내용이 직전 버전과 같으면 record가 기록하지 않는다(공백·키 순서만 바꾼 경우).
+        // 안내 문구가 "이력에 남았다"고 거짓말하지 않도록 실제 기록 여부를 돌려준다.
+        return { ok: true, recorded: sequenceVersions.size() > versionCountBefore };
+      };
+
+      /** {} JSON 패널의 [적용] — 텍스트 파싱은 패널이 이미 했지만 진실은 여기서 다시 판정한다 */
+      applyJsonToSequence = (text): ApplyJsonResult => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch (err) {
+          // 패널이 이미 선파싱해 줄 번호로 안내하므로 여기 도달은 드물지만,
+          // 사용자에게 보이는 문자열은 어느 경로든 한국어다 (§4-b).
+          return { ok: false, errors: [jsonErrorKo(err, text)] };
+        }
+        const result = replaceSequenceFromValidated(parsed, 'JSON 직접 편집');
+        if (!result.ok) {
+          appLog('error', `JSON 적용 거부: ${result.errors.join(' / ')}`);
+          return result;
+        }
+        appLog('info', 'JSON 직접 편집 적용 — 시퀀스 교체');
+        showToast(
+          result.recorded
+            ? 'JSON 적용됨 — 되돌리려면 {} JSON의 [버전] 탭을 쓰세요'
+            : 'JSON 적용됨 (내용이 같아 새 버전은 만들지 않았습니다)',
+          'info',
+        );
+        return { ok: true };
+      };
+
+      /** [버전] 탭의 되돌리기 — 되돌리기도 새 버전으로 append된다(되돌리기를 되돌릴 수 있다) */
+      restoreSequenceVersion = (version): ApplyJsonResult => {
+        const entry = sequenceVersions.get(version);
+        if (entry === null) {
+          return { ok: false, errors: [`v${version}은 이력에서 사라졌습니다 (상한 초과로 폐기)`] };
+        }
+        const result = replaceSequenceFromValidated(entry.sequence, `v${version}으로 되돌림`);
+        if (!result.ok) {
+          appLog('error', `되돌리기 거부(v${version}): ${result.errors.join(' / ')}`);
+          return result;
+        }
+        appLog('info', `시퀀스 v${version}으로 되돌림 (${entry.labelKo})`);
+        showToast(
+          result.recorded
+            ? `v${version}으로 되돌렸습니다 — 지금 상태도 이력에 남아 있습니다`
+            : `v${version}과 내용이 같아 그대로입니다`,
+          'info',
+        );
+        return { ok: true };
       };
 
       /** 캔버스/파사드용 래퍼: 실패를 한국어 토스트 + 콘솔 로그로 표면화 (§2.8 피드백) */
@@ -3025,6 +3288,14 @@ async function boot(): Promise<void> {
             nodeEditor.showFor(null);
             showRightPanelFor('entity');
           }
+        },
+        // 제자리 드롭 / 페인 밖 드롭 — 조용히 되돌리면 "드래그가 먹히지 않았다"로 읽힌다.
+        // 사용자가 실제로 겪은 결함이 이것이었다(순서가 안 바뀐 채 ▶를 눌러 이전 순서 실행).
+        onReorderNoop: () => {
+          showToast('순서가 그대로입니다 — 옮길 자리의 노드 위로 끌어다 놓으세요', 'info');
+        },
+        onReorderCancelled: () => {
+          showToast('재정렬 취소됨 — 플로우 그래프 안에서 놓아야 순서가 바뀝니다', 'warn');
         },
         paletteContext: flowPaletteContext,
         // 빈 플로우의 '자연어로 만들기' → 커맨드바 자연어 입력에 포커스 (UX_AUDIT C-12).
@@ -3209,6 +3480,12 @@ async function boot(): Promise<void> {
           flowStatuses = map;
           flowCanvas.setStatuses(map);
           paintTimelineFromStatuses(map);
+          // 실행 기록 진행 카운터 — 레코더는 [0, stepsTotal] 클램프 후 **마지막 값**을
+          // 남긴다(단조 증가를 보장하지 않는다). 되감기(runFromNode)로 done이 줄어드는
+          // 것은 실제 진행이 줄어든 것이므로 마지막 값이 맞는 의미다.
+          runRecorder.noteStepDone(
+            Object.values(map).filter((status) => status === 'done').length,
+          );
         },
         // 활성 노드 방출 → 캔버스 아웃라인 강조 + 뷰포트 배지 라벨(캐시) (트라이페인 동기 ②)
         onActiveNode: (nodeId) => {
@@ -3250,6 +3527,11 @@ async function boot(): Promise<void> {
           `예기치 않은 충돌${pair} — 노드 '${e.nodeId}' 오류 표시` +
             (orchestrator.autoPauseOnCollision ? ' + 자동 정지' : ''),
         );
+        // 자동 정지가 실제로 걸렸을 때만 개입으로 기록 — 이후 ⏹은 'autoPaused' 결과가 된다
+        if (orchestrator.autoPauseOnCollision) {
+          runSawAutoPause = true;
+          runRecorder.recordIntervention('autoPause', e.nodeId, engine.simTimeSec);
+        }
       });
 
       /** 노드/마커에서 결정론적 재실행 (§5) — 처음부터 되감아 목표 노드 경계까지 빨리감기. */
@@ -3260,8 +3542,12 @@ async function boot(): Promise<void> {
           `'${kindMeta(node.kind).label}' 노드부터 다시 재생합니다 (처음부터 되감아 빨리감기)`,
           'info',
         );
+        beginRunIfPossible();
+        runRecorder.recordIntervention('runFromNode', nodeId, engine.simTimeSec);
         orchestrator.runFromNode(nodeId);
       };
+      // 기록 화면 "이 노드부터 재현"이 쓰는 앱 수명 참조 (씬 전환 시 새 씬 것으로 교체)
+      orchestratorRunFromNode = runFromNodeWithToast;
 
       // Timeline 마커 클릭 → 그 노드부터 재실행 (§5 "마커/노드 클릭 → 재실행")
       timelinePanel.onMarkerClick((index) => {
@@ -3287,6 +3573,18 @@ async function boot(): Promise<void> {
 
       // 초기 페인트 — 전부 pending을 캔버스/타임라인에 그린다 (부트 시 커서 통지가 아직 없다)
       orchestrator.refresh();
+
+      // 실행 기본값 (설정 화면 — localStorage) 적용 + 씬 수명 적용기 노출 (Phase 12 ⑨).
+      // 속도는 **엔진과 표시를 항상 함께** 맞춘다 — 한쪽만 바꾸면 select는 2×인데 실제
+      // 재생이 1×인 조용한 no-op이 된다(CLAUDE.md §6 "조용한 no-op 금지").
+      applyExecDefaultsToScene = (defaults) => {
+        orchestrator.setAutoPauseOnCollision(defaults.autoPauseOnCollision);
+        autoPauseCheckbox.checked = defaults.autoPauseOnCollision;
+        orchestrator.setSpeed(defaults.speedMult as EngineSpeed);
+        playbackBar.setSpeedDisplay(defaults.speedMult);
+      };
+      const bootExecDefaults = consoleRef?.execDefaults();
+      if (bootExecDefaults !== undefined) applyExecDefaultsToScene(bootExecDefaults);
 
       // 페인 표시 정책: 시퀀스 있는 씬 = 자동 표시, 없는 씬 = 숨김('플로우' 토글로 열기)
       setFlowPaneVisible(validSequence !== null);
@@ -3565,6 +3863,16 @@ async function boot(): Promise<void> {
 
     switching = true;
     try {
+      if (!opts.fromHistory) {
+        // 새 논리 씬 — 작업/공정 문서 컨텍스트와 표시명을 해제한다 (stale 컨텍스트로
+        // Ctrl+S가 엉뚱한 작업을 덮어쓰는 사고 방지). 문서 열기(콘솔 글루의 bridge.
+        // loadDocument)는 로드가 끝난 뒤 컨텍스트를 다시 세운다 — 순서가 계약이다.
+        consoleRef?.clearDocumentContext();
+        docLabelOverride = null;
+        // 시퀀스 버전 이력도 여기서만 비운다 — history.reset()과 같은 조건이다.
+        // Undo/Redo 복원(fromHistory)은 이력을 유지해야 [버전] 탭이 안전망으로 남는다.
+        sequenceVersions.clear();
+      }
       active?.dispose();
       active = null;
       active = await buildScene(validation.value, request.sequence);
@@ -3637,9 +3945,13 @@ async function boot(): Promise<void> {
         }
         return spec;
       },
-      // 저장은 **씬 + 시퀀스 봉투**로 나간다 (UX_AUDIT C-3)
+      // 저장은 **씬 + 시퀀스 봉투**로 나간다 (UX_AUDIT C-3).
+      // 작업/공정 문서가 열려 있으면 서버 저장이 우선한다 (Ctrl+S와 같은 라우팅)
       saveDocument: () => {
-        saveDocumentToFile();
+        void (async (): Promise<void> => {
+          const handled = await consoleRef?.saveActive();
+          if (handled !== true) saveDocumentToFile();
+        })();
       },
       onShowHelp: () => {
         helpSheet.open();
@@ -3711,6 +4023,12 @@ async function boot(): Promise<void> {
     },
     uniquify: (base) => active?.uniquifyId(base) ?? base,
     onImportRequest: () => importFileInput.click(),
+    // 재사용 블록 섹션 (Phase 12 ⑤) — 콘솔 글루가 목록/삽입을 소유한다.
+    // consoleRef는 부트 말미에 마운트되지만 provider는 렌더 시점에 호출되므로 안전.
+    blocksProvider: () => consoleRef?.libraryBlocks() ?? Promise.resolve([]),
+    onInsertBlock: (id) => {
+      consoleRef?.onLibraryInsertBlock(id);
+    },
   });
   // 좌 슬롯 세로 배분: 라이브러리(카드 그리드) 60 / 씬 아웃라이너 40.
   // 아웃라이너는 씬 빌드마다 재마운트되므로 배분은 슬롯 쪽에서 고정한다.
@@ -3925,7 +4243,7 @@ async function boot(): Promise<void> {
   });
 
   // ⚙ 플래너 설정 (커맨드바 우측) — 저장 시 localStorage 영속 + 서비스 재구성
-  mountPlannerSettings(commandBar.right, {
+  const plannerSettingsHandle = mountPlannerSettings(commandBar.right, {
     get: () => plannerConfig,
     set: (cfg) => {
       plannerConfig = cfg;
@@ -3997,6 +4315,125 @@ async function boot(): Promise<void> {
     });
     void banner;
   })();
+
+  // ── 콘솔 평면 (Phase 12 — 2평면 IA: 공정·작업·블록·장비·기록·설정) ──
+  //
+  // 스튜디오 위 전면 레이어로 마운트된다. 서버가 없으면 ApiClient가 로컬 모드로
+  // 판정하고 스튜디오가 첫 화면이 된다(기존 정적 배포/게이트 경로 무변경 — BACKEND §1).
+  // 스튜디오와의 결합은 StudioBridge 좁은 표면뿐이다 — 콘솔은 core/render를 모른다.
+  consoleRef = mountConsolePlane({
+    bridge: {
+      loadDocument: async ({ scene, sequence, label }) => {
+        // sequence는 "없음"이 null로 온다(TaskDoc.sequence). buildScene의 관문은
+        // `!== undefined`라서 null이 그대로 validateSequence로 들어가면 **새 작업을 만들
+        // 때마다** "시퀀스 검증 실패" 오류 토스트가 뜬다 — 경계에서 undefined로 정규화한다.
+        const result = await loadScene({ scene, sequence: sequence ?? undefined });
+        if (!result.ok) return { ok: false, errors: result.errors };
+        updateUrlSceneParam(null); // 문서는 딥링크 대상이 아니다 (?scene=은 프리셋 전용)
+        sceneControls.setCurrent(null);
+        docLabelOverride = label;
+        const scRef = getActiveScene();
+        if (scRef !== null) {
+          dirtyTracker.markSaved(scRef.editor.serialize(), scRef.validSequence ?? null);
+        }
+        setDocumentTitle(label, false);
+        appLog('info', `문서 로드: '${label}'`);
+        return { ok: true, errors: [] };
+      },
+      serializeScene: () => getActiveScene()?.editor.serialize() ?? null,
+      currentSequence: () => getActiveScene()?.validSequence ?? null,
+      currentRobotIds: () => {
+        const scRef = getActiveScene();
+        if (scRef === null) return [];
+        return scRef.editor.spec.entities.filter(isRobotSpec).map((e) => e.id);
+      },
+      insertSteps: (steps) => {
+        const scRef = getActiveScene();
+        if (scRef === null) return { ok: false, errors: ['활성 씬이 없습니다'] };
+        const spec = scRef.editor.spec;
+        const robots = spec.entities.filter(isRobotSpec).map((e) => e.id);
+        const baseRobot = scRef.validSequence?.robot ?? robots[0];
+        if (baseRobot === undefined) {
+          return {
+            ok: false,
+            errors: ['이 씬에는 로봇이 없습니다 — 블록을 삽입하려면 로봇을 먼저 추가하세요'],
+          };
+        }
+        const candidate: ControlSequence = {
+          id: 'block-insert',
+          robot: baseRobot,
+          steps: [...steps],
+        };
+        const validated = validateSequence(candidate, spec);
+        if (!validated.ok) return { ok: false, errors: validated.errors };
+        const applied = scRef.loadGeneratedSequence(validated.value, 'append');
+        if (!applied.ok) return { ok: false, errors: applied.errors ?? ['삽입 실패'] };
+        return { ok: true, errors: [] };
+      },
+      runFromNode: (nodeId) => {
+        orchestratorRunFromNode?.(nodeId);
+      },
+      sampleDocument: () => {
+        const entry = SCENE_REGISTRY[DEFAULT_SCENE_NAME];
+        return { scene: entry?.scene ?? null, sequence: entry?.sequence ?? null };
+      },
+      emptySceneSpec: (name) => ({
+        name,
+        version: 1,
+        gravity: [0, -9.81, 0],
+        timestepHz: 240,
+        environment: { ground: true, skyColor: '#1b1e23' },
+        camera: { position: [2.2, 1.8, 2.2], target: [0, 0.3, 0] },
+        entities: [],
+      }),
+      openPlannerSettings: () => {
+        plannerSettingsHandle.open();
+      },
+      plannerSummary: () => plannerService.backendName,
+      applyExecDefaults: (defaults) => {
+        applyExecDefaultsToScene?.(defaults);
+      },
+      exportCurrentDocument: () => {
+        saveDocumentToFile();
+      },
+      resetCamera: () => {
+        resetCameraView?.();
+      },
+      reloadLibraryBlocks: () => {
+        library.reloadBlocks();
+      },
+      setStudioInset: (px) => {
+        workspace.el.style.left = px > 0 ? `${px}px` : '0px';
+        workspace.notifyResize();
+      },
+      markSavedBaseline: (snapshot) => {
+        // 전송한 스냅샷이 있으면 그것이 기준선이다 — 저장 왕복(수백 ms) 중의 편집은
+        // 전송되지 않았으므로 dirty로 남아야 한다(그러지 않으면 조용히 유실된다).
+        if (snapshot !== undefined) {
+          dirtyTracker.markSaved(snapshot.scene, snapshot.sequence);
+          return;
+        }
+        const scRef = getActiveScene();
+        if (scRef !== null) {
+          dirtyTracker.markSaved(scRef.editor.serialize(), scRef.validSequence ?? null);
+        }
+      },
+    },
+    shortcuts: {
+      setEnabled: (enabled) => {
+        shortcuts.setEnabled(enabled);
+      },
+    },
+    appLog: (level, message) => {
+      appLog(level, message);
+    },
+  });
+  // 실행 기본값(설정 화면 localStorage)을 부트 씬에도 적용한다.
+  // (applyExecDefaultsToScene은 buildScene 클로저 안에서만 대입되어 CFA가 null로 좁힌다 —
+  //  getActiveScene과 같은 이유로 함수 간접 참조로 선언 타입으로 되돌려 읽는다.)
+  const getApplyExecDefaults = (): ((defaults: ExecDefaults) => void) | null =>
+    applyExecDefaultsToScene;
+  getApplyExecDefaults()?.(consoleRef.execDefaults());
 }
 
 boot().catch((err: unknown) => {

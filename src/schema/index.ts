@@ -5,3 +5,6 @@
 export * from './types';
 export * from './validate';
 export * from './flow-graph';
+// Phase 12+ — 협업 개체(공정/작업/블록/장비/실행기록) 계약 + 재사용 블록 캡처/전개
+export * from './entities';
+export * from './blocks';
