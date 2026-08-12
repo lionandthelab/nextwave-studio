@@ -31,12 +31,13 @@ import {
   SURFACE,
   TYPE,
   Z_INDEX,
+  applyType,
   ensureThemeStyles,
   styled,
   tr,
 } from '../theme';
 import { ensureConsoleStyles, makeEmptyState } from '../console/primitives';
-import { makeConnectionBadge } from './connection-badge';
+import { connectionBadgeShortKo, makeConnectionBadge } from './connection-badge';
 import { initialOf } from './login';
 import { CONSOLE_SCREEN_NAMES, isConsoleScreenName } from './router';
 import type { ConsoleScreenName, Route, RouteName, RouterHandle } from './router';
@@ -206,6 +207,7 @@ function ensureShellStyles(): void {
   white-space: nowrap;
 }
 .rsw-shell-rail--thin .rsw-shell-navbtn__label { display: none; }
+.rsw-shell-rail--thin .rsw-shell-badgecaption { display: none; }
 .rsw-shell-userchip__avatar {
   width: ${CHIP_AVATAR_PX}px;
   height: ${CHIP_AVATAR_PX}px;
@@ -219,8 +221,17 @@ function ensureShellStyles(): void {
 }
 .rsw-shell-badgewrap {
   display: flex;
+  flex-direction: column;
+  align-items: center;
   justify-content: center;
   padding-bottom: ${SPACE.sm};
+  min-width: 0;
+}
+/* 라우트 전환의 프로그램적 포커스는 링을 그리지 않는다 — 키보드 도달만 그린다 */
+.rsw-shell-focus-target:focus { outline: none; }
+.rsw-shell-focus-target:focus-visible {
+  outline: 2px solid var(--rsw-accent);
+  outline-offset: 2px;
 }
 @media (forced-colors: active) {
   .rsw-shell-rail { border-right-color: CanvasText; }
@@ -327,7 +338,29 @@ export function mountShell(host: HTMLElement, deps: ShellDeps): ShellHandle {
   badgeWrap.className = 'rsw-shell-badgewrap';
   const badge = makeConnectionBadge(deps.connection.getState(), { testid: 'shell-connection' });
   badgeWrap.appendChild(badge.el);
+  // 아이콘 아래 짧은 라벨 — 레일 버튼(아이콘+라벨)과 같은 규약. 얇은 레일에서는 숨긴다.
+  const badgeCaption = styled(document.createElement('div'), {
+    textAlign: 'center',
+    color: COLOR.muted,
+    marginTop: SPACE.xxs,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  });
+  applyType(badgeCaption, TYPE.micro);
+  badgeCaption.className = 'rsw-shell-badgecaption';
+  badgeCaption.dataset.testid = 'shell-connection-caption';
+  badgeCaption.setAttribute('aria-hidden', 'true'); // 배지가 이미 role=status로 읽는다
+  badgeWrap.appendChild(badgeCaption);
   bottomGroup.appendChild(badgeWrap);
+
+  /** 배지 아이콘과 캡션을 같은 상태로 맞춘다 (둘이 갈리면 무엇을 믿을지 알 수 없다) */
+  let badgePending = 0;
+  const paintBadge = (): void => {
+    const state = deps.connection.getState();
+    badge.setState(state);
+    badgeCaption.textContent = connectionBadgeShortKo(state, badgePending);
+  };
 
   host.appendChild(contentLayer);
   host.appendChild(rail);
@@ -381,11 +414,19 @@ export function mountShell(host: HTMLElement, deps: ShellDeps): ShellHandle {
     return entry;
   };
 
-  /** 화면 제목으로 포커스 이동 (data-screen-title → h1/h2 → 호스트 — WCAG 2.4.3) */
+  /**
+   * 화면 제목으로 포커스 이동 (data-screen-title → h1/h2 → 호스트 — WCAG 2.4.3).
+   *
+   * `preventScroll`과 `.rsw-shell-focus-target`이 함께 필요하다: 포커스는 **이동해야**
+   * 스크린리더가 새 화면을 읽지만, 마우스 사용자에게는 제목 주위에 전체 폭 테두리
+   * 상자가 그려져 "왜 여기가 선택됐지?"가 된다(실측 — 실행 기록 화면). 프로그램적
+   * 포커스에는 링을 그리지 않고, 키보드로 직접 도달했을 때(:focus-visible)만 그린다.
+   */
   const focusScreenTitle = (screenHost: HTMLElement): void => {
     const target = screenHost.querySelector<HTMLElement>('[data-screen-title], h1, h2') ?? screenHost;
     if (!target.hasAttribute('tabindex')) target.tabIndex = -1;
-    target.focus();
+    target.classList.add('rsw-shell-focus-target');
+    target.focus({ preventScroll: true });
   };
 
   // ── 라우트 반영 ───────────────────────────────────────────────────
@@ -437,8 +478,8 @@ export function mountShell(host: HTMLElement, deps: ShellDeps): ShellHandle {
   const unsubscribeRoute = deps.router.subscribe(applyRoute);
   applyRoute(deps.router.current());
 
-  const unsubscribeConnection = deps.connection.subscribe((state) => {
-    badge.setState(state);
+  const unsubscribeConnection = deps.connection.subscribe(() => {
+    paintBadge();
     // 서버가 늦게 나타나거나(로컬 → 서버) 사라지면 레일 표시가 따라와야 한다 —
     // 모드가 레일 가시성을 결정하므로 라우트를 다시 적용한다.
     applyRoute(deps.router.current());
@@ -447,12 +488,14 @@ export function mountShell(host: HTMLElement, deps: ShellDeps): ShellHandle {
   return {
     refresh: (): void => {
       syncUser();
-      badge.setState(deps.connection.getState());
+      paintBadge();
       const route = deps.router.current();
       if (isConsoleScreenName(route.name)) mounted.get(route.name)?.handle.refresh();
     },
     setPendingCount: (count: number): void => {
+      badgePending = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
       badge.setPendingCount(count);
+      paintBadge();
     },
     dispose: (): void => {
       unsubscribeRoute();

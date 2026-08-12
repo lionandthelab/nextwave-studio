@@ -45,6 +45,23 @@ export function connectionBadgeLabelKo(state: ConnectionState, pendingCount = 0)
   return pendingCount > 0 ? `${base} · 대기 ${pendingCount}건` : base;
 }
 
+/**
+ * 좁은 레일(72px)에 들어가는 짧은 라벨. 아이콘만 두면 초록 체크 하나가 남아
+ * **"연결됐다는 건지 저장됐다는 건지" 알 수 없다** — 작업이 서버에 올라갔는지가
+ * 현장에서 가장 중요한 정보라 두세 글자라도 말로 남긴다(전체 문구는 title에 유지).
+ */
+export function connectionBadgeShortKo(state: ConnectionState, pendingCount = 0): string {
+  if (pendingCount > 0) return `대기 ${pendingCount}`;
+  switch (connectionLabel(state)) {
+    case 'online':
+      return '연결됨';
+    case 'offline':
+      return '오프라인';
+    default:
+      return '로컬';
+  }
+}
+
 /** 대기 건수가 있으면 sync(재전송 예정), 아니면 상태 아이콘 */
 export function connectionBadgeIcon(state: ConnectionState, pendingCount = 0): IconName {
   if (pendingCount > 0) return 'sync';

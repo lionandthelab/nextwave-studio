@@ -302,6 +302,15 @@ export interface SceneControlsHandle {
   readonly helpButton: HTMLButtonElement | null;
   /** select 표시 동기화 — 프리셋 이름 또는 null(업로드 씬). 부트 초기화에 사용. */
   setCurrent(presetName: string | null): void;
+  /**
+   * 열려 있는 문서(작업/공정)를 상단에 명시한다 — null이면 프리셋/업로드 씬이다.
+   *
+   * 없을 때의 문제: 작업을 열어도 상단 select는 '업로드 씬'이라고만 말해 **지금 무엇을
+   * 편집 중인지 알 수 없었고**, 같은 💾 버튼이 문서 컨텍스트에 따라 서버 저장과 파일
+   * 저장으로 갈렸는데 라벨이 같아 어디로 저장되는지도 알 수 없었다. 여러 작업을 오가는
+   * 설치기사에게는 둘 다 사고로 이어진다.
+   */
+  setDocumentContext(label: string | null): void;
   /** 저장 상태 표시 (UX_DESIGN §7) — 통합자가 문서 변경/저장 시점에 호출한다 */
   setDirty(dirty: boolean): void;
   /** 인라인 오류 토스트 표시 (한국어) — 커맨드바 아래에 나타나고 자동/클릭으로 닫힌다 */
@@ -831,6 +840,47 @@ export function mountSceneControls(
   setCommandBarPriority(saveButton, COMMAND_BAR_PRIORITY.misc);
   fileGroup.appendChild(saveButton);
 
+  /**
+   * 열려 있는 문서 이름 — 프리셋 select 대신 무엇을 편집 중인지 말한다.
+   * 문서가 없으면(프리셋/업로드) 숨기고 select가 그 자리를 지킨다.
+   */
+  const docChip = styled(document.createElement('span'), {
+    display: 'none',
+    alignItems: 'center',
+    gap: SPACE.xs,
+    minWidth: '0',
+    maxWidth: '260px',
+    padding: `${SPACE.xxs} ${SPACE.sm}`,
+    borderRadius: RADIUS.sm,
+    background: COLOR.accentSoft,
+    color: COLOR.accentText,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    flexShrink: '1',
+  });
+  applyType(docChip, TYPE.bodyStrong);
+  docChip.dataset.testid = 'scene-doc-chip';
+  const docChipLabel = styled(document.createElement('span'), {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  });
+  docChip.append(icon('clipboard', ICON.sm), docChipLabel);
+  fileGroup.insertBefore(docChip, uploadButton);
+
+  /** 문서 컨텍스트 유무에 따라 칩·select 가시성과 저장 버튼 문구를 함께 맞춘다 */
+  const setDocumentContext = (label: string | null): void => {
+    const hasDoc = label !== null && label !== '';
+    docChip.style.display = hasDoc ? 'inline-flex' : 'none';
+    docChipLabel.textContent = hasDoc ? label : '';
+    docChip.title = hasDoc ? `열린 작업: ${label}` : '';
+    // 같은 버튼이 서버 저장과 파일 저장으로 갈린다 — 어디로 가는지 말해 준다
+    saveButton.title = hasDoc
+      ? `'${label}' 서버에 저장 (Ctrl+S)`
+      : '워크셀을 파일로 저장 (Ctrl+S)';
+    select.style.display = hasDoc ? 'none' : '';
+  };
+
   // 저장 상태 (UX_DESIGN §7) — 저장 버튼 옆 아이콘 + caption
   const dirtyIndicator = styled(document.createElement('span'), {
     display: 'inline-flex',
@@ -1050,6 +1100,7 @@ export function mountSceneControls(
     el: section,
     helpButton,
     setCurrent,
+    setDocumentContext,
     setDirty,
     showError,
     dispose: (): void => {

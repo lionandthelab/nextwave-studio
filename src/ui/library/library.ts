@@ -117,9 +117,17 @@ export interface LibraryHandle {
 // 패널 크롬은 한국어로 통일하되, 프리미티브 이름(Box/Sphere)은 3D 도메인 식별자라
 // 영문을 유지하고 한국어를 병기한다.
 
+/**
+ * 섹션 순서 — **로봇이 먼저다.**
+ *
+ * 사물(7종)을 앞에 두면 로봇 3종이 패널 밖으로 밀린다(실측: 1440×900에서 카드 10장 중
+ * 로봇 3장이 전부 잘림 — 패널 bottom 548px, 로봇 카드 y=547·617). 로봇 셀을 세우는
+ * 도구인데 **로봇이 화면에 하나도 없는** 상태로 첫 화면이 열렸고, 설치기사의 첫 행동이
+ * 정확히 "로봇 놓기"다. 스크롤하면 나오지만, 첫 화면에 없는 것은 없는 것이다.
+ */
 const SECTIONS: ReadonlyArray<{ readonly id: TemplateSection; readonly labelKo: string }> = [
-  { id: 'objects', labelKo: 'Objects · 사물' },
   { id: 'robots', labelKo: 'Robots · 로봇' },
+  { id: 'objects', labelKo: 'Objects · 사물' },
 ];
 
 /** 카드 그리드 최소 열 폭 (auto-fill) */

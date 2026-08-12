@@ -28,6 +28,7 @@ import {
   CONNECTION_LABEL_KO,
   connectionBadgeIcon,
   connectionBadgeLabelKo,
+  connectionBadgeShortKo,
   connectionBadgeStatus,
 } from './connection-badge';
 import {
@@ -141,6 +142,18 @@ describe('roleLabelKo', () => {
 // ── 연결 배지 매핑 ──────────────────────────────────────────────────
 
 describe('connection badge 매핑', () => {
+  it('좁은 레일용 짧은 라벨 — 아이콘만 남기지 않는다 (연결 여부가 현장의 핵심 정보)', () => {
+    expect(connectionBadgeShortKo(ONLINE)).toBe('연결됨');
+    expect(connectionBadgeShortKo(OFFLINE)).toBe('오프라인');
+    expect(connectionBadgeShortKo(LOCAL)).toBe('로컬');
+  });
+
+  it('대기 건수가 있으면 상태보다 건수를 앞세운다 (아직 안 올라간 작업이 있다)', () => {
+    expect(connectionBadgeShortKo(OFFLINE, 3)).toBe('대기 3');
+    expect(connectionBadgeShortKo(ONLINE, 1)).toBe('대기 1');
+    expect(connectionBadgeShortKo(ONLINE, 0)).toBe('연결됨');
+  });
+
   it('3상태 라벨이 계약과 일치한다', () => {
     expect(connectionBadgeLabelKo(ONLINE)).toBe('서버 연결됨');
     expect(connectionBadgeLabelKo(OFFLINE)).toBe('오프라인 — 로컬 저장 중');

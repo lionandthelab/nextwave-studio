@@ -3869,6 +3869,7 @@ async function boot(): Promise<void> {
         // loadDocument)는 로드가 끝난 뒤 컨텍스트를 다시 세운다 — 순서가 계약이다.
         consoleRef?.clearDocumentContext();
         docLabelOverride = null;
+        sceneControls.setDocumentContext(null); // 프리셋/업로드로 돌아왔다 — select가 다시 진실
         // 시퀀스 버전 이력도 여기서만 비운다 — history.reset()과 같은 조건이다.
         // Undo/Redo 복원(fromHistory)은 이력을 유지해야 [버전] 탭이 안전망으로 남는다.
         sequenceVersions.clear();
@@ -4331,6 +4332,8 @@ async function boot(): Promise<void> {
         if (!result.ok) return { ok: false, errors: result.errors };
         updateUrlSceneParam(null); // 문서는 딥링크 대상이 아니다 (?scene=은 프리셋 전용)
         sceneControls.setCurrent(null);
+        // 상단이 "지금 무엇을 편집 중인지"와 "저장이 어디로 가는지"를 말한다
+        sceneControls.setDocumentContext(label);
         docLabelOverride = label;
         const scRef = getActiveScene();
         if (scRef !== null) {
